@@ -614,6 +614,7 @@ fn inflate_spelling_issues_inner(
                 issue.found = s.to_string();
             }
             issue.suggestions = db.spelling_suggestions[idx].clone();
+            issue.refresh_suggested_rewrite();
             issue.editorial_confidence = db.spelling_editorial_confidence[idx];
             if !offset_only {
                 issue.context.clone_from(&db.spelling_contexts[idx]);

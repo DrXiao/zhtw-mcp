@@ -762,9 +762,12 @@ fn apply_disambiguation(issue: &mut Issue, matched_term: &Option<String>, detail
     issue.llm_judged = true;
     if let Some(term) = matched_term {
         if let Some(pos) = issue.suggestions.iter().position(|s| s == term) {
-            let mut sugs = issue.suggestions.to_vec();
-            sugs.swap(0, pos);
-            issue.suggestions = sugs.into();
+            if pos != 0 {
+                let mut sugs = issue.suggestions.to_vec();
+                sugs.swap(0, pos);
+                issue.suggestions = sugs.into();
+            }
+            issue.refresh_suggested_rewrite();
         }
         issue.context = Some(format!("LLM disambiguation: '{term}' ({detail})").into());
     } else {
@@ -1082,6 +1085,23 @@ mod tests {
         let suggestions = vec!["".into(), "軟體".into()];
         // Empty string should NOT match even via exact-match path.
         assert_eq!(find_matching_suggestion("", &suggestions), None);
+    }
+
+    #[test]
+    fn llm_promotion_refreshes_translationese_rewrite() {
+        let mut issue = Issue::new(
+            0,
+            "冗長".len(),
+            "冗長",
+            vec!["短句".to_string(), "精簡".to_string()],
+            IssueType::Translationese,
+            Severity::Warning,
+        );
+
+        apply_disambiguation(&mut issue, &Some("精簡".to_string()), "test");
+
+        assert_eq!(issue.suggestions.as_ref(), ["精簡", "短句"]);
+        assert_eq!(issue.suggested_rewrite.as_deref(), Some("精簡"));
     }
 
     #[test]

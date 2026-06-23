@@ -264,6 +264,18 @@
       "context": "AI filler phrase; delete"
     },
     {
+      "from": "不言而喻",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: unsupported obviousness marker; explain or delete"
+    },
+    {
+      "from": "世界和平作出更大貢獻",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: slogan-like sublimating ending; replace with a concrete claim"
+    },
+    {
       "from": "並口",
       "to": ["平行埠"],
       "type": "cross_strait",
@@ -536,6 +548,12 @@
       "context": "@domain IT",
       "english": "switch",
       "context_clues": ["網路", "路由", "封包", "VLAN"]
+    },
+    {
+      "from": "交織",
+      "to": ["互相影響"],
+      "type": "ai_filler",
+      "context": "writing humanizer: abstract weaving metaphor; name the relation"
     },
     {
       "from": "亭式車站",
@@ -888,6 +906,12 @@
       "context": "@domain IT",
       "english": "portable edition",
       "context_clues": ["程式", "軟體", "系統", "電腦", "網路"]
+    },
+    {
+      "from": "促進",
+      "to": ["推動"],
+      "type": "ai_filler",
+      "context": "writing humanizer: generic promotion verb; name the concrete mechanism"
     },
     {
       "from": "保修",
@@ -1361,6 +1385,12 @@
       "type": "cross_strait",
       "context": "@domain 日常",
       "english": "top-up/recharge"
+    },
+    {
+      "from": "充滿活力",
+      "to": ["活絡"],
+      "type": "ai_filler",
+      "context": "writing humanizer: stock vitality phrase; replace with observable evidence"
     },
     {
       "from": "充電寶",
@@ -3280,6 +3310,13 @@
       "context": "AI hedging phrase (在某種程度上); delete or be specific"
     },
     {
+      "from": "在當今",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: era-framing opener; delete unless the era is specific",
+      "context_clues": ["時代"]
+    },
+    {
       "from": "在線",
       "to": ["線上"],
       "type": "cross_strait",
@@ -3405,6 +3442,12 @@
       "type": "cross_strait",
       "context": "@domain 教育",
       "english": "training"
+    },
+    {
+      "from": "培養",
+      "to": ["養成"],
+      "type": "ai_filler",
+      "context": "writing humanizer: generic nurture verb; name the concrete practice"
     },
     {
       "from": "基向量",
@@ -3551,6 +3594,12 @@
       "context": "@domain 程式設計",
       "english": "increment operator",
       "context_clues": ["運算", "表達式", "運算子", "C++", "編譯", "程式", "語法"]
+    },
+    {
+      "from": "增強",
+      "to": ["加強", "提高"],
+      "type": "ai_filler",
+      "context": "writing humanizer: generic uplift verb; use the concrete action"
     },
     {
       "from": "增強現實",
@@ -4256,6 +4305,12 @@
       "type": "cross_strait",
       "context": "@domain 日常",
       "english": "reassurance"
+    },
+    {
+      "from": "寶貴的",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: generic praise adjective; delete or specify the value"
     },
     {
       "from": "封禁",
@@ -5251,6 +5306,13 @@
       "english": "data member"
     },
     {
+      "from": "我們就能明白",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: explanatory throat-clearing; state the inference directly",
+      "context_clues": ["理解了"]
+    },
+    {
       "from": "截取",
       "to": ["擷取"],
       "type": "cross_strait",
@@ -5476,6 +5538,12 @@
       "english": "persistence"
     },
     {
+      "from": "持久的",
+      "to": ["長久的"],
+      "type": "ai_filler",
+      "context": "writing humanizer: inflated adjective; prefer a concrete modifier"
+    },
+    {
       "from": "持續集成",
       "to": ["持續整合"],
       "type": "cross_strait",
@@ -5569,6 +5637,12 @@
       "english": "family-visit leave"
     },
     {
+      "from": "接下來我們來看",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: classroom-style transition; use a direct transition"
+    },
+    {
       "from": "接入覆用器",
       "to": ["接取多工器"],
       "type": "cross_strait",
@@ -5641,6 +5715,12 @@
       "to": ["預告"],
       "type": "translationese",
       "context": "dewesternise.S1: semantic overlap"
+    },
+    {
+      "from": "提升",
+      "to": ["提高", "改善"],
+      "type": "ai_filler",
+      "context": "writing humanizer: generic uplift verb; use the concrete action"
     },
     {
       "from": "插件",
@@ -6545,6 +6625,12 @@
       "english": "localization (L10N)"
     },
     {
+      "from": "本文將",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: meta-discourse; start with the actual claim"
+    },
+    {
       "from": "本科",
       "to": ["大學部"],
       "type": "cross_strait",
@@ -6558,6 +6644,12 @@
       "type": "cross_strait",
       "context": "@domain 教育",
       "english": "undergraduate student"
+    },
+    {
+      "from": "本節將",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: meta-discourse; start with the actual claim"
     },
     {
       "from": "東盟",
@@ -7066,6 +7158,12 @@
       "english": "normal distribution"
     },
     {
+      "from": "此外",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: overused connective; delete or replace with a concrete transition"
+    },
+    {
       "from": "步行街",
       "to": ["行人徒步區"],
       "type": "cross_strait",
@@ -7078,6 +7176,12 @@
       "type": "cross_strait",
       "context": "@domain 日常",
       "english": "walkie-talkie"
+    },
+    {
+      "from": "歷史將會記住",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: grandiose ending; replace with evidence"
     },
     {
       "from": "歸一化",
@@ -7239,6 +7343,12 @@
       "type": "cross_strait",
       "context": "@domain 日常",
       "english": "cement"
+    },
+    {
+      "from": "永恆的",
+      "to": ["長久的"],
+      "type": "ai_filler",
+      "context": "writing humanizer: inflated adjective; prefer a concrete modifier"
     },
     {
       "from": "污",
@@ -7477,6 +7587,12 @@
       "context": "@domain IT",
       "english": "message queue",
       "context_clues": ["MQ", "Kafka", "非同步", "佇列"]
+    },
+    {
+      "from": "涵養",
+      "to": ["養成"],
+      "type": "ai_filler",
+      "context": "writing humanizer: inflated nurture verb; name the concrete practice"
     },
     {
       "from": "涼菜",
@@ -7784,6 +7900,18 @@
       "english": "shameless"
     },
     {
+      "from": "無縫",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: product-copy cliche; state the concrete integration"
+    },
+    {
+      "from": "無縫銜接",
+      "to": ["銜接"],
+      "type": "ai_filler",
+      "context": "writing humanizer: product-copy cliche; state what connects"
+    },
+    {
       "from": "無繩電話",
       "to": ["無線電話"],
       "type": "cross_strait",
@@ -8066,6 +8194,13 @@
       "english": "reality is harsh"
     },
     {
+      "from": "理解了",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: explanatory throat-clearing; state the inference directly",
+      "context_clues": ["我們就能明白"]
+    },
+    {
       "from": "瑙魯",
       "to": ["諾魯"],
       "type": "cross_strait",
@@ -8188,6 +8323,12 @@
       "type": "cross_strait",
       "context": "@domain 日常",
       "english": "guava"
+    },
+    {
+      "from": "畫卷",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: ornate stock metaphor; delete or use a concrete noun"
     },
     {
       "from": "異常",
@@ -8442,6 +8583,12 @@
       "context": "dewesternise.S1: semantic overlap"
     },
     {
+      "from": "相互作用",
+      "to": ["互相影響"],
+      "type": "ai_filler",
+      "context": "writing humanizer: abstract interaction phrase; name the causal direction"
+    },
+    {
       "from": "相冊",
       "to": ["相簿"],
       "type": "cross_strait",
@@ -8477,6 +8624,12 @@
       "context": "@domain 醫學",
       "english": "true negative",
       "context_clues": ["檢驗", "篩檢", "診斷", "測試"]
+    },
+    {
+      "from": "眾所周知",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: unsupported common-knowledge marker; cite or delete"
     },
     {
       "from": "着",
@@ -9589,6 +9742,12 @@
       "type": "cross_strait",
       "context": "@domain 日常",
       "english": "can't hold it in"
+    },
+    {
+      "from": "織錦",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: ornate stock metaphor; delete or use a concrete noun"
     },
     {
       "from": "繮",
@@ -11026,6 +11185,12 @@
       "context": "humanize.M1: chatbot opener; delete"
     },
     {
+      "from": "讓我們都能",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: sublimating ending; replace with a concrete conclusion"
+    },
+    {
       "from": "豐富的文化底蘊",
       "to": [],
       "type": "ai_filler",
@@ -11104,6 +11269,12 @@
       "type": "cross_strait",
       "context": "@domain 日常",
       "english": "wholesale size"
+    },
+    {
+      "from": "賦予力量",
+      "to": ["支持"],
+      "type": "ai_filler",
+      "context": "writing humanizer: empowerment calque; name the concrete support"
     },
     {
       "from": "賦值",
@@ -11942,6 +12113,12 @@
       "english": "record (video)"
     },
     {
+      "from": "錯綜複雜",
+      "to": ["複雜"],
+      "type": "ai_filler",
+      "context": "writing humanizer: inflated complexity phrase; specify the conflict"
+    },
+    {
       "from": "錯誤信息",
       "to": ["錯誤訊息"],
       "type": "cross_strait",
@@ -12201,6 +12378,13 @@
       "context": "@domain IT",
       "english": "random number",
       "context_clues": ["程式", "軟體", "系統", "電腦", "網路"]
+    },
+    {
+      "from": "隨著",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: boilerplate development opener; rewrite as the actual cause",
+      "context_clues": ["快速發展"]
     },
     {
       "from": "隱式語義索引",
@@ -12640,6 +12824,12 @@
       "type": "cross_strait",
       "context": "@domain 通訊",
       "english": "frequency-division multiplexing (FDM)"
+    },
+    {
+      "from": "願我們",
+      "to": [""],
+      "type": "ai_filler",
+      "context": "writing humanizer: sublimating ending; replace with a concrete conclusion"
     },
     {
       "from": "顛覆性變革",
