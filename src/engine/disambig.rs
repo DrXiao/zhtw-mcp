@@ -905,6 +905,7 @@ fn promote_suggestion(issue: &mut Issue, term: &str) {
             sugs.swap(0, pos);
             issue.suggestions = sugs.into();
         }
+        issue.refresh_suggested_rewrite();
     }
 }
 
@@ -1277,6 +1278,27 @@ mod tests {
         assert_eq!(stats.not_eligible, 1); // punctuation
                                            // 令牌: no collocations, no clues, no Base prior → suppressed
         assert_eq!(stats.suppressed, 1);
+    }
+
+    #[test]
+    fn promotion_refreshes_translationese_rewrite() {
+        let mut issue = Issue::new(
+            0,
+            "冗長".len(),
+            "冗長",
+            vec!["短句".to_string(), "精簡".to_string()],
+            IssueType::Translationese,
+            Severity::Warning,
+        );
+
+        promote_suggestion(&mut issue, "精簡");
+
+        assert_eq!(issue.suggestions.as_ref(), ["精簡", "短句"]);
+        assert_eq!(issue.suggested_rewrite.as_deref(), Some("精簡"));
+
+        issue.suggested_rewrite = Some("短句".to_string());
+        promote_suggestion(&mut issue, "精簡");
+        assert_eq!(issue.suggested_rewrite.as_deref(), Some("精簡"));
     }
 
     #[test]

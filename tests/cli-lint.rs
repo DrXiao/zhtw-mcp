@@ -1090,3 +1090,116 @@ fn cli_lint_detect_style_uses_post_fix_text_length() {
         "scorecard must use post-fix text length; expected {expected}, got {got}, stdout={stdout}"
     );
 }
+
+#[test]
+fn cli_lint_translationese_suggested_rewrite_serialized() {
+    let output = run_lint_stdin(
+        &["--detect-translationese", "--format", "json"],
+        "大家需要互相合作，也要仔細的看文件。",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("translationese JSON output");
+    let issues = json["issues"].as_array().expect("issues array");
+    let semantic_overlap = issues
+        .iter()
+        .find(|i| i["found"] == "互相合作")
+        .expect("deferred translationese issue present");
+    assert_eq!(semantic_overlap["suggested_rewrite"], "合作");
+    let particle_mixup = issues
+        .iter()
+        .find(|i| i["found"] == "仔細的看")
+        .expect("direct translationese issue present");
+    assert_eq!(particle_mixup["suggested_rewrite"], "仔細地看");
+}
+
+#[test]
+fn cli_lint_writing_humanizer_watchlist_comprehensive() {
+    let text = "此外，持久的制度與永恆的價值會增強信任並提升效率。\
+        我們要培養能力、促進合作、涵養精神，留下寶貴的經驗。\
+        這是一個充滿活力的場域，呈現相互作用與交織的關係。\
+        系統追求無縫整合與無縫銜接，卻形成錯綜複雜的織錦與畫卷。\
+        這些安排可以賦予力量。\
+        在當今數位治理的時代，隨著產業的快速發展，眾所周知，不言而喻，本文將說明背景，本節將補充案例。\
+        接下來我們來看，理解了這些資料我們就能明白。願我們持續努力，讓我們都能前進，歷史將會記住，世界和平作出更大貢獻。";
+    let output = run_lint_stdin(&["--detect-ai", "--format", "json"], text);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("AI JSON output");
+    let found: std::collections::HashSet<_> = json["issues"]
+        .as_array()
+        .expect("issues array")
+        .iter()
+        .filter(|i| i["rule_type"] == "ai_style")
+        .filter_map(|i| i["found"].as_str())
+        .collect();
+    for expected in [
+        "此外",
+        "持久的",
+        "永恆的",
+        "增強",
+        "提升",
+        "培養",
+        "促進",
+        "涵養",
+        "寶貴的",
+        "充滿活力",
+        "相互作用",
+        "交織",
+        "無縫",
+        "無縫銜接",
+        "錯綜複雜",
+        "賦予力量",
+        "織錦",
+        "畫卷",
+        "在當今",
+        "隨著",
+        "眾所周知",
+        "不言而喻",
+        "本文將",
+        "本節將",
+        "接下來我們來看",
+        "理解了",
+        "我們就能明白",
+        "願我們",
+        "讓我們都能",
+        "歷史將會記住",
+        "世界和平作出更大貢獻",
+    ] {
+        assert!(
+            found.contains(expected),
+            "missing {expected}; found={found:?}; stdout={stdout}"
+        );
+    }
+}
+
+#[test]
+fn cli_lint_translationese_technical_gate_low_false_positive_rate() {
+    let clean_technical = "本工具使用有限狀態掃描器處理繁體中文文件。\
+        規則資料在建置階段編譯，執行時直接載入快取。\
+        命令列介面支援 JSON 輸出、Markdown 排除區段、術語表與基準檔。\
+        測試資料涵蓋標點、詞彙、文法、表格欄位與快取命中路徑。\
+        技術文件可指定 technical profile，讓校準門檻符合規格文件的語氣。";
+    let output = run_lint_stdin(
+        &[
+            "--detect-translationese",
+            "--translationese-domain",
+            "technical",
+            "--format",
+            "json",
+        ],
+        clean_technical,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("technical translationese JSON output");
+    let translationese_count = json["issues"]
+        .as_array()
+        .expect("issues array")
+        .iter()
+        .filter(|i| i["rule_type"] == "translationese")
+        .count();
+    assert!(
+        translationese_count <= 1,
+        "technical clean-text gate allows <=1 FP per short fixture: {stdout}"
+    );
+}

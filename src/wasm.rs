@@ -45,6 +45,8 @@ struct BrowserIssue {
     col: usize,
     found: String,
     suggestions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suggested_rewrite: Option<String>,
     rule_type: String,
     severity: String,
     context: Option<String>,
@@ -128,6 +130,7 @@ impl From<&Issue> for BrowserIssue {
             col: issue.col,
             found: issue.found.clone(),
             suggestions: issue.suggestions.iter().cloned().collect(),
+            suggested_rewrite: issue.suggested_rewrite.clone(),
             rule_type: issue.rule_type.name().to_owned(),
             severity: issue.severity.name().to_owned(),
             context: issue.context.as_ref().map(ToString::to_string),

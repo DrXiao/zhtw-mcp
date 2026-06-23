@@ -2214,15 +2214,28 @@ fn scan_ai_formulaic_section_endings(
     issues: &mut Vec<Issue>,
     idx: &crate::engine::sentence::BoundaryIndex,
 ) {
-    const FORMULAIC_ENDINGS: &[&str] = &["展望未來", "拭目以待", "值得期待", "我們有理由相信"];
+    const FORMULAIC_ENDINGS: &[&str] = &[
+        "展望未來",
+        "拭目以待",
+        "值得期待",
+        "我們有理由相信",
+        "具有重要意義",
+        "具有重要戰略意義",
+    ];
+    const FORMULAIC_PAIRS: &[(&str, &str)] = &[
+        ("奠定", "理論基礎"),
+        ("提供", "重要框架"),
+        ("發揮", "關鍵作用"),
+        ("印證", "重要性"),
+    ];
     // Regex-like patterns: 隨著.*不斷發展 — handled with substring checks.
     for para in &idx.paragraphs {
         let sents = idx.sentences_in_paragraph(para);
-        if let Some(last) = sents.last() {
-            let s = &text[last.byte_start..last.byte_end];
+        for sent in sents {
+            let s = &text[sent.byte_start..sent.byte_end];
             for &phrase in FORMULAIC_ENDINGS {
                 if let Some(pos) = s.find(phrase) {
-                    let abs = last.byte_start + pos;
+                    let abs = sent.byte_start + pos;
                     if !is_excluded(abs, abs + phrase.len(), excluded) {
                         issues.push(
                             Issue::new(
@@ -2233,8 +2246,30 @@ fn scan_ai_formulaic_section_endings(
                                 IssueType::AiStyle,
                                 Severity::Info,
                             )
-                            .with_context("AI structural: 段落結尾公式化用語，常見於 AI 生成文本"),
+                            .with_context("AI structural: 公式化用語，常見於 AI 生成文本"),
                         );
+                    }
+                }
+            }
+            for &(start_phrase, end_phrase) in FORMULAIC_PAIRS {
+                if let Some(start) = s.find(start_phrase) {
+                    if let Some(end_pos) = s[start + start_phrase.len()..].find(end_phrase) {
+                        let end = start + start_phrase.len() + end_pos + end_phrase.len();
+                        let abs = sent.byte_start + start;
+                        let abs_end = sent.byte_start + end;
+                        if !is_excluded(abs, abs_end, excluded) {
+                            issues.push(
+                                Issue::new(
+                                    abs,
+                                    abs_end - abs,
+                                    &text[abs..abs_end],
+                                    vec![],
+                                    IssueType::AiStyle,
+                                    Severity::Info,
+                                )
+                                .with_context("AI structural: 意義蓋章式收尾，常見於 AI 生成文本"),
+                            );
+                        }
                     }
                 }
             }
@@ -2248,8 +2283,8 @@ fn scan_ai_formulaic_section_endings(
                         usize::MAX // skip — pattern out of order
                     };
                     if gap_chars <= 40 {
-                        let abs = last.byte_start + start;
-                        let abs_end = last.byte_start + end_pos + "不斷發展".len();
+                        let abs = sent.byte_start + start;
+                        let abs_end = sent.byte_start + end_pos + "不斷發展".len();
                         if !is_excluded(abs, abs_end, excluded) {
                             issues.push(
                                 Issue::new(
@@ -2260,7 +2295,7 @@ fn scan_ai_formulaic_section_endings(
                                     IssueType::AiStyle,
                                     Severity::Info,
                                 )
-                                .with_context("AI structural: 段落結尾公式化用語（隨著…不斷發展）"),
+                                .with_context("AI structural: 公式化用語（隨著…不斷發展）"),
                             );
                         }
                     }
@@ -2280,6 +2315,7 @@ fn scan_ai_mechanical_bullets(
     // Scan for Markdown list items where every item starts with **bold**.
     let mut list_start: Option<usize> = None;
     let mut bold_count = 0;
+    let mut four_char_label_count = 0;
     let mut item_count = 0;
     let mut first_item_offset = 0;
 
@@ -2294,8 +2330,10 @@ fn scan_ai_mechanical_bullets(
         if is_list_item {
             if list_start.is_none() {
                 list_start = Some(line_offset);
-                first_item_offset = line_offset;
+                // Point at the list marker itself, not the leading indentation.
+                first_item_offset = line_offset + (line.len() - trimmed.len());
                 bold_count = 0;
+                four_char_label_count = 0;
                 item_count = 0;
             }
             item_count += 1;
@@ -2309,53 +2347,84 @@ fn scan_ai_mechanical_bullets(
             };
             if content.starts_with("**") {
                 bold_count += 1;
+                if bold_label_is_four_chars_before_colon(content) {
+                    four_char_label_count += 1;
+                }
             }
         } else if list_start.is_some() {
             // End of list.
-            if item_count >= 3
-                && bold_count == item_count
-                && !is_excluded(first_item_offset, first_item_offset + 1, excluded)
-            {
-                issues.push(
-                    Issue::new(
-                        first_item_offset,
-                        1,
-                        "-",
-                        vec![],
-                        IssueType::AiStyle,
-                        Severity::Info,
-                    )
-                    .with_context(format!(
-                        "AI structural: 機械式列表 — {item_count} 項全部以粗體關鍵字開頭"
-                    )),
-                );
-            }
+            emit_ai_mechanical_bullet_issue(
+                text,
+                first_item_offset,
+                item_count,
+                bold_count,
+                four_char_label_count,
+                excluded,
+                issues,
+            );
             list_start = None;
         }
     }
     // Flush trailing list.
-    if list_start.is_some()
-        && item_count >= 3
-        && bold_count == item_count
-        && !is_excluded(first_item_offset, first_item_offset + 1, excluded)
-    {
-        issues.push(
-            Issue::new(
-                first_item_offset,
-                1,
-                "-",
-                vec![],
-                IssueType::AiStyle,
-                Severity::Info,
-            )
-            .with_context(format!(
-                "AI structural: 機械式列表 — {item_count} 項全部以粗體關鍵字開頭"
-            )),
+    if list_start.is_some() {
+        emit_ai_mechanical_bullet_issue(
+            text,
+            first_item_offset,
+            item_count,
+            bold_count,
+            four_char_label_count,
+            excluded,
+            issues,
         );
     }
 }
 
 // S5: excessive bold — ≥3 **...** runs per 200 chars in a paragraph.
+fn emit_ai_mechanical_bullet_issue(
+    text: &str,
+    first_item_offset: usize,
+    item_count: usize,
+    bold_count: usize,
+    four_char_label_count: usize,
+    excluded: &[ByteRange],
+    issues: &mut Vec<Issue>,
+) {
+    if item_count < 3 || is_excluded(first_item_offset, first_item_offset + 1, excluded) {
+        return;
+    }
+    let context = if four_char_label_count == item_count {
+        format!("AI structural: 四字標籤式列表 — {item_count} 項全部以四字粗體標籤加冒號開頭")
+    } else if bold_count == item_count {
+        format!("AI structural: 機械式列表 — {item_count} 項全部以粗體關鍵字開頭")
+    } else {
+        return;
+    };
+    // List markers (- * digit) are ASCII, so first_item_offset + 1 is a char boundary.
+    let marker = &text[first_item_offset..first_item_offset + 1];
+    issues.push(
+        Issue::new(
+            first_item_offset,
+            1,
+            marker,
+            vec![],
+            IssueType::AiStyle,
+            Severity::Info,
+        )
+        .with_context(context),
+    );
+}
+
+fn bold_label_is_four_chars_before_colon(content: &str) -> bool {
+    let Some(rest) = content.strip_prefix("**") else {
+        return false;
+    };
+    let Some(close) = rest.find("**") else {
+        return false;
+    };
+    let label = &rest[..close];
+    label.chars().count() == 4 && rest[close + 2..].trim_start().starts_with(['：', ':'])
+}
+
 fn count_non_excluded_bold_runs(text: &str, base_offset: usize, excluded: &[ByteRange]) -> usize {
     text.match_indices("**")
         .filter(|(offset, marker)| {
@@ -2372,6 +2441,26 @@ fn scan_ai_excessive_bold(
     issues: &mut Vec<Issue>,
     idx: &crate::engine::sentence::BoundaryIndex,
 ) {
+    for sent in &idx.sentences {
+        let s = &text[sent.byte_start..sent.byte_end];
+        let bold_count = count_non_excluded_bold_runs(s, sent.byte_start, excluded);
+        if (2..=4).contains(&bold_count) && !is_excluded(sent.byte_start, sent.byte_end, excluded) {
+            let preview_end = char_bounded_end(s, 0, 2);
+            issues.push(
+                Issue::new(
+                    sent.byte_start,
+                    preview_end,
+                    &s[..preview_end],
+                    vec![],
+                    IssueType::AiStyle,
+                    Severity::Info,
+                )
+                .with_context(format!(
+                    "AI structural: 句內關鍵詞粗體排比 — 單句內 {bold_count} 處粗體"
+                )),
+            );
+        }
+    }
     for para in &idx.paragraphs {
         let p = &text[para.byte_start..para.byte_end];
         let char_count = p.chars().count();
@@ -2403,6 +2492,142 @@ fn scan_ai_excessive_bold(
             );
         }
     }
+}
+
+fn scan_ai_abstract_line_metaphor(
+    text: &str,
+    excluded: &[ByteRange],
+    issues: &mut Vec<Issue>,
+    idx: &crate::engine::sentence::BoundaryIndex,
+) {
+    const ABSTRACT_TERMS: &[&str] = &["一條線", "路線", "軸線", "脈絡", "橋"];
+    const GROWTH_VERBS: &[&str] = &["走出來", "長出來", "鋪出來", "延伸", "串起來", "拓寬"];
+
+    // Scope per-paragraph so an abstract term in one section can't correlate
+    // with anaphora in an unrelated one.
+    for para in &idx.paragraphs {
+        let p = &text[para.byte_start..para.byte_end];
+        let Some((first_term, matched_term)) =
+            first_non_excluded_any(p, para.byte_start, ABSTRACT_TERMS, excluded)
+        else {
+            continue;
+        };
+        // "這條路線" contains "這條路" as a prefix; count it once, not twice.
+        let line = count_non_excluded_matches(p, para.byte_start, "這條線", excluded).0;
+        let road_line = count_non_excluded_matches(p, para.byte_start, "這條路線", excluded).0;
+        let road = count_non_excluded_matches(p, para.byte_start, "這條路", excluded).0;
+        let anaphora_count = line + road_line + road.saturating_sub(road_line);
+        if anaphora_count < 2
+            || first_non_excluded_any(p, para.byte_start, GROWTH_VERBS, excluded).is_none()
+        {
+            continue;
+        }
+
+        issues.push(
+            Issue::new(
+                first_term,
+                matched_term.len(),
+                matched_term,
+                vec![],
+                IssueType::AiStyle,
+                Severity::Info,
+            )
+            .with_context(format!(
+                "AI structural: 抽象概念具象成路線並反覆回指 — 回指出現 {anaphora_count} 次"
+            )),
+        );
+    }
+}
+
+fn scan_ai_repeated_parallel_slogan(
+    text: &str,
+    excluded: &[ByteRange],
+    issues: &mut Vec<Issue>,
+    idx: &crate::engine::sentence::BoundaryIndex,
+) {
+    // (slogan text, first byte offset, first paragraph index, emitted).
+    let mut seen: Vec<(String, usize, usize, bool)> = Vec::new();
+    for (para_idx, para) in idx.paragraphs.iter().enumerate() {
+        for sent in idx.sentences_in_paragraph(para) {
+            if is_excluded(sent.byte_start, sent.byte_end, excluded) {
+                continue;
+            }
+            let raw = &text[sent.byte_start..sent.byte_end];
+            let s = raw.trim();
+            if !looks_like_parallel_slogan(s) {
+                continue;
+            }
+            // Offset of the slogan itself, past any leading whitespace/newline.
+            let slogan_start = sent.byte_start + (raw.len() - raw.trim_start().len());
+            if let Some((_, first_offset, first_para, emitted)) =
+                seen.iter_mut().find(|(prior, _, _, _)| prior == s)
+            {
+                // Only a slogan repeated across paragraphs is "金句疊句"; the same
+                // parallel sentence repeated within one paragraph is ordinary 排比.
+                if *first_para != para_idx && !*emitted {
+                    let offset = *first_offset;
+                    let len = char_bounded_end(&text[offset..], 0, 8);
+                    issues.push(
+                        Issue::new(
+                            offset,
+                            len,
+                            &text[offset..offset + len],
+                            vec![],
+                            IssueType::AiStyle,
+                            Severity::Info,
+                        )
+                        .with_context("AI structural: 金句疊句 — 對仗句跨段重複出現"),
+                    );
+                    *emitted = true;
+                }
+            } else {
+                seen.push((s.to_string(), slogan_start, para_idx, false));
+            }
+        }
+    }
+}
+
+fn looks_like_parallel_slogan(sentence: &str) -> bool {
+    let s = sentence
+        .trim_end_matches(['。', '！', '？', '!', '?'])
+        .trim();
+    let char_count = s.chars().count();
+    if !(8..=80).contains(&char_count) {
+        return false;
+    }
+    if (s.contains("不是") && s.contains("而是"))
+        || (s.contains("不只") && (s.contains("更是") || s.contains("也是")))
+        || (s.contains('越') && s.matches('越').count() >= 2)
+    {
+        return true;
+    }
+    // Semicolon is the stronger parallel boundary; split on it before comma.
+    let Some((left, right)) = s
+        .split_once('；')
+        .or_else(|| s.split_once('，'))
+        .or_else(|| s.split_once(','))
+    else {
+        return false;
+    };
+    let left_len = left.chars().count();
+    let right_len = right.chars().count();
+    left_len >= 3 && right_len >= 3 && left_len.abs_diff(right_len) <= 8
+}
+
+fn first_non_excluded_any<'a>(
+    text: &str,
+    base_offset: usize,
+    needles: &'a [&'a str],
+    excluded: &[ByteRange],
+) -> Option<(usize, &'a str)> {
+    needles
+        .iter()
+        .filter_map(|&needle| {
+            count_non_excluded_matches(text, base_offset, needle, excluded)
+                .1
+                .map(|offset| (offset, needle))
+        })
+        .min_by_key(|(offset, _)| *offset)
 }
 
 fn count_non_excluded_matches(
@@ -4065,6 +4290,8 @@ pub(crate) fn scan_ai_structural_phase2(
     scan_ai_formulaic_despite(text, excluded, issues, boundary_index);
     scan_ai_false_ranges(text, excluded, issues, boundary_index);
     scan_ai_hedging_density(text, excluded, issues, boundary_index);
+    scan_ai_abstract_line_metaphor(text, excluded, issues, boundary_index);
+    scan_ai_repeated_parallel_slogan(text, excluded, issues, boundary_index);
 }
 
 // Lexical translationese detectors that need no sentence/paragraph index.
@@ -6006,6 +6233,140 @@ mod tests {
         assert!(
             bold_issues.is_empty(),
             "excluded bold markers should not trigger excessive-bold: {bold_issues:?}"
+        );
+    }
+
+    #[test]
+    fn ai_four_char_bold_label_bullets_trigger() {
+        let text =
+            "- **核心價值**：第一段說明\n- **治理架構**：第二段說明\n- **實作路徑**：第三段說明";
+        let issues = scan_phase2(text);
+        assert!(
+            issues.iter().any(|i| i
+                .context
+                .as_ref()
+                .is_some_and(|c| c.contains("四字標籤式列表"))),
+            "four-character bold labels should trigger: {issues:?}"
+        );
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.context.as_ref().is_some_and(|c| c.contains("機械式列表"))),
+            "specialized four-character list should replace generic mechanical list: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn ai_significance_stamping_triggers_per_paragraph() {
+        let text = "這項安排提供政策的重要框架，也印證制度的重要性。";
+        let issues = scan_phase2(text);
+        assert!(
+            issues.iter().any(|i| i
+                .context
+                .as_ref()
+                .is_some_and(|c| c.contains("意義蓋章式收尾"))),
+            "significance stamping should trigger outside section-final sentences: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn ai_significance_stamping_exact_phrase_not_duplicated() {
+        let text = "這項安排提供重要框架。";
+        let issues = scan_phase2(text);
+        let stamping_issues: Vec<_> = issues
+            .iter()
+            .filter(|i| {
+                i.context
+                    .as_ref()
+                    .is_some_and(|c| c.contains("意義蓋章式收尾") || c.contains("公式化用語"))
+            })
+            .collect();
+        assert_eq!(
+            stamping_issues.len(),
+            1,
+            "exact phrase and pair match should not double-report: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn ai_in_sentence_bold_parallel_triggers() {
+        let text = "我們需要**理解歷史**、**回到現場**，並**重建脈絡**。";
+        let issues = scan_phase2(text);
+        assert!(
+            issues.iter().any(|i| {
+                i.context
+                    .as_ref()
+                    .is_some_and(|c| c.contains("句內關鍵詞粗體排比"))
+            }),
+            "2-4 bold runs in one sentence should trigger: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn ai_abstract_line_metaphor_requires_three_signals() {
+        let good = "改革不是口號，而是一條線。這條線從地方走出來，連到制度現場。這條線也會延伸到新的公共討論。";
+        let good_issues = scan_phase2(good);
+        let line_issue = good_issues.iter().find(|i| {
+            i.context
+                .as_ref()
+                .is_some_and(|c| c.contains("抽象概念具象成路線"))
+        });
+        assert!(
+            line_issue.is_some(),
+            "three-signal abstract line metaphor should trigger: {good_issues:?}"
+        );
+        assert_eq!(line_issue.unwrap().found, "一條線");
+
+        let idiom = "這條路走不通，所以團隊改用另一個方案。";
+        let idiom_issues = scan_phase2(idiom);
+        assert!(
+            !idiom_issues.iter().any(|i| {
+                i.context
+                    .as_ref()
+                    .is_some_and(|c| c.contains("抽象概念具象成路線"))
+            }),
+            "single idiom must stay silent: {idiom_issues:?}"
+        );
+    }
+
+    #[test]
+    fn ai_repeated_parallel_slogan_triggers_once() {
+        let text = "制度不是牆，而是橋。第一段說明政策背景。\n\n制度不是牆，而是橋。第二段重複同一句口號。";
+        let issues = scan_phase2(text);
+        let slogan_issues: Vec<_> = issues
+            .iter()
+            .filter(|i| i.context.as_ref().is_some_and(|c| c.contains("金句疊句")))
+            .collect();
+        assert_eq!(
+            slogan_issues.len(),
+            1,
+            "repeated parallel slogan should trigger once: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn ai_same_paragraph_slogan_repetition_does_not_trigger() {
+        // Same parallel sentence repeated within one paragraph is ordinary 排比,
+        // not the cross-section 金句疊句 tic — must stay silent.
+        let text = "制度不是牆，而是橋。制度不是牆，而是橋。我們要繼續努力。";
+        let issues = scan_phase2(text);
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.context.as_ref().is_some_and(|c| c.contains("金句疊句"))),
+            "same-paragraph repetition should not trigger slogan detector: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn ai_repeated_plain_sentence_does_not_trigger_slogan() {
+        let text = "請在週五前提交報告。這是行政提醒。\n\n請在週五前提交報告。這是第二次提醒。";
+        let issues = scan_phase2(text);
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.context.as_ref().is_some_and(|c| c.contains("金句疊句"))),
+            "ordinary repeated sentence should not trigger slogan detector: {issues:?}"
         );
     }
 

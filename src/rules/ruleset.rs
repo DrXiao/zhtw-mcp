@@ -552,6 +552,10 @@ pub struct Issue {
     /// Suggested replacements.  Arc avoids per-issue allocation during
     /// inflate — most issues share suggestions with their source rule.
     pub suggestions: Arc<[String]>,
+    /// Manual rewrite hint for translationese issues.  Derived from the
+    /// first non-empty suggestion when a translationese rule supplies one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_rewrite: Option<String>,
     /// Classification of the triggering rule.
     pub rule_type: IssueType,
     /// Severity level.
@@ -619,6 +623,23 @@ pub struct TableCell {
 }
 
 impl Issue {
+    /// Derive the manual rewrite hint: the first non-empty suggestion, but
+    /// only for translationese rules (other rule types have no rewrite hint).
+    pub fn derive_suggested_rewrite(
+        rule_type: IssueType,
+        suggestions: &[String],
+    ) -> Option<String> {
+        if rule_type == IssueType::Translationese {
+            suggestions.iter().find(|s| !s.is_empty()).cloned()
+        } else {
+            None
+        }
+    }
+
+    pub fn refresh_suggested_rewrite(&mut self) {
+        self.suggested_rewrite = Self::derive_suggested_rewrite(self.rule_type, &self.suggestions);
+    }
+
     /// Construct an issue with all semantic fields; line/col are set to 0
     /// (filled in later by the line-index pass).
     pub fn new(
@@ -629,6 +650,7 @@ impl Issue {
         rule_type: IssueType,
         severity: Severity,
     ) -> Self {
+        let suggested_rewrite = Self::derive_suggested_rewrite(rule_type, &suggestions);
         Self {
             offset,
             length,
@@ -636,6 +658,7 @@ impl Issue {
             col: 0,
             found: found.into(),
             suggestions: suggestions.into(),
+            suggested_rewrite,
             rule_type,
             severity,
             context: None,
@@ -673,6 +696,7 @@ impl Issue {
             suggestions: EMPTY_SUGGESTIONS
                 .get_or_init(|| Arc::from(Vec::<String>::new()))
                 .clone(),
+            suggested_rewrite: None,
             rule_type,
             severity,
             context: None,

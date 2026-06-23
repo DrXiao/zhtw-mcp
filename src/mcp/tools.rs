@@ -842,6 +842,7 @@ impl Server {
                             issue.anchor_match = state.anchor_match;
                             issue.context = state.context.clone();
                             issue.suggestions = state.suggestions.clone().into();
+                            issue.refresh_suggested_rewrite();
                         }
                     }
                 }
@@ -2480,6 +2481,7 @@ fn build_compact_groups(issues: &[Issue], explain: bool, include_stats: bool) ->
         let group = groups.entry(key).or_insert_with(|| CompactGroup {
             found: issue.found.clone(),
             suggestions: issue.suggestions.to_vec(),
+            suggested_rewrite: issue.suggested_rewrite.clone(),
             rule_type: rt.to_string(),
             severity: issue.severity.name().to_string(),
             context: issue.context.as_deref().map(str::to_string),
@@ -2795,6 +2797,8 @@ fn build_fix_diff(
 struct CompactGroup {
     found: String,
     suggestions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suggested_rewrite: Option<String>,
     rule_type: String,
     severity: String,
     #[serde(skip_serializing_if = "Option::is_none")]

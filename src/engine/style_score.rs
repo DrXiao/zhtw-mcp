@@ -147,6 +147,7 @@ mod tests {
             col: 0,
             found: "x".into(),
             suggestions: Arc::from(Vec::<String>::new()),
+            suggested_rewrite: None,
             rule_type,
             severity,
             context: None,
