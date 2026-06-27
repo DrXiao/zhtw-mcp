@@ -885,6 +885,13 @@ impl Scanner {
         case_rules: Vec<CaseRule>,
         filter: &rule_ir::ProfileFilter,
     ) -> Self {
+        let started = std::time::Instant::now();
+        let _span = tracing::info_span!(
+            "build_ac",
+            spelling_rule_count = spelling_rules.len() as u64,
+            case_rule_count = case_rules.len() as u64
+        )
+        .entered();
         let case_rules: Vec<CaseRule> = case_rules.into_iter().filter(|r| !r.disabled).collect();
 
         // Build segmenter from the FULL rule set (before profile filtering)
@@ -895,7 +902,7 @@ impl Scanner {
         let spelling_db = match rule_ir::compile_spelling_rules_filtered(spelling_rules, filter) {
             Ok(db) => db,
             Err(e) => {
-                eprintln!("[zhtw-mcp] spelling rule compilation failed: {e}");
+                tracing::warn!("spelling rule compilation failed: {e}");
                 rule_ir::CompiledSpellingDb::empty()
             }
         };
@@ -909,10 +916,14 @@ impl Scanner {
         {
             Ok(ac) => Some(ac),
             Err(e) => {
-                eprintln!("[zhtw-mcp] case AC build failed: {e}");
+                tracing::warn!("case AC build failed: {e}");
                 None
             }
         };
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "build_ac completed"
+        );
 
         Self {
             spelling_db,
@@ -1065,6 +1076,13 @@ impl Scanner {
         cfg: ProfileConfig,
         content_type: ContentType,
     ) -> ScanOutput {
+        let started = std::time::Instant::now();
+        let _span = tracing::info_span!(
+            "scan",
+            content_length = text.len() as u64,
+            content_type = content_type.name()
+        )
+        .entered();
         let norm = normalize_nfc(text);
         let scan_text = &norm.text;
         let nfc_changed = !norm.offset_map.is_empty();
@@ -1131,6 +1149,11 @@ impl Scanner {
             }
         }
 
+        tracing::info!(
+            issue_count = output.issues.len() as u64,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "scan completed"
+        );
         output
     }
 

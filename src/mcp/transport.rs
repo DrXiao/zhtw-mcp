@@ -113,6 +113,11 @@ fn drain_until_newline(reader: &mut impl BufRead) -> io::Result<()> {
 /// are returned as spillover and re-processed before reading new input.
 pub fn run_stdio(server: &mut Server) -> Result<()> {
     let (line_tx, line_rx) = mpsc::channel::<StdinMsg>();
+    // Unbounded by design: the tracing layer's on_event sends from this same
+    // thread during dispatch, and we drain on this thread between requests. A
+    // bounded channel would deadlock if it filled mid-dispatch (sender blocks,
+    // receiver can't run). Per-request log volume is small, so it can't grow.
+    let (log_tx, log_rx) = mpsc::channel::<crate::trace::McpLogMessage>();
 
     // Background stdin reader: reads bounded lines and sends them to the channel.
     // The raw buffer is allocated once and reused across reads.
@@ -144,7 +149,7 @@ pub fn run_stdio(server: &mut Server) -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    log::warn!("stdin reader: {e}");
+                    tracing::warn!("stdin reader: {e}");
                     break;
                 }
             }
@@ -154,6 +159,7 @@ pub fn run_stdio(server: &mut Server) -> Result<()> {
     let stdout = io::stdout();
     let mut writer = stdout.lock();
     let mut pending: VecDeque<StdinMsg> = VecDeque::new();
+    let mut mcp_logging = false;
 
     // Drain spillover before blocking on the channel; a closed channel
     // produces None and breaks the loop (EOF).
@@ -161,19 +167,25 @@ pub fn run_stdio(server: &mut Server) -> Result<()> {
         let line = match msg {
             StdinMsg::Line(l) => l,
             StdinMsg::TooLong => {
-                log::warn!("line too long, returning error");
+                tracing::warn!("line too long, returning error");
                 let resp =
                     JsonRpcResponse::error(None, INVALID_REQUEST, "request too large".into());
+                if mcp_logging {
+                    drain_mcp_logs(&mut writer, &log_rx)?;
+                }
                 send(&mut writer, &resp)?;
                 continue;
             }
             StdinMsg::MalformedUtf8(e) => {
-                log::warn!("line contains malformed UTF-8 character(s), returning error: {e}");
+                tracing::warn!("line contains malformed UTF-8 character(s), returning error: {e}");
                 let resp = JsonRpcResponse::error(
                     None,
                     PARSE_ERROR,
                     "request contains malformed UTF-8 character(s)".into(),
                 );
+                if mcp_logging {
+                    drain_mcp_logs(&mut writer, &log_rx)?;
+                }
                 send(&mut writer, &resp)?;
                 continue;
             }
@@ -185,11 +197,14 @@ pub fn run_stdio(server: &mut Server) -> Result<()> {
         let mut req: JsonRpcRequest = match super::types::parse_jsonrpc_line(&line) {
             Ok(r) => r,
             Err(TransportError::StaleResponse) => {
-                log::debug!("discarding stale response-shaped message (no id)");
+                tracing::debug!("discarding stale response-shaped message (no id)");
                 continue;
             }
             Err(e) => {
-                log::warn!("{e}");
+                tracing::warn!("{e}");
+                if mcp_logging {
+                    drain_mcp_logs(&mut writer, &log_rx)?;
+                }
                 if let Some(resp) = e.into_response(None) {
                     send(&mut writer, &resp)?;
                 }
@@ -199,6 +214,14 @@ pub fn run_stdio(server: &mut Server) -> Result<()> {
 
         // Notifications (no id) get no response per JSON-RPC spec.
         let (resp, spillover) = dispatch(server, &mut req, &line_rx, &mut writer);
+        if server.supports_logging() && !mcp_logging {
+            crate::trace::set_mcp_log_sender(Some(log_tx.clone()));
+            mcp_logging = true;
+        }
+        // Logs accrue synchronously during dispatch on this same thread, so a
+        // single drain afterward catches everything; emit them before the
+        // response so clients see notifications in causal order.
+        drain_mcp_logs(&mut writer, &log_rx)?;
         if let Some(resp) = resp {
             send(&mut writer, &resp)?;
         }
@@ -207,6 +230,30 @@ pub fn run_stdio(server: &mut Server) -> Result<()> {
         }
     }
 
+    crate::trace::set_mcp_log_sender(None);
+    Ok(())
+}
+
+fn drain_mcp_logs(
+    out: &mut impl Write,
+    log_rx: &mpsc::Receiver<crate::trace::McpLogMessage>,
+) -> Result<()> {
+    let mut wrote = false;
+    while let Ok(msg) = log_rx.try_recv() {
+        serde_json::to_writer(
+            &mut *out,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/message",
+                "params": msg,
+            }),
+        )?;
+        out.write_all(b"\n")?;
+        wrote = true;
+    }
+    if wrote {
+        out.flush()?;
+    }
     Ok(())
 }
 

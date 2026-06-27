@@ -284,7 +284,7 @@ impl JudgmentCache {
                     }
                 }
             }
-            Err(e) => log::warn!("failed to serialize judgment cache: {e}"),
+            Err(e) => tracing::warn!("failed to serialize judgment cache: {e}"),
         }
     }
 }
@@ -313,9 +313,9 @@ fn load_or_reset(path: &Path) -> CacheStore {
         result => {
             // Schema mismatch or parse error: backup and reset.
             if let Err(ref e) = result {
-                log::warn!("failed to parse judgment cache: {e}, resetting");
+                tracing::warn!("failed to parse judgment cache: {e}, resetting");
             } else {
-                log::info!("judgment cache schema mismatch, backing up and resetting");
+                tracing::info!("judgment cache schema mismatch, backing up and resetting");
             }
             let backup = path.with_extension("json.bak");
             let _ = std::fs::rename(path, &backup);

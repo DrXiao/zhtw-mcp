@@ -35,6 +35,11 @@ async fn async_stdio_loop(server: &mut Server) -> Result<()> {
     let mut raw_buf: Vec<u8> = Vec::new();
     let mut write_buf: Vec<u8> = Vec::new();
 
+    // See sync transport for why this is unbounded: on_event sends from this
+    // same thread during dispatch and we drain it here between requests.
+    let (log_tx, log_rx) = std::sync::mpsc::channel::<crate::trace::McpLogMessage>();
+    let mut mcp_logging = false;
+
     loop {
         raw_buf.clear();
         // Bounded read: read raw bytes up to the limit to avoid InvalidData
@@ -67,6 +72,9 @@ async fn async_stdio_loop(server: &mut Server) -> Result<()> {
                 }
             }
             let resp = JsonRpcResponse::error(None, INVALID_REQUEST, "request too large".into());
+            if mcp_logging {
+                drain_mcp_logs_async(&mut stdout, &log_rx, &mut write_buf).await?;
+            }
             send_async(&mut stdout, &resp, &mut write_buf).await?;
             continue;
         }
@@ -76,6 +84,9 @@ async fn async_stdio_loop(server: &mut Server) -> Result<()> {
                 PARSE_ERROR,
                 "request contains malformed UTF-8 character(s)".into(),
             );
+            if mcp_logging {
+                drain_mcp_logs_async(&mut stdout, &log_rx, &mut write_buf).await?;
+            }
             send_async(&mut stdout, &resp, &mut write_buf).await?;
             continue;
         };
@@ -88,11 +99,14 @@ async fn async_stdio_loop(server: &mut Server) -> Result<()> {
         let mut req = match super::types::parse_jsonrpc_line(line) {
             Ok(r) => r,
             Err(TransportError::StaleResponse) => {
-                log::debug!("discarding stale response-shaped message (no id)");
+                tracing::debug!("discarding stale response-shaped message (no id)");
                 continue;
             }
             Err(e) => {
-                log::warn!("{e}");
+                tracing::warn!("{e}");
+                if mcp_logging {
+                    drain_mcp_logs_async(&mut stdout, &log_rx, &mut write_buf).await?;
+                }
                 if let Some(resp) = e.into_response(None) {
                     send_async(&mut stdout, &resp, &mut write_buf).await?;
                 }
@@ -105,11 +119,45 @@ async fn async_stdio_loop(server: &mut Server) -> Result<()> {
         // The sampling bridge needs synchronous stdin access, so we use a
         // simple non-sampling dispatch for the async path.
         let resp = dispatch_async(server, &mut req);
+        if server.supports_logging() && !mcp_logging {
+            crate::trace::set_mcp_log_sender(Some(log_tx.clone()));
+            mcp_logging = true;
+        }
+        // Emit logs accrued during dispatch before the response, matching the
+        // sync transport's causal ordering.
+        drain_mcp_logs_async(&mut stdout, &log_rx, &mut write_buf).await?;
         if let Some(resp) = resp {
             send_async(&mut stdout, &resp, &mut write_buf).await?;
         }
     }
 
+    crate::trace::set_mcp_log_sender(None);
+    Ok(())
+}
+
+async fn drain_mcp_logs_async(
+    writer: &mut tokio::io::Stdout,
+    log_rx: &std::sync::mpsc::Receiver<crate::trace::McpLogMessage>,
+    buf: &mut Vec<u8>,
+) -> Result<()> {
+    let mut wrote = false;
+    while let Ok(msg) = log_rx.try_recv() {
+        buf.clear();
+        serde_json::to_writer(
+            &mut *buf,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/message",
+                "params": msg,
+            }),
+        )?;
+        buf.push(b'\n');
+        writer.write_all(buf).await?;
+        wrote = true;
+    }
+    if wrote {
+        writer.flush().await?;
+    }
     Ok(())
 }
 

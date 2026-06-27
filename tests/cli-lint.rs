@@ -24,6 +24,7 @@ fn run_lint_stdin(extra_args: &[&str], input: &str) -> Output {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .env_remove("RUST_LOG")
         .spawn()
         .and_then(|mut child| {
             child
@@ -35,6 +36,45 @@ fn run_lint_stdin(extra_args: &[&str], input: &str) -> Output {
             child.wait_with_output()
         })
         .unwrap()
+}
+
+#[test]
+fn cli_lint_json_clean_default_has_empty_stderr() {
+    let output = run_lint_stdin(&["--format", "json"], "正確的軟體");
+    assert!(output.status.success(), "clean JSON lint should exit 0");
+    assert!(
+        output.stderr.is_empty(),
+        "default tracing should not write stderr on clean JSON runs: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn cli_lint_rust_log_debug_emits_scan_trace() {
+    let bin = binary_path();
+    let output = Command::new(&bin)
+        .args(["lint", "--", "--format", "json"])
+        .env("RUST_LOG", "debug")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all("正確的軟體".as_bytes())
+                .unwrap();
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(output.status.success(), "debug lint should exit 0");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("scan") && stderr.contains("elapsed_ms"),
+        "debug tracing should include scan timing fields: {stderr}"
+    );
 }
 
 #[test]

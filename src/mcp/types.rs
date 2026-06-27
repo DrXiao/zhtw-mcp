@@ -165,6 +165,8 @@ pub struct ClientCapabilitiesRaw {
     pub sampling: Option<Value>,
     #[serde(default)]
     pub roots: Option<Value>,
+    #[serde(default)]
+    pub logging: Option<Value>,
 }
 
 /// Parsed client capabilities stored by the server.
@@ -174,6 +176,8 @@ pub struct ClientCapabilities {
     pub sampling: bool,
     /// Client supports roots/list.
     pub roots: bool,
+    /// Client supports notifications/message.
+    pub logging: bool,
 }
 
 impl From<&ClientCapabilitiesRaw> for ClientCapabilities {
@@ -181,6 +185,7 @@ impl From<&ClientCapabilitiesRaw> for ClientCapabilities {
         Self {
             sampling: raw.sampling.is_some(),
             roots: raw.roots.is_some(),
+            logging: raw.logging.is_some(),
         }
     }
 }

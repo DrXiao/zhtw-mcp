@@ -19,6 +19,27 @@ fn send_recv(stdin: &mut impl Write, stdout: &mut impl BufRead, request: &Value)
     serde_json::from_str(line.trim()).expect("response should be valid JSON")
 }
 
+fn send_recv_skip_notifications(
+    stdin: &mut impl Write,
+    stdout: &mut impl BufRead,
+    request: &Value,
+) -> (Vec<Value>, Value) {
+    let line = serde_json::to_string(request).unwrap();
+    writeln!(stdin, "{line}").unwrap();
+    stdin.flush().unwrap();
+    let id = request.get("id").cloned();
+    let mut notifications = Vec::new();
+    loop {
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        let value: Value = serde_json::from_str(line.trim()).unwrap();
+        if value.get("id") == id.as_ref() {
+            return (notifications, value);
+        }
+        notifications.push(value);
+    }
+}
+
 /// Send a notification (no response expected).
 fn send_notification(stdin: &mut impl Write, request: &Value) {
     let msg = serde_json::to_string(request).unwrap();
@@ -706,6 +727,165 @@ fn e2e_initialize_and_tools_list() {
     let status = child.wait().unwrap();
     assert!(status.success());
     // tmp_dir auto-cleaned on drop
+}
+
+#[test]
+fn e2e_mcp_logging_capability_receives_message_notifications() {
+    let bin = binary_path();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut child = Command::new(&bin)
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join(".config"))
+        .env("XDG_CACHE_HOME", tmp.path().join(".cache"))
+        .env("RUST_LOG", "info")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn zhtw-mcp");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    let init = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": { "logging": {} },
+                "clientInfo": { "name": "test", "version": "1.0" }
+            }
+        }),
+    );
+    assert!(
+        init.get("result").is_some(),
+        "initialize should succeed: {init}"
+    );
+
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    let (notifications, resp) = send_recv_skip_notifications(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件很好用", "output": "summary" }
+            }
+        }),
+    );
+    assert!(
+        resp.get("result").is_some(),
+        "tools/call should succeed: {resp}"
+    );
+    assert!(
+        notifications.iter().any(|n| {
+            n["method"] == "notifications/message"
+                && n["params"]["logger"] == "zhtw-mcp"
+                && n["params"]["level"] == "info"
+        }),
+        "expected MCP log notification before response, got {notifications:?}"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_mcp_logging_parse_error_is_not_stale() {
+    let bin = binary_path();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut child = Command::new(&bin)
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join(".config"))
+        .env("XDG_CACHE_HOME", tmp.path().join(".cache"))
+        .env("RUST_LOG", "info")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn zhtw-mcp");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    let init = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": { "logging": {} },
+                "clientInfo": { "name": "test", "version": "1.0" }
+            }
+        }),
+    );
+    assert!(
+        init.get("result").is_some(),
+        "initialize should succeed: {init}"
+    );
+
+    writeln!(stdin, "{{not-json").unwrap();
+    stdin.flush().unwrap();
+
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let notification: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(notification["method"], "notifications/message");
+    assert!(
+        notification["params"]["data"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("JSON parse"),
+        "parse warning should be emitted before parse response: {notification}"
+    );
+
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let parse_resp: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(parse_resp["error"]["code"], -32700, "{parse_resp}");
+
+    let (notifications, resp) = send_recv_skip_notifications(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list"
+        }),
+    );
+    assert!(
+        resp.get("result").is_some(),
+        "tools/list should succeed: {resp}"
+    );
+    assert!(
+        notifications.iter().all(|n| {
+            !n["params"]["data"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("JSON parse")
+        }),
+        "parse warning leaked into later request: {notifications:?}"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[test]

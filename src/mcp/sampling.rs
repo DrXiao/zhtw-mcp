@@ -403,16 +403,16 @@ impl<'a> SamplingBridge<'a> {
 
             let resp_id = resp.get("id").and_then(|v| v.as_str());
             if resp_id.is_none() && resp.get("id").is_some() {
-                log::debug!("sampling: message has non-string id, stashing");
+                tracing::debug!("sampling: message has non-string id, stashing");
             }
             if resp_id != Some(expected_id) {
-                log::debug!("sampling: stashing message with id {:?}", resp_id);
+                tracing::debug!("sampling: stashing message with id {:?}", resp_id);
                 self.spillover.push(StdinMsg::Line(line));
                 continue;
             }
 
             if resp.get("error").is_some() {
-                log::warn!("sampling request returned error");
+                tracing::warn!("sampling request returned error");
                 return None;
             }
 
@@ -429,11 +429,11 @@ impl<'a> SamplingBridge<'a> {
                 Some(t) if !t.trim().is_empty() => return Some(t.trim().to_string()),
                 Some(_) => {
                     // Blank response: treat as failure but don't stash (consumed).
-                    log::debug!("sampling: blank response text, treating as failure");
+                    tracing::debug!("sampling: blank response text, treating as failure");
                     return None;
                 }
                 None => {
-                    log::debug!("sampling: id matched but payload shape unexpected, stashing");
+                    tracing::debug!("sampling: id matched but payload shape unexpected, stashing");
                     self.spillover.push(StdinMsg::Line(line));
                     return None;
                 }

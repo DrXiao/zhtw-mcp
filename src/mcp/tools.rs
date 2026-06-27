@@ -113,6 +113,10 @@ impl Server {
         self.client_capabilities.sampling
     }
 
+    pub(crate) fn supports_logging(&self) -> bool {
+        self.client_capabilities.logging
+    }
+
     /// Handle pre-initialization routing shared between sync and async transports.
     ///
     /// Returns `Some(response)` if the method was handled (initialize, ping,
@@ -124,7 +128,7 @@ impl Server {
     ) -> Option<Option<JsonRpcResponse>> {
         // exit is always honored regardless of lifecycle state.
         if req.method == "exit" {
-            log::info!("exit notification, terminating");
+            tracing::info!("exit notification, terminating");
             // Flush judgment cache before exit (process::exit skips Drop).
             self.judgment_cache.flush();
             // MCP spec: unconditional process exit.
@@ -135,7 +139,7 @@ impl Server {
 
         // After shutdown, reject everything except exit (handled above).
         if self.shutdown_requested {
-            log::warn!("rejecting {} after shutdown", req.method);
+            tracing::warn!("rejecting {} after shutdown", req.method);
             return Some(if req.id.is_some() {
                 Some(JsonRpcResponse::error(
                     req.id.clone(),
@@ -150,11 +154,11 @@ impl Server {
         match req.method.as_str() {
             "initialize" => {
                 if req.id.is_none() {
-                    log::warn!("initialize sent as notification, ignoring");
+                    tracing::warn!("initialize sent as notification, ignoring");
                     return Some(None);
                 }
                 if self.initialized {
-                    log::warn!("duplicate initialize request, rejecting");
+                    tracing::warn!("duplicate initialize request, rejecting");
                     return Some(Some(JsonRpcResponse::error(
                         req.id.clone(),
                         INVALID_REQUEST,
@@ -164,7 +168,7 @@ impl Server {
                 Some(Some(self.handle_initialize(req)))
             }
             "notifications/cancelled" => {
-                log::info!("{}", req.method);
+                tracing::info!("{}", req.method);
                 if req.id.is_some() {
                     Some(Some(JsonRpcResponse::error(
                         req.id.clone(),
@@ -176,7 +180,7 @@ impl Server {
                 }
             }
             "notifications/initialized" => {
-                log::info!("{}", req.method);
+                tracing::info!("{}", req.method);
                 if req.id.is_some() {
                     Some(Some(JsonRpcResponse::error(
                         req.id.clone(),
@@ -188,7 +192,7 @@ impl Server {
                 }
             }
             "shutdown" => {
-                log::info!("shutdown requested");
+                tracing::info!("shutdown requested");
                 self.shutdown_requested = true;
                 if req.id.is_some() {
                     Some(Some(JsonRpcResponse::success(
@@ -207,12 +211,12 @@ impl Server {
                         serde_json::json!({}),
                     )))
                 } else {
-                    log::debug!("ping sent as notification, ignoring");
+                    tracing::debug!("ping sent as notification, ignoring");
                     Some(None)
                 }
             }
             _ if !self.initialized => {
-                log::warn!("rejecting {} before initialization", req.method);
+                tracing::warn!("rejecting {} before initialization", req.method);
                 Some(if req.id.is_some() {
                     Some(JsonRpcResponse::error(
                         req.id.clone(),
@@ -239,7 +243,7 @@ impl Server {
             "prompts/list" => Some(self.handle_prompts_list(req)),
             "prompts/get" => Some(self.handle_prompts_get(req)),
             _ => {
-                log::debug!("unhandled method: {}", req.method);
+                tracing::debug!("unhandled method: {}", req.method);
                 if req.id.is_some() {
                     Some(JsonRpcResponse::error(
                         req.id.clone(),
@@ -260,6 +264,7 @@ impl Server {
             Ok(p) => p,
             Err(resp) => return resp,
         };
+        let _span = tracing::info_span!("mcp_request", method = "initialize").entered();
 
         // Store parsed client capabilities for later use (e.g. sampling).
         self.client_capabilities = ClientCapabilities::from(&params.capabilities);
@@ -300,6 +305,7 @@ impl Server {
         req: &mut JsonRpcRequest,
         bridge: Option<&mut SamplingBridge<'_>>,
     ) -> JsonRpcResponse {
+        let _span = tracing::info_span!("mcp_request", method = "tools/call").entered();
         let params: CallToolParams = match parse_params(req, "tools/call") {
             Ok(p) => p,
             Err(resp) => return resp,
@@ -344,6 +350,7 @@ impl Server {
         mut bridge: Option<&mut SamplingBridge<'_>>,
         id: Option<super::types::RequestId>,
     ) -> Result<CallToolResult, JsonRpcResponse> {
+        let started = std::time::Instant::now();
         // Snapshot cache counters at start for per-request telemetry.
         let cache_hits_before = self.judgment_cache.hits;
         let cache_misses_before = self.judgment_cache.misses;
@@ -429,6 +436,13 @@ impl Server {
             .get("include_stats")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let _span = tracing::info_span!(
+            "tool_check",
+            content_length = text.len() as u64,
+            content_type = content_type.name(),
+            profile = profile.name()
+        )
+        .entered();
 
         if include_telemetry && output_mode == OutputMode::Tabular {
             return Err(param_error(
@@ -543,7 +557,7 @@ impl Server {
             issues
         };
 
-        Ok(match fix_mode {
+        let result = match fix_mode {
             FixMode::None => {
                 // Lint-only path.
                 let output =
@@ -935,7 +949,12 @@ impl Server {
                     consistency: consistency_report.as_ref(),
                 })
             }
-        })
+        };
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "tool_check completed"
+        );
+        Ok(result)
     }
 
     /// Downgrade suppressed issues to Info severity.
@@ -1045,7 +1064,7 @@ fn json_response(
     match serde_json::to_value(result) {
         Ok(v) => JsonRpcResponse::success(id, v),
         Err(e) => {
-            log::error!("failed to serialize response: {e}");
+            tracing::error!("failed to serialize response: {e}");
             JsonRpcResponse::error(id, INTERNAL_ERROR, "internal server error".into())
         }
     }
@@ -1063,7 +1082,7 @@ fn parse_params<T: serde::de::DeserializeOwned>(
     method: &str,
 ) -> Result<T, JsonRpcResponse> {
     serde_json::from_value(std::mem::take(&mut req.params)).map_err(|e| {
-        log::warn!("bad {method} params: {e}");
+        tracing::warn!("bad {method} params: {e}");
         JsonRpcResponse::error(
             req.id.clone(),
             INVALID_PARAMS,
@@ -2381,7 +2400,7 @@ fn build_check_output(params: &CheckOutputParams<'_>) -> CallToolResult {
             }
         }
         Err(e) => {
-            log::error!("failed to serialize check output: {e}");
+            tracing::error!("failed to serialize check output: {e}");
             CallToolResult::error("internal server error".into())
         }
     }
