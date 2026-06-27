@@ -101,7 +101,7 @@ impl OverrideStore {
                 Ok(ov) if ov.schema_version == SCHEMA_VERSION => ov,
                 Ok(ov) => {
                     let ext = format!("v{}.bak", ov.schema_version);
-                    log::warn!(
+                    tracing::warn!(
                         "override schema version mismatch (stored={}, expected={}); \
                          backing up and resetting",
                         ov.schema_version,
@@ -110,7 +110,7 @@ impl OverrideStore {
                     backup_and_reset(path, &ext)
                 }
                 Err(e) => {
-                    log::warn!("corrupt overrides JSON ({e}); backing up and resetting");
+                    tracing::warn!("corrupt overrides JSON ({e}); backing up and resetting");
                     backup_and_reset(path, "corrupt.bak")
                 }
             }
@@ -365,7 +365,7 @@ impl SuppressionStore {
             match serde_json::from_str::<Suppressions>(&content) {
                 Ok(s) if s.schema_version == SCHEMA_VERSION => s,
                 Ok(s) => {
-                    log::warn!(
+                    tracing::warn!(
                         "suppression schema mismatch (stored={}, expected={}); \
                          backing up and resetting",
                         s.schema_version,
@@ -375,7 +375,7 @@ impl SuppressionStore {
                     Suppressions::default()
                 }
                 Err(e) => {
-                    log::warn!("corrupt suppressions JSON ({e}); backing up and resetting");
+                    tracing::warn!("corrupt suppressions JSON ({e}); backing up and resetting");
                     backup_file(path, "corrupt.bak");
                     Suppressions::default()
                 }
@@ -542,7 +542,7 @@ impl TranslationMemoryStore {
             match serde_json::from_str::<TranslationMemory>(&content) {
                 Ok(tm) if tm.schema_version == TM_SCHEMA_VERSION => tm,
                 Ok(tm) => {
-                    log::warn!(
+                    tracing::warn!(
                         "TM schema version mismatch (stored={}, expected={}); \
                          backing up and resetting",
                         tm.schema_version,
@@ -552,7 +552,7 @@ impl TranslationMemoryStore {
                     TranslationMemory::default()
                 }
                 Err(e) => {
-                    log::warn!("corrupt TM JSON ({e}); backing up and resetting");
+                    tracing::warn!("corrupt TM JSON ({e}); backing up and resetting");
                     backup_file(path, "corrupt.bak");
                     TranslationMemory::default()
                 }
@@ -672,7 +672,7 @@ impl TranslationMemoryStore {
                 updated += 1;
             } else {
                 if self.memory.entries.len() >= TM_MAX_ENTRIES {
-                    log::warn!(
+                    tracing::warn!(
                         "TM entry cap ({TM_MAX_ENTRIES}) reached during import; \
                          skipping new entries (updates still applied)"
                     );
@@ -985,7 +985,7 @@ pub fn build_merged_rules(
                 case_layers.push(pack.case);
             }
             Err(e) => {
-                log::warn!("failed to load pack '{}': {}", pack_name, e);
+                tracing::warn!("failed to load pack '{}': {}", pack_name, e);
             }
         }
     }

@@ -16,7 +16,6 @@ include = ["src/**/*", "assets/ruleset.json", "Cargo.toml", "LICENSE", "README.m
 default = ["native", "translate"]
 native = [
     "dep:dirs",
-    "dep:env_logger",
     "dep:fs2",
     "dep:rayon",
     "dep:tempfile",
@@ -45,8 +44,8 @@ rayon = { version = "1", optional = true }
 anyhow = "1"
 unicode-normalization = "0.1"
 pulldown-cmark = { version = "0.13", default-features = false }
-log = "0.4"
-env_logger = { version = "0.11", default-features = false, optional = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
 dirs = { version = "5.0", optional = true }
 tempfile = { version = "3.0", optional = true }
 toml = { version = "0.8", optional = true }

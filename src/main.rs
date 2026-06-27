@@ -44,9 +44,15 @@ const COLORS_OFF: Colors = Colors {
 };
 
 fn main() -> Result<()> {
-    env_logger::init();
-
     let args: Vec<String> = std::env::args().collect();
+    let default_log = if args.iter().any(|a| a == "--debug") {
+        "debug"
+    } else if args.iter().any(|a| a == "--verbose") {
+        "info"
+    } else {
+        "warn"
+    };
+    zhtw_mcp::trace::init(default_log);
 
     // Parse CLI args:
     //   zhtw-mcp                                — run MCP server (default paths)
@@ -312,6 +318,8 @@ fn main() -> Result<()> {
                         "--telemetry" => {
                             telemetry = true;
                         }
+                        "--verbose" => {}
+                        "--debug" => {}
                         _ => {
                             lint_files.push(args[i].clone());
                         }
@@ -481,6 +489,8 @@ fn main() -> Result<()> {
                     args.get(i).context("--config requires a path")?,
                 ));
             }
+            "--verbose" => {}
+            "--debug" => {}
             _ => {
                 anyhow::bail!("unknown argument: {}", args[i]);
             }
@@ -657,7 +667,7 @@ fn main() -> Result<()> {
         match zhtw_mcp::rules::store::TranslationMemoryStore::open(&tm_path) {
             Ok(store) => Some(store),
             Err(e) => {
-                log::warn!(
+                tracing::warn!(
                     "failed to open translation memory at {}: {e}",
                     tm_path.display()
                 );
@@ -674,11 +684,11 @@ fn main() -> Result<()> {
         tm_store,
     )?;
 
-    log::info!("zhtw-mcp server starting on stdio");
+    tracing::info!("zhtw-mcp server starting on stdio");
 
     #[cfg(feature = "async-transport")]
     {
-        log::info!("using async transport (tokio)");
+        tracing::info!("using async transport (tokio)");
         zhtw_mcp::mcp::transport_async::run_async_stdio(&mut server)?;
     }
     #[cfg(not(feature = "async-transport"))]
@@ -902,7 +912,7 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     // Open translation memory (if path provided and file exists/creatable).
     let tm_store = params.tm_path.as_ref().and_then(|p| {
         zhtw_mcp::rules::store::TranslationMemoryStore::open(p)
-            .map_err(|e| log::warn!("failed to open TM at {}: {e}", p.display()))
+            .map_err(|e| tracing::warn!("failed to open TM at {}: {e}", p.display()))
             .ok()
     });
 

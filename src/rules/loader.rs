@@ -7,8 +7,18 @@ use super::ruleset::Ruleset;
 /// Postcard deserialization is ~10x faster than serde_json and zero-alloc for
 /// the parse step itself (allocations come from owned String fields).
 pub fn load_embedded_ruleset() -> Result<Ruleset> {
+    let started = std::time::Instant::now();
+    let _span = tracing::info_span!("load_ruleset").entered();
     static RULESET_POSTCARD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ruleset.postcard"));
-    postcard::from_bytes(RULESET_POSTCARD).context("parse embedded ruleset (postcard)")
+    let ruleset: Ruleset =
+        postcard::from_bytes(RULESET_POSTCARD).context("parse embedded ruleset (postcard)")?;
+    tracing::info!(
+        spelling_rule_count = ruleset.spelling_rules.len() as u64,
+        case_rule_count = ruleset.case_rules.len() as u64,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "load_ruleset completed"
+    );
+    Ok(ruleset)
 }
 
 /// Compute a combined hash of all rules (spelling + case) for reproducibility tracking.

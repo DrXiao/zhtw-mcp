@@ -113,8 +113,22 @@ pub fn apply_fixes_with_context(
     excluded_offsets: &[(usize, usize)],
     segmenter: Option<&Segmenter>,
 ) -> FixResult {
+    let started = std::time::Instant::now();
+    let _span = tracing::info_span!(
+        "fix",
+        content_length = text.len() as u64,
+        issue_count = issues.len() as u64,
+        mode = ?mode
+    )
+    .entered();
     // Lint-only mode: no fixes attempted, nothing to skip.
     if mode == FixMode::None {
+        tracing::info!(
+            fix_count = 0_u64,
+            skipped_count = 0_u64,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "fix completed"
+        );
         return FixResult {
             text: text.to_string(),
             applied: 0,
@@ -142,7 +156,7 @@ pub fn apply_fixes_with_context(
     // copying unchanged gaps and appending replacements.
     for issue in issues {
         let Some(end) = issue.offset.checked_add(issue.length) else {
-            log::warn!(
+            tracing::warn!(
                 "skipping malformed issue at offset {}: length overflow",
                 issue.offset
             );
@@ -292,6 +306,12 @@ pub fn apply_fixes_with_context(
     // no fixes were applied).
     out.push_str(&text[cursor..]);
 
+    tracing::info!(
+        fix_count = applied as u64,
+        skipped_count = skipped as u64,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "fix completed"
+    );
     FixResult {
         text: out,
         applied,

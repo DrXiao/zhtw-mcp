@@ -70,11 +70,11 @@ impl ProjectConfig {
         let content = std::fs::read_to_string(&path).ok()?;
         match toml::from_str::<ProjectConfig>(&content) {
             Ok(cfg) => {
-                log::info!("loaded config from {}", path.display());
+                tracing::info!("loaded config from {}", path.display());
                 Some(cfg)
             }
             Err(e) => {
-                log::warn!("failed to parse {}: {}", path.display(), e);
+                tracing::warn!("failed to parse {}: {}", path.display(), e);
                 None
             }
         }

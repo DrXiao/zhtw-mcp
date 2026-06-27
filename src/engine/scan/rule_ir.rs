@@ -773,7 +773,7 @@ pub fn compile_spelling_rules_filtered(
                 let idx = match u16::try_from(clue_vec.len()) {
                     Ok(i) => i,
                     Err(_) => {
-                        eprintln!(
+                        tracing::warn!(
                             "[zhtw-mcp] clue index overflow (>{} unique clues); \
                              remaining clues will be ignored",
                             u16::MAX
@@ -814,7 +814,7 @@ pub fn compile_spelling_rules_filtered(
             {
                 Ok(ac) => Some(ac),
                 Err(e) => {
-                    eprintln!("[zhtw-mcp] clue AC build failed: {e}");
+                    tracing::warn!("clue AC build failed: {e}");
                     None
                 }
             }
@@ -829,7 +829,7 @@ pub fn compile_spelling_rules_filtered(
         for (i, slot) in ids_vec.iter_mut().enumerate() {
             if let Some(ids) = slot {
                 if ids.len() > 32 {
-                    eprintln!(
+                    tracing::warn!(
                         "[zhtw-mcp] rule '{}' has {} {label} clues, \
                          exceeds bitset capacity 32; truncating",
                         spelling_rules[i].from,
@@ -860,9 +860,10 @@ pub fn compile_spelling_rules_filtered(
                     .filter_map(|s| {
                         let clue = PositionalClue::parse(s);
                         if clue.is_none() {
-                            eprintln!(
+                            tracing::warn!(
                                 "[zhtw-mcp] rule '{}': unrecognized positional clue '{}'",
-                                rule.from, s
+                                rule.from,
+                                s
                             );
                         }
                         clue
@@ -952,7 +953,7 @@ pub fn compile_spelling_rules_filtered(
         {
             Ok(ac) => Some(ac),
             Err(e) => {
-                eprintln!("[zhtw-mcp] charwise AC build failed, using bytewise fallback: {e}");
+                tracing::warn!("charwise AC build failed, using bytewise fallback: {e}");
                 None
             }
         }
@@ -965,7 +966,7 @@ pub fn compile_spelling_rules_filtered(
         {
             Ok(ac) => Some(ac),
             Err(e) => {
-                eprintln!("[zhtw-mcp] bytewise spelling AC build failed: {e}");
+                tracing::warn!("bytewise spelling AC build failed: {e}");
                 None
             }
         }
