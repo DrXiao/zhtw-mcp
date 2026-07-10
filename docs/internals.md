@@ -19,7 +19,7 @@ The scanner detects Traditional vs. Simplified Chinese by counting exclusive cha
 
 ## Design decisions
 
-- No async runtime by default. Synchronous stdio with background thread + mpsc for timeout-bounded sampling. Optional `--features async-transport` for tokio.
+- No async runtime. Synchronous stdio uses a background thread + mpsc for timeout-bounded sampling. `--features async-transport` remains as a compatibility alias.
 - Pure Rust, no C/C++ dependencies. MMSEG segmenter builds its dictionary from ruleset vocabulary at construction time.
 - Byte-safe edits: positions from pulldown-cmark event ranges map back to original byte offsets.
 - JSON ruleset (`assets/ruleset.json`) embedded via `include_str!`. Runtime overrides in platform config directory.

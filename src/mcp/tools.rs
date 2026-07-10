@@ -3,6 +3,7 @@
 // One tool exposed to the MCP client:
 //   zhtw — unified lint / fix / gate for Traditional Chinese (Taiwan) text
 
+use std::cell::OnceCell;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -40,7 +41,10 @@ use crate::rules::store::{OverrideStore, PackStore, SuppressionStore, Translatio
 pub struct Server {
     scanner: Scanner,
     /// SC→TC converter for auto-converting Simplified Chinese input.
-    s2t: S2TConverter,
+    /// Built lazily on first Simplified input: its automaton costs ~200ms to
+    /// construct, which would otherwise sit on the startup/handshake path, and
+    /// traditional-only sessions never need it at all.
+    s2t: OnceCell<S2TConverter>,
     suppression_store: SuppressionStore,
     /// Translation memory: persistent correction tracking.
     tm_store: Option<TranslationMemoryStore>,
@@ -75,7 +79,7 @@ impl Server {
 
         Ok(Self {
             scanner,
-            s2t: S2TConverter::new(),
+            s2t: OnceCell::new(),
             suppression_store,
             tm_store,
             ruleset_hash,
@@ -369,7 +373,7 @@ impl Server {
         // Auto-detect Simplified Chinese and convert to Traditional via S2T.
         let s2t_converted: Option<String> = if detect_chinese_type(text) == ChineseType::Simplified
         {
-            Some(self.s2t.convert(text))
+            Some(self.s2t.get_or_init(S2TConverter::new).convert(text))
         } else {
             None
         };
@@ -2944,7 +2948,7 @@ fn tool_definitions() -> Vec<ToolDef> {
             destructive: None,
             idempotent: Some(true),
             read_only: Some(true),
-            open_world_hint: None,
+            open_world: None,
         }),
     }]
 }
@@ -2954,6 +2958,20 @@ mod tests {
     use super::*;
     use crate::mcp::types::RequestId;
     use crate::rules::ruleset::Tier2Outcome;
+
+    /// Tool annotations must serialize with the MCP-spec `*Hint` wire names;
+    /// any other spelling is silently dropped by spec-compliant clients.
+    #[test]
+    fn tool_annotations_use_spec_hint_wire_names() {
+        let defs = serde_json::to_value(tool_definitions()).unwrap();
+        let ann = &defs[0]["annotations"];
+        assert_eq!(ann["idempotentHint"], true);
+        assert_eq!(ann["readOnlyHint"], true);
+        // Bare (non-Hint) spellings must not appear on the wire.
+        assert!(ann.get("idempotent").is_none());
+        assert!(ann.get("readOnly").is_none());
+        assert!(ann.get("destructive").is_none());
+    }
 
     /// 35.2 — high confidence: cross_strait without context_clues, single
     /// suggestion.  Auto-fix safety still gated on rule_type being one of
@@ -3440,6 +3458,19 @@ mod tests {
         assert!(!content.is_empty());
         let text = content[0].get("text").and_then(|v| v.as_str()).unwrap();
         serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn tools_call_simplified_input_builds_s2t_lazily() {
+        // s2t is built lazily on first Simplified input; this exercises that
+        // path end-to-end (get_or_init + convert) and confirms the flag is set.
+        let (mut server, _dir) = make_initialized_server();
+        let resp = call_zhtw(&mut server, serde_json::json!({ "text": "软件测试" }));
+        let output = assert_tool_success(&resp);
+        assert_eq!(output["s2t_applied"], true);
+        // A second call reuses the already-built converter (no re-init panic).
+        let resp2 = call_zhtw(&mut server, serde_json::json!({ "text": "软件" }));
+        assert_eq!(assert_tool_success(&resp2)["s2t_applied"], true);
     }
 
     #[test]

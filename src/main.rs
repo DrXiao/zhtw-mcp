@@ -686,15 +686,7 @@ fn main() -> Result<()> {
 
     tracing::info!("zhtw-mcp server starting on stdio");
 
-    #[cfg(feature = "async-transport")]
-    {
-        tracing::info!("using async transport (tokio)");
-        zhtw_mcp::mcp::transport_async::run_async_stdio(&mut server)?;
-    }
-    #[cfg(not(feature = "async-transport"))]
-    {
-        zhtw_mcp::mcp::transport::run_stdio(&mut server)?;
-    }
+    zhtw_mcp::mcp::transport::run_stdio(&mut server)?;
 
     Ok(())
 }
