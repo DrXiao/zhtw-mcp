@@ -23,7 +23,10 @@ use anyhow::Result;
 
 use super::sampling::{SamplingBridge, DEFAULT_SAMPLING_BUDGET, DEFAULT_SAMPLING_TIMEOUT};
 use super::tools::Server;
-use super::types::{JsonRpcRequest, JsonRpcResponse, TransportError, INVALID_REQUEST, PARSE_ERROR};
+use super::types::{
+    JsonRpcRequest, JsonRpcResponse, RequestId, TransportError, INTERNAL_ERROR, INVALID_REQUEST,
+    PARSE_ERROR,
+};
 
 /// Maximum line length we'll accept from stdin (4 MiB payload).
 /// Prevents memory exhaustion from malformed input.
@@ -42,7 +45,9 @@ pub(crate) enum StdinMsg {
 
 /// Result of a bounded line read (internal to the reader thread).
 enum ReadLine {
-    Line,
+    /// A validated, trimmed line. UTF-8 is checked exactly once, here, so the
+    /// caller neither re-validates nor risks a panic on an invalid boundary.
+    Line(String),
     Eof,
     TooLong,
     MalformedUtf8(str::Utf8Error),
@@ -59,11 +64,9 @@ fn send(out: &mut impl Write, resp: &JsonRpcResponse) -> Result<()> {
 
 /// Read a single line from reader, bounded to MAX_LINE_BYTES.
 ///
-/// Reads into `raw` (cleared first) so the caller can reuse the allocation
-/// across calls.  UTF-8 is validated via `str::from_utf8` (borrow) instead
-/// of `String::from_utf8` (move), keeping ownership of the buffer with the
-/// caller.  On `ReadLine::Line`, `raw` contains valid UTF-8 bytes that the
-/// caller can convert to `&str` without re-validation.
+/// Reads into `raw` (cleared first) so the caller can reuse the read buffer
+/// across calls.  On success the line is validated as UTF-8 once and returned
+/// trimmed as `ReadLine::Line(String)`, so the caller never re-validates.
 fn read_bounded_line(reader: &mut impl BufRead, raw: &mut Vec<u8>) -> io::Result<ReadLine> {
     raw.clear();
     let n = reader
@@ -81,7 +84,7 @@ fn read_bounded_line(reader: &mut impl BufRead, raw: &mut Vec<u8>) -> io::Result
     }
 
     match str::from_utf8(raw) {
-        Ok(_) => Ok(ReadLine::Line),
+        Ok(s) => Ok(ReadLine::Line(s.trim().to_owned())),
         Err(e) => Ok(ReadLine::MalformedUtf8(e)),
     }
 }
@@ -128,13 +131,9 @@ pub fn run_stdio(server: &mut Server) -> Result<()> {
         loop {
             match read_bounded_line(&mut reader, &mut raw) {
                 Ok(ReadLine::Eof) => break,
-                Ok(ReadLine::Line) => {
-                    // raw is validated UTF-8 by read_bounded_line
-                    let text = str::from_utf8(&raw).expect("ReadLine::Line implies valid UTF-8");
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty()
-                        && line_tx.send(StdinMsg::Line(trimmed.to_owned())).is_err()
-                    {
+                Ok(ReadLine::Line(text)) => {
+                    // Already validated and trimmed by read_bounded_line.
+                    if !text.is_empty() && line_tx.send(StdinMsg::Line(text)).is_err() {
                         break; // receiver dropped
                     }
                 }
@@ -212,7 +211,9 @@ pub fn run_stdio(server: &mut Server) -> Result<()> {
             }
         };
 
-        // Notifications (no id) get no response per JSON-RPC spec.
+        // Notifications (no id) get no response per JSON-RPC spec. Handler
+        // panics are caught inside dispatch() (the scanner processes untrusted
+        // text), so one bad request replies -32603 instead of killing the loop.
         let (resp, spillover) = dispatch(server, &mut req, &line_rx, &mut writer);
         if server.supports_logging() && !mcp_logging {
             crate::trace::set_mcp_log_sender(Some(log_tx.clone()));
@@ -257,6 +258,26 @@ fn drain_mcp_logs(
     Ok(())
 }
 
+/// Message for the -32603 returned when a request handler panics.
+const HANDLER_PANIC_MSG: &str = "internal error: request handler panicked";
+
+/// Run `f`, catching a panic as `Err(())`. The default panic hook still logs
+/// the payload to stderr; stdout stays reserved for JSON-RPC. `AssertUnwindSafe`
+/// is sound here: a caught panic may leave `Server`'s caches/counters partially
+/// updated, but `HashMap`/`Vec` stay structurally valid across the unwind, so
+/// later requests see stale-but-consistent state rather than a dead server.
+fn catch_panic<T>(f: impl FnOnce() -> T) -> Result<T, ()> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| ())
+}
+
+/// Map a caught handler panic to an optional error response: `Some(-32603)`
+/// for a request (has id), `None` for a notification (no id, no reply per spec).
+fn panic_response(id: &Option<RequestId>) -> Option<JsonRpcResponse> {
+    tracing::error!("request handler panicked");
+    id.clone()
+        .map(|id| JsonRpcResponse::error(Some(id), INTERNAL_ERROR, HANDLER_PANIC_MSG.into()))
+}
+
 fn dispatch(
     server: &mut Server,
     req: &mut JsonRpcRequest,
@@ -264,12 +285,17 @@ fn dispatch(
     writer: &mut impl Write,
 ) -> (Option<JsonRpcResponse>, Vec<StdinMsg>) {
     // Pre-init routing (initialize, ping, notifications, rejection).
-    if let Some(resp) = server.dispatch_preinit(req) {
-        return (resp, Vec::new());
+    match catch_panic(|| server.dispatch_preinit(req)) {
+        Ok(Some(resp)) => return (resp, Vec::new()),
+        Ok(None) => {}
+        Err(()) => return (panic_response(&req.id), Vec::new()),
     }
 
     // tools/call needs a sampling bridge; all others delegate to dispatch_method.
     if req.method == "tools/call" {
+        // The bridge lives outside the catch so its buffered spillover (unrelated
+        // client messages read while awaiting a sampling reply) is reclaimed even
+        // when the tool handler panics mid-call.
         let mut bridge = if server.supports_sampling() {
             Some(SamplingBridge::new(
                 writer,
@@ -280,11 +306,17 @@ fn dispatch(
         } else {
             None
         };
-        let resp = server.handle_tools_call(req, bridge.as_mut());
+        let resp = match catch_panic(|| server.handle_tools_call(req, bridge.as_mut())) {
+            Ok(resp) => Some(resp),
+            Err(()) => panic_response(&req.id),
+        };
         let spillover = bridge.map_or_else(Vec::new, SamplingBridge::into_spillover);
-        (Some(resp), spillover)
+        (resp, spillover)
     } else {
-        (server.dispatch_method(req), Vec::new())
+        match catch_panic(|| server.dispatch_method(req)) {
+            Ok(resp) => (resp, Vec::new()),
+            Err(()) => (panic_response(&req.id), Vec::new()),
+        }
     }
 }
 
@@ -311,7 +343,7 @@ mod tests {
         let mut raw = Vec::new();
         assert!(matches!(
             read_bounded_line(&mut reader, &mut raw).unwrap(),
-            ReadLine::Line
+            ReadLine::Line(_)
         ));
         let text = str::from_utf8(&raw).unwrap();
         assert_eq!(text.trim(), "hello");
@@ -324,7 +356,7 @@ mod tests {
         let mut raw = Vec::new();
         assert!(matches!(
             read_bounded_line(&mut reader, &mut raw).unwrap(),
-            ReadLine::Line
+            ReadLine::Line(_)
         ));
         assert_eq!(str::from_utf8(&raw).unwrap(), "hello");
     }
@@ -335,7 +367,7 @@ mod tests {
         let mut raw = Vec::new();
         assert!(matches!(
             read_bounded_line(&mut reader, &mut raw).unwrap(),
-            ReadLine::Line
+            ReadLine::Line(_)
         ));
         assert_eq!(raw, b"\n");
         assert!(str::from_utf8(&raw).unwrap().trim().is_empty());
@@ -354,7 +386,7 @@ mod tests {
         let mut raw = Vec::new();
         assert!(matches!(
             read_bounded_line(&mut reader, &mut raw).unwrap(),
-            ReadLine::Line
+            ReadLine::Line(_)
         ));
         let text = str::from_utf8(&raw).unwrap();
         assert!(text.trim().ends_with('中'));
@@ -413,7 +445,7 @@ mod tests {
         // Next read should yield the valid line
         assert!(matches!(
             read_bounded_line(&mut reader, &mut raw).unwrap(),
-            ReadLine::Line
+            ReadLine::Line(_)
         ));
         assert_eq!(str::from_utf8(&raw).unwrap().trim(), "valid");
     }
@@ -437,13 +469,13 @@ mod tests {
 
         assert!(matches!(
             read_bounded_line(&mut reader, &mut raw).unwrap(),
-            ReadLine::Line
+            ReadLine::Line(_)
         ));
         assert_eq!(str::from_utf8(&raw).unwrap().trim(), "line1");
 
         assert!(matches!(
             read_bounded_line(&mut reader, &mut raw).unwrap(),
-            ReadLine::Line
+            ReadLine::Line(_)
         ));
         assert_eq!(str::from_utf8(&raw).unwrap().trim(), "line2");
 
@@ -461,22 +493,45 @@ mod tests {
 
         assert!(matches!(
             read_bounded_line(&mut reader, &mut raw).unwrap(),
-            ReadLine::Line
+            ReadLine::Line(_)
         ));
         assert_eq!(str::from_utf8(&raw).unwrap().trim(), "first");
 
         // Empty line
         assert!(matches!(
             read_bounded_line(&mut reader, &mut raw).unwrap(),
-            ReadLine::Line
+            ReadLine::Line(_)
         ));
         assert!(str::from_utf8(&raw).unwrap().trim().is_empty());
 
         assert!(matches!(
             read_bounded_line(&mut reader, &mut raw).unwrap(),
-            ReadLine::Line
+            ReadLine::Line(_)
         ));
         assert_eq!(str::from_utf8(&raw).unwrap().trim(), "second");
+    }
+
+    // -- panic recovery tests --
+
+    #[test]
+    fn panic_response_request_gets_internal_error() {
+        let resp = panic_response(&Some(RequestId::Int(7))).expect("request must get a response");
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["id"], 7);
+        assert_eq!(v["error"]["code"], INTERNAL_ERROR);
+        assert!(v.get("result").is_none());
+    }
+
+    #[test]
+    fn panic_response_notification_gets_no_response() {
+        // No id => notification => no reply, per JSON-RPC spec.
+        assert!(panic_response(&None).is_none());
+    }
+
+    #[test]
+    fn catch_panic_maps_panic_to_err() {
+        assert_eq!(catch_panic(|| 41 + 1), Ok(42));
+        assert_eq!(catch_panic(|| panic!("boom")), Err(()));
     }
 
     // -- send() tests --

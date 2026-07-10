@@ -253,14 +253,16 @@ pub struct ToolDef {
 /// MCP tool annotations (hints for clients about tool behavior).
 #[derive(Debug, Serialize)]
 pub struct ToolAnnotations {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // MCP wire names are the `*Hint` forms; spec-compliant clients drop any
+    // other spelling. Field idents stay short; serde rename carries the wire name.
+    #[serde(rename = "destructiveHint", skip_serializing_if = "Option::is_none")]
     pub destructive: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "idempotentHint", skip_serializing_if = "Option::is_none")]
     pub idempotent: Option<bool>,
-    #[serde(rename = "readOnly", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "readOnlyHint", skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
     #[serde(rename = "openWorldHint", skip_serializing_if = "Option::is_none")]
-    pub open_world_hint: Option<bool>,
+    pub open_world: Option<bool>,
 }
 
 /// Result of tools/list.
@@ -604,6 +606,35 @@ pub const SERVER_NOT_INITIALIZED: i64 = -32002;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // -- ToolAnnotations wire format --
+
+    /// Every annotation must serialize under its MCP-spec `*Hint` wire name and
+    /// never under a bare spelling. All four fields are set so each rename
+    /// attribute is exercised (a skipped `None` field would hide a regression).
+    #[test]
+    fn tool_annotations_all_fields_use_spec_hint_wire_names() {
+        let v = serde_json::to_value(ToolAnnotations {
+            destructive: Some(true),
+            idempotent: Some(false),
+            read_only: Some(true),
+            open_world: Some(false),
+        })
+        .unwrap();
+        assert_eq!(v["destructiveHint"], true);
+        assert_eq!(v["idempotentHint"], false);
+        assert_eq!(v["readOnlyHint"], true);
+        assert_eq!(v["openWorldHint"], false);
+        for bare in [
+            "destructive",
+            "idempotent",
+            "readOnly",
+            "openWorld",
+            "open_world",
+        ] {
+            assert!(v.get(bare).is_none(), "unexpected bare wire name: {bare}");
+        }
+    }
 
     // -- RequestId serde round-trips --
 

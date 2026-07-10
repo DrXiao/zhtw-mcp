@@ -156,11 +156,15 @@ fn e2e_initialize_and_tools_list() {
     let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(tool_names.contains(&"zhtw"));
 
-    // Verify tool annotations (MCP spec compliance)
+    // Verify tool annotations use the MCP-spec `*Hint` wire names; any other
+    // spelling is silently dropped by spec-compliant clients.
     let zhtw = tools.iter().find(|t| t["name"] == "zhtw").unwrap();
-    assert_eq!(zhtw["annotations"]["readOnly"], true);
-    assert_eq!(zhtw["annotations"]["idempotent"], true);
-    assert!(zhtw["annotations"].get("destructive").is_none());
+    assert_eq!(zhtw["annotations"]["readOnlyHint"], true);
+    assert_eq!(zhtw["annotations"]["idempotentHint"], true);
+    assert!(zhtw["annotations"].get("destructiveHint").is_none());
+    // Non-spec spellings must not appear on the wire.
+    assert!(zhtw["annotations"].get("readOnly").is_none());
+    assert!(zhtw["annotations"].get("idempotent").is_none());
 
     // Verify zhtw schema has expected parameters
     let props = &zhtw["inputSchema"]["properties"];

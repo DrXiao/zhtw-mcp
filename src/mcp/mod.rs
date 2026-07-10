@@ -5,6 +5,4 @@ pub mod setup;
 pub mod telemetry;
 pub mod tools;
 pub mod transport;
-#[cfg(feature = "async-transport")]
-pub mod transport_async;
 pub mod types;
