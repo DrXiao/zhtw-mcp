@@ -19,7 +19,9 @@
 // of common function words and particles.
 // Freq weights: rule terms=1, general vocab=5, stop words=10.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+use rustc_hash::FxHashMap;
 
 // ---------------------------------------------------------------------------
 // CharTrie — character-indexed trie for O(L) dict lookups
@@ -33,7 +35,10 @@ struct TrieNode {
     freq: u32,
     /// Whether this word is a rule 'from' term (excluded from boundary checks).
     is_rule_from: bool,
-    children: HashMap<char, TrieNode>,
+    // FxHashMap: char keys don't need SipHash's DoS resistance, and this map
+    // is probed once per character on the scan hot path (~56% of spelling-only
+    // time) as well as filled on every startup.
+    children: FxHashMap<char, TrieNode>,
 }
 
 /// Character-indexed trie built from the segmenter dictionary.
@@ -41,13 +46,13 @@ struct TrieNode {
 /// Provides O(L) lookup per position by walking one trie edge per character,
 /// eliminating per-substring hashing in bitmap construction and MMSEG probing.
 struct CharTrie {
-    root: HashMap<char, TrieNode>,
+    root: FxHashMap<char, TrieNode>,
 }
 
 impl CharTrie {
     fn new() -> Self {
         Self {
-            root: HashMap::new(),
+            root: FxHashMap::default(),
         }
     }
 

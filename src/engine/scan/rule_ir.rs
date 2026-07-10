@@ -11,8 +11,9 @@
 // confirmation, and TM suppression operate at different granularity
 // and are explicitly excluded.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use daachorse::{CharwiseDoubleArrayAhoCorasickBuilder, MatchKind as DaacMatchKind};
@@ -692,15 +693,22 @@ pub fn compile_spelling_rules_filtered(
         spelling_rules.into_iter().filter(|r| !r.disabled).collect();
 
     // Deduplicate by `from` key (last wins; overrides come after embedded).
+    // Borrow the keys instead of cloning ~1.8k Strings, and mark-then-retain
+    // instead of repeated O(n) Vec::remove.
     {
-        let mut seen = HashSet::new();
-        let mut i = spelling_rules.len();
-        while i > 0 {
-            i -= 1;
-            if !seen.insert(spelling_rules[i].from.clone()) {
-                spelling_rules.remove(i);
+        let mut seen: FxHashSet<&str> = FxHashSet::default();
+        let mut keep = vec![true; spelling_rules.len()];
+        for i in (0..spelling_rules.len()).rev() {
+            if !seen.insert(spelling_rules[i].from.as_str()) {
+                keep[i] = false;
             }
         }
+        let mut i = 0;
+        spelling_rules.retain(|_| {
+            let k = keep[i];
+            i += 1;
+            k
+        });
     }
 
     // Profile-aware filtering: exclude rule types that the target profile
@@ -724,11 +732,11 @@ pub fn compile_spelling_rules_filtered(
     // Deduplicate context clues within each rule.
     for rule in &mut spelling_rules {
         if let Some(ref mut clues) = rule.context_clues {
-            let mut seen = HashSet::new();
+            let mut seen = FxHashSet::default();
             clues.retain(|c| seen.insert(c.clone()));
         }
         if let Some(ref mut clues) = rule.negative_context_clues {
-            let mut seen = HashSet::new();
+            let mut seen = FxHashSet::default();
             clues.retain(|c| seen.insert(c.clone()));
         }
     }
@@ -763,7 +771,7 @@ pub fn compile_spelling_rules_filtered(
     // Build clue AC: intern all unique clue strings, map per-rule clue
     // lists to indices, build a bytewise AC for windowed lookups.
     let (clue_ac, mut rule_pos_clue_ids, mut rule_neg_clue_ids) = {
-        let mut clue_map: HashMap<String, u16> = HashMap::new();
+        let mut clue_map: FxHashMap<String, u16> = FxHashMap::default();
         let mut clue_vec: Vec<String> = Vec::new();
 
         let mut intern_clue = |s: &String| -> Option<u16> {
@@ -884,9 +892,9 @@ pub fn compile_spelling_rules_filtered(
     // injected into the AC so LeftmostLongest suppresses shorter `from`
     // matches.  Indices >= spelling_rules.len() act as sentinels.
     let absorber_strings: Vec<String> = {
-        let from_set: HashSet<&str> = spelling_patterns.iter().copied().collect();
+        let from_set: FxHashSet<&str> = spelling_patterns.iter().copied().collect();
         let mut candidates: Vec<(String, &str)> = Vec::new();
-        let mut dedup = HashSet::new();
+        let mut dedup = FxHashSet::default();
         for rule in &spelling_rules {
             if let Some(ref exceptions) = rule.exceptions {
                 for exc in exceptions {
@@ -908,28 +916,57 @@ pub fn compile_spelling_rules_filtered(
                 }
             }
         }
+        // Index froms by first char.  Both shadow conditions below --
+        // containment (`absorber.contains(f)`) and right-boundary overlap
+        // (a suffix of the absorber is a prefix of f) -- require f's first
+        // char to occur in the absorber.  So only froms bucketed under a
+        // char the absorber actually contains can shadow it; the rest are
+        // skipped.  Exact same result as scanning all patterns, ~50x fewer
+        // comparisons on the ~1.8k-rule ruleset.
+        let mut from_by_first: FxHashMap<char, Vec<&str>> = FxHashMap::default();
+        let mut has_empty_from = false;
+        for &f in &spelling_patterns {
+            match f.chars().next() {
+                Some(c) => from_by_first.entry(c).or_default().push(f),
+                None => has_empty_from = true,
+            }
+        }
+
         // Reject absorbers that would shadow a different rule's `from`.
         candidates
             .into_iter()
             .filter(|(absorber, orig_from)| {
-                !spelling_patterns.iter().any(|&f| {
-                    if f == *orig_from {
-                        return false;
+                // An empty `from` (deduped, so at most one) has no first char
+                // and is thus unbucketed, but it is a substring of every
+                // absorber -- so unless it *is* orig_from, it shadows
+                // unconditionally, exactly as the old full scan did.
+                if has_empty_from && !orig_from.is_empty() {
+                    return false;
+                }
+                let mut chars_seen = FxHashSet::default();
+                !absorber.chars().any(|c| {
+                    if !chars_seen.insert(c) {
+                        return false; // bucket already tested for this absorber
                     }
-                    if absorber.contains(f) {
-                        return true;
-                    }
-                    // Right-boundary overlap: proper suffix of absorber
-                    // is a prefix of f.
-                    let mut chars = absorber.char_indices();
-                    chars.next(); // skip position 0 (full string)
-                    for (byte_idx, _) in chars {
-                        let suffix = &absorber[byte_idx..];
-                        if f.starts_with(suffix) {
+                    from_by_first.get(&c).into_iter().flatten().any(|&f| {
+                        if f == *orig_from {
+                            return false;
+                        }
+                        if absorber.contains(f) {
                             return true;
                         }
-                    }
-                    false
+                        // Right-boundary overlap: proper suffix of absorber
+                        // is a prefix of f.
+                        let mut ci = absorber.char_indices();
+                        ci.next(); // skip position 0 (full string)
+                        for (byte_idx, _) in ci {
+                            let suffix = &absorber[byte_idx..];
+                            if f.starts_with(suffix) {
+                                return true;
+                            }
+                        }
+                        false
+                    })
                 })
             })
             .map(|(s, _)| s)
