@@ -69,6 +69,10 @@ criterion = { version = "0.5", default-features = false }
 name = "scanner"
 harness = false
 
+[[bench]]
+name = "startup"
+harness = false
+
 [profile.release]
 lto = true
 strip = true
