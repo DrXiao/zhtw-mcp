@@ -1504,6 +1504,26 @@ fn e2e_response_shaped_without_id_discarded() {
 }
 
 #[test]
+fn e2e_request_with_id_without_method_rejected() {
+    let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
+
+    // Request-shaped message WITH id but WITHOUT method: should be rejected with INVALID_REQUEST.
+    let request_msg = r#"{"jsonrpc":"2.0","id":999}"#;
+    writeln!(stdin, "{request_msg}").unwrap();
+    stdin.flush().unwrap();
+
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let resp: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(resp["id"], 999);
+    assert_eq!(resp["error"]["code"].as_i64().unwrap(), -32600);
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "child exited with {status}");
+}
+
+#[test]
 fn e2e_notification_with_id_no_response() {
     let bin = binary_path();
     let tmp_dir = tempfile::tempdir().expect("create temp dir");
