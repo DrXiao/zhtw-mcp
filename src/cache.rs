@@ -137,23 +137,23 @@ impl ScanCache {
         }
     }
 
-    /// Ensure entries are loaded from disk (lazy initialization).
-    fn ensure_loaded(&mut self) {
-        if self.entries.is_none() {
-            self.entries = Some(load_entries(&self.path, self.ttl_secs));
-        }
+    /// Ensure entries are loaded from disk (lazy initialization), and return
+    /// them. Returning the reference is what keeps the invariant in the type
+    /// rather than in the caller: there is no way to observe `entries` as
+    /// `None` after calling this.
+    fn ensure_loaded(&mut self) -> &mut HashMap<String, CacheEntry> {
+        let (path, ttl) = (&self.path, self.ttl_secs);
+        self.entries.get_or_insert_with(|| load_entries(path, ttl))
     }
 
     /// Get a reference to entries, loading if necessary.
     fn entries(&mut self) -> &HashMap<String, CacheEntry> {
-        self.ensure_loaded();
-        self.entries.as_ref().unwrap()
+        self.ensure_loaded()
     }
 
     /// Get a mutable reference to entries, loading if necessary.
     fn entries_mut(&mut self) -> &mut HashMap<String, CacheEntry> {
-        self.ensure_loaded();
-        self.entries.as_mut().unwrap()
+        self.ensure_loaded()
     }
 
     /// Fast-path lookup using filesystem metadata (mtime + size).
@@ -166,8 +166,7 @@ impl ScanCache {
         params: &ScanParams,
     ) -> CacheResult {
         let ttl = self.ttl_secs;
-        self.ensure_loaded();
-        let entries = self.entries.as_ref().unwrap();
+        let entries = self.ensure_loaded();
         if let Some(entry) = entries.get(&fast_key(file_path, params)) {
             if now_secs().saturating_sub(entry.timestamp_secs) <= ttl
                 && entry.file_meta.mtime_secs == mtime_secs
@@ -246,12 +245,19 @@ impl ScanCache {
         if !self.dirty {
             return;
         }
-        self.ensure_loaded();
-        let entries = self.entries.as_mut().unwrap();
+        // Destructured so the entries borrow stays independent of `path`,
+        // which the write below needs while `entries` is still live.
+        let Self {
+            path,
+            entries,
+            ttl_secs: ttl,
+            ..
+        } = self;
+        let ttl = *ttl;
+        let entries = entries.get_or_insert_with(|| load_entries(path, ttl));
 
         // Prune expired entries.
         let now = now_secs();
-        let ttl = self.ttl_secs;
         entries.retain(|_, e| now.saturating_sub(e.timestamp_secs) <= ttl);
 
         // Evict oldest entries if over the cap.

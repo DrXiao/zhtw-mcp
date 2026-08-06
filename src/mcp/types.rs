@@ -536,9 +536,30 @@ impl TransportError {
 /// (InvalidRequest → -32600).
 pub fn parse_jsonrpc_line(line: &str) -> Result<JsonRpcRequest, TransportError> {
     // Step 1: parse as generic JSON.
+    //
+    // Everything goes through Value.  Deserializing straight into
+    // JsonRpcRequest is measurably faster but not equivalent: serde's
+    // ignore-unknown-field path skips strings without decoding them, so a lone
+    // UTF-16 surrogate escape in a field this struct does not name parses fine
+    // there and fails here.  The server must not act on a line its own JSON
+    // parser rejects, and a few hundred nanoseconds do not buy that.
     let obj: serde_json::Value = serde_json::from_str(line).map_err(TransportError::Parse)?;
 
-    // Step 2: extract id once for error correlation across all branches.
+    // Step 2: a JSON-RPC message is an object.  Arrays (batches, which MCP
+    // does not support, and positional forms) and bare scalars are invalid
+    // requests.  No id can be recovered from them, so none is echoed.
+    //
+    // This check is what keeps serde from building a JsonRpcRequest out of a
+    // positional array in step 5: `["2.0",1,"ping",{}]` deserializes into the
+    // struct just as happily as an object does.
+    if !obj.is_object() {
+        return Err(TransportError::InvalidRequest(
+            None,
+            "request must be a JSON object".into(),
+        ));
+    }
+
+    // Step 3: extract id once for error correlation across all branches.
     // id_present is true when the JSON has an "id" key (even if null or
     // an unparseable type like boolean/array).  raw_id is the parsed id
     // when it's a valid string, integer, or null.
@@ -546,8 +567,8 @@ pub fn parse_jsonrpc_line(line: &str) -> Result<JsonRpcRequest, TransportError> 
     let raw_id: Option<RequestId> = id_value.and_then(|v| serde_json::from_value(v.clone()).ok());
     let id_present = id_value.is_some();
 
-    // Step 3: handle messages without a method field.
-    if obj.is_object() && obj.get("method").is_none() {
+    // Step 4: handle messages without a method field.
+    if obj.get("method").is_none() {
         let is_response = obj.get("result").is_some() || obj.get("error").is_some();
         if is_response {
             // Response-shaped (has result/error, no method): silently discard.
@@ -571,11 +592,11 @@ pub fn parse_jsonrpc_line(line: &str) -> Result<JsonRpcRequest, TransportError> 
         ));
     }
 
-    // Step 4: convert to typed request.
+    // Step 5: convert to typed request.
     let req: JsonRpcRequest = serde_json::from_value(obj)
         .map_err(|e| TransportError::InvalidRequest(raw_id.clone(), e.to_string()))?;
 
-    // Step 5: validate JSON-RPC version.
+    // Step 6: validate JSON-RPC version.
     if req.jsonrpc != JSONRPC_VERSION {
         return Err(TransportError::InvalidRequest(
             raw_id,
@@ -880,6 +901,90 @@ mod tests {
         match &resp.id {
             Some(RequestId::Int(99)) => {}
             other => panic!("expected id=99, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_positional_array_returns_invalid_request() {
+        // serde deserializes a struct from a positional sequence, so without
+        // an explicit object check this parsed as a valid ping and the server
+        // answered it.
+        let line = r#"["2.0",1,"ping",{}]"#;
+        let err = parse_jsonrpc_line(line).unwrap_err();
+        assert!(matches!(err, TransportError::InvalidRequest(..)));
+        assert_eq!(err.error_code(), Some(INVALID_REQUEST));
+    }
+
+    #[test]
+    fn parse_batch_array_returns_invalid_request() {
+        // MCP does not support JSON-RPC batching; 2025-06-18 removed it.
+        let line = r#"[{"jsonrpc":"2.0","method":"ping","id":1}]"#;
+        let err = parse_jsonrpc_line(line).unwrap_err();
+        assert!(matches!(err, TransportError::InvalidRequest(..)));
+        assert_eq!(err.error_code(), Some(INVALID_REQUEST));
+    }
+
+    #[test]
+    fn parse_bare_scalar_returns_invalid_request() {
+        // Valid JSON, not a JSON-RPC message.
+        for line in [r#""ping""#, "42", "true", "null"] {
+            let err = parse_jsonrpc_line(line).unwrap_err();
+            assert!(
+                matches!(err, TransportError::InvalidRequest(..)),
+                "scalar {line} must be an invalid request"
+            );
+            assert_eq!(err.error_code(), Some(INVALID_REQUEST));
+        }
+    }
+
+    #[test]
+    fn parse_surrounding_whitespace() {
+        let line = "  \t{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":3}  \t ";
+        let req = parse_jsonrpc_line(line).unwrap();
+        assert_eq!(req.method, "ping");
+        assert!(matches!(req.id, Some(RequestId::Int(3))));
+    }
+
+    #[test]
+    fn parse_lone_surrogate_in_ignored_field_is_a_parse_error() {
+        // Regression guard against reintroducing a
+        // `from_str::<JsonRpcRequest>` shortcut: serde's ignore-unknown-field
+        // path skips strings without decoding them, so this line parses as a
+        // request there but not as a Value. Acting on it would mean executing
+        // a message our own JSON parser rejects.
+        let line = r#"{"jsonrpc":"2.0","method":"ping","id":1,"x":"\ud800"}"#;
+        let err = parse_jsonrpc_line(line).unwrap_err();
+        assert!(matches!(err, TransportError::Parse(_)));
+        assert_eq!(err.error_code(), Some(PARSE_ERROR));
+    }
+
+    #[test]
+    fn parse_duplicate_key_takes_the_last_value() {
+        // Value applies last-key-wins, while serde's derived impl rejects
+        // duplicate fields outright. Pinned because the two disagree.
+        let line = r#"{"jsonrpc":"2.0","method":"ping","id":1,"id":2}"#;
+        let req = parse_jsonrpc_line(line).unwrap();
+        assert!(matches!(req.id, Some(RequestId::Int(2))));
+    }
+
+    #[test]
+    fn parse_duplicate_key_with_invalid_last_value_is_rejected() {
+        let line = r#"{"jsonrpc":"2.0","method":"ping","id":1,"id":true}"#;
+        let err = parse_jsonrpc_line(line).unwrap_err();
+        assert!(matches!(err, TransportError::InvalidRequest(..)));
+        let resp = err.into_response(None).expect("should produce response");
+        assert!(resp.id.is_none());
+    }
+
+    #[test]
+    fn parse_non_object_error_response_has_null_id() {
+        for line in [r#"["2.0",1,"ping",{}]"#, r#""ping""#] {
+            let err = parse_jsonrpc_line(line).unwrap_err();
+            let resp = err.into_response(None).expect("should produce response");
+            assert!(resp.id.is_none(), "{line} must answer with a null id");
+            let parsed: Value =
+                serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+            assert!(parsed["id"].is_null());
         }
     }
 
