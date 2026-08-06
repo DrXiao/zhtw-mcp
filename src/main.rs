@@ -854,6 +854,364 @@ struct LintBatchParams<'a> {
     telemetry: bool,
 }
 
+/// Render a file argument as a `path:` prefix relative to the current
+/// directory, or empty for stdin. Shared by the compact and tabular
+/// formatters, which had byte-identical copies of this.
+fn display_path_prefix(file_arg: &str) -> String {
+    if file_arg == "--" {
+        return String::new();
+    }
+    let display_path = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            Path::new(file_arg)
+                .strip_prefix(&cwd)
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| file_arg.to_string());
+    format!("{display_path}:")
+}
+
+/// Join suggestions for display, rendering the delete case as `(delete)`.
+fn format_suggestions(suggestions: &[String]) -> String {
+    if zhtw_mcp::rules::ruleset::is_delete_suggestion(suggestions) {
+        zhtw_mcp::rules::ruleset::DELETE_SUGGESTION.to_string()
+    } else {
+        suggestions.join(", ")
+    }
+}
+
+/// One file's results, as handed to the output formatters.
+struct FileReport<'a> {
+    file_arg: &'a str,
+    detected_script: &'a str,
+    issues: &'a [zhtw_mcp::rules::ruleset::Issue],
+    error_count: usize,
+    warning_count: usize,
+    tm_suppressed: usize,
+    fixes_applied: Option<usize>,
+    fixes_skipped: Option<usize>,
+    ai_signature: Option<&'a zhtw_mcp::engine::ai_score::AiSignatureReport>,
+    translationese_signature:
+        Option<&'a zhtw_mcp::engine::translationese_score::TranslationeseReport>,
+    /// Text the consistency report should run against: post-fix when fixes
+    /// were written, original otherwise.
+    consistency_text: &'a str,
+    text_char_count: usize,
+    multi: bool,
+}
+
+/// Build the JSON result object for one file.
+fn render_json(r: &FileReport<'_>, params: &LintBatchParams<'_>) -> CliFileOutput {
+    CliFileOutput {
+        file: r.file_arg.to_string(),
+        detected_script: r.detected_script.to_string(),
+        total: r.issues.len(),
+        issues: r.issues.to_vec(),
+        errors: r.error_count,
+        warnings: r.warning_count,
+        tm_suppressed: (r.tm_suppressed > 0).then_some(r.tm_suppressed),
+        fixes_applied: r.fixes_applied,
+        fixes_skipped: r.fixes_skipped,
+        ai_signature: r.ai_signature.cloned(),
+        translationese_signature: r.translationese_signature.cloned(),
+        style_scorecard: params.detect_style.then(|| {
+            zhtw_mcp::engine::style_score::StyleScorecard::build(
+                r.ai_signature,
+                r.translationese_signature,
+                r.issues,
+                r.text_char_count,
+            )
+        }),
+        consistency: params
+            .consistency
+            .then(|| {
+                zhtw_mcp::engine::consistency::compute_consistency_report(
+                    r.consistency_text,
+                    r.issues,
+                    &params.glossary,
+                )
+            })
+            .filter(|c| !c.is_empty()),
+    }
+}
+
+/// Print one file's results in the default human format, to stderr.
+fn render_human(r: &FileReport<'_>, params: &LintBatchParams<'_>, c: &Colors) {
+    let prefix = if r.multi {
+        format!("{}{}{}:", c.bold, r.file_arg, c.reset)
+    } else {
+        String::new()
+    };
+    if r.issues.is_empty() {
+        eprintln!("{prefix}{}No issues found.{}", c.dim, c.reset);
+    } else {
+        for issue in r.issues {
+            let sev_color = match issue.severity {
+                zhtw_mcp::rules::ruleset::Severity::Error => c.red,
+                zhtw_mcp::rules::ruleset::Severity::Warning => c.yellow,
+                zhtw_mcp::rules::ruleset::Severity::Info => c.cyan,
+            };
+            let verify_tag = match issue.anchor_match {
+                Some(true) => " [verified]",
+                Some(false) => " [unverified]",
+                None => "",
+            };
+            eprintln!(
+                "{prefix}{}:{}: {}{}{} {}[{}]{} '{}{}{}' -> {}{}",
+                issue.line,
+                issue.col,
+                sev_color,
+                issue.severity.name(),
+                c.reset,
+                c.dim,
+                issue.rule_type.name(),
+                c.reset,
+                c.bold,
+                issue.found,
+                c.reset,
+                format_suggestions(&issue.suggestions),
+                verify_tag,
+            );
+            if params.explain {
+                if let Some(ctx) = &issue.context {
+                    eprintln!("  {}context:{} {ctx}", c.dim, c.reset);
+                }
+                if let Some(eng) = &issue.english {
+                    eprintln!("  {}english:{} {eng}", c.dim, c.reset);
+                }
+            }
+        }
+        eprintln!(
+            "\n{prefix}{}{} issue(s) found.{}",
+            c.bold,
+            r.issues.len(),
+            c.reset
+        );
+    }
+    if let Some(sig) = r.ai_signature {
+        render_score_line(&prefix, "AI score:", sig.score, &sig.top_signals, c);
+    }
+    if let Some(sig) = r.translationese_signature {
+        render_score_line(&prefix, "翻譯腔 score:", sig.score, &sig.top_signals, c);
+    }
+}
+
+/// Print one `score: N.NN (level)` line plus its top signals.
+fn render_score_line(prefix: &str, label: &str, score: f32, signals: &[String], c: &Colors) {
+    let level = if score >= 0.7 {
+        "high"
+    } else if score >= 0.4 {
+        "medium"
+    } else {
+        "low"
+    };
+    eprintln!("{prefix}{}{label}{} {score:.2} ({level})", c.cyan, c.reset);
+    for signal in signals {
+        eprintln!("  {}{signal}{}", c.dim, c.reset);
+    }
+}
+
+/// Print one file's results in grep-style compact format, deduplicated.
+/// Format: `file:line:col:S:rule:from→to`.
+fn render_compact(r: &FileReport<'_>, explain: bool) {
+    use std::collections::HashMap;
+
+    type CompactKey<'a> = (&'a str, &'a str, String, &'a str);
+    struct CompactGroup {
+        first_loc: (usize, usize),
+        locs: Vec<(usize, usize)>,
+        context: Option<String>,
+        english: Option<String>,
+    }
+
+    // Group by dedup key, preserving first-occurrence order via index.
+    let mut groups: HashMap<CompactKey<'_>, CompactGroup> = HashMap::new();
+    let mut order: Vec<CompactKey<'_>> = Vec::new();
+    for issue in r.issues {
+        let key = issue.compact_dedup_key();
+        let group = groups.entry(key.clone()).or_insert_with(|| {
+            order.push(key);
+            CompactGroup {
+                first_loc: (issue.line, issue.col),
+                locs: Vec::new(),
+                context: issue.context.as_deref().map(str::to_string),
+                english: issue.english.as_deref().map(str::to_string),
+            }
+        });
+        group.locs.push((issue.line, issue.col));
+    }
+
+    let file_prefix = display_path_prefix(r.file_arg);
+
+    // Emit in source order (first occurrence of each group).
+    order.sort_by_key(|k| groups[k].first_loc);
+    for key in &order {
+        let (found, rt, sug_key, sev) = key;
+        let group = &groups[key];
+        // Render suggestion: first entry + count of alternatives.
+        let parts: Vec<&str> = sug_key.split('|').collect();
+        let display_sug = if parts.len() <= 1 {
+            parts.first().copied().unwrap_or("?").to_string()
+        } else {
+            format!("{}+{}", parts[0], parts.len() - 1)
+        };
+        if group.locs.len() == 1 {
+            print!(
+                "{file_prefix}{}:{}:{sev}:{rt}:{found}\u{2192}{display_sug}",
+                group.locs[0].0, group.locs[0].1
+            );
+        } else {
+            let rest: Vec<String> = group.locs[1..]
+                .iter()
+                .map(|(l, c)| format!("{l}:{c}"))
+                .collect();
+            print!(
+                "{file_prefix}{}:{}:{sev}:{rt}:{found}\u{2192}{display_sug} (\u{00d7}{} also at {})",
+                group.first_loc.0,
+                group.first_loc.1,
+                group.locs.len(),
+                rest.join(",")
+            );
+        }
+        // --explain: append context/english on the same line.
+        // Sanitize newlines to preserve one-line-per-issue format.
+        if explain {
+            if let Some(ctx) = &group.context {
+                let sanitized = ctx.replace('\n', " ");
+                print!(" [{sanitized}]");
+            }
+            if let Some(eng) = &group.english {
+                print!(" ({eng})");
+            }
+        }
+        println!();
+    }
+}
+
+/// Print one file's results as header-once TSV. `header_printed` is shared
+/// across files so the header appears exactly once per run.
+fn render_tabular(r: &FileReport<'_>, explain: bool, header_printed: &mut bool) {
+    use std::fmt::Write as FmtWrite;
+    use zhtw_mcp::mcp::tools::{
+        compress_locations, escape_tsv_field, group_issues, shorten_severity, shorten_type,
+    };
+
+    if r.issues.is_empty() {
+        return;
+    }
+
+    let groups = group_issues(r.issues, explain);
+    let file_prefix = display_path_prefix(r.file_arg);
+
+    if !*header_printed {
+        if explain {
+            println!("found\tsug\ttype\tsev\tn\tloc\texpl");
+        } else {
+            println!("found\tsug\ttype\tsev\tn\tloc");
+        }
+        *header_printed = true;
+    }
+
+    for ((found, rt, _, sev), group) in &groups {
+        // Cannot reuse format_suggestions: each entry is TSV-escaped before
+        // joining. Only the delete-sentinel predicate is shared.
+        let sug_str = if zhtw_mcp::rules::ruleset::is_delete_suggestion(&group.suggestions) {
+            zhtw_mcp::rules::ruleset::DELETE_SUGGESTION.to_string()
+        } else {
+            group
+                .suggestions
+                .iter()
+                .map(|s| escape_tsv_field(s))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        // When a file prefix is present, each location must be individually
+        // prefixed so consumers can parse "file:L:C,file:L:C" tuples correctly.
+        let loc_str = if file_prefix.is_empty() {
+            compress_locations(&group.locs)
+        } else {
+            group
+                .locs
+                .iter()
+                .map(|(l, c)| format!("{file_prefix}{l}:{c}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let mut line = String::new();
+        let _ = write!(
+            line,
+            "{}\t{sug_str}\t{}\t{}\t{}\t{}",
+            escape_tsv_field(found),
+            shorten_type(rt),
+            shorten_severity(sev),
+            group.count,
+            escape_tsv_field(&loc_str),
+        );
+        if explain {
+            if let Some(ref expl) = group.explanation {
+                let _ = write!(line, "\t{}", escape_tsv_field(expl));
+            } else {
+                line.push('\t');
+            }
+        }
+        println!("{line}");
+    }
+}
+
+/// Accumulate one file's results into the run-wide SARIF rule and result sets.
+fn collect_sarif(
+    r: &FileReport<'_>,
+    rules: &mut std::collections::BTreeMap<String, SarifRuleDef>,
+    results: &mut Vec<SarifResult>,
+) {
+    for issue in r.issues {
+        let rule_name = issue.rule_type.name();
+        let rule_id = format!("zhtw-mcp/{rule_name}");
+        let level = match issue.severity {
+            zhtw_mcp::rules::ruleset::Severity::Error => "error",
+            zhtw_mcp::rules::ruleset::Severity::Warning => "warning",
+            zhtw_mcp::rules::ruleset::Severity::Info => "note",
+        };
+
+        rules
+            .entry(rule_id.clone())
+            .or_insert_with(|| SarifRuleDef {
+                id: rule_id.clone(),
+                short_description: SarifMessage {
+                    text: format!("{rule_name} check"),
+                },
+            });
+
+        results.push(SarifResult {
+            rule_id,
+            level,
+            message: SarifMessage {
+                text: format!(
+                    "'{}' -> {}",
+                    issue.found,
+                    format_suggestions(&issue.suggestions)
+                ),
+            },
+            locations: [SarifLocation {
+                physical_location: SarifPhysicalLocation {
+                    artifact_location: SarifArtifactLocation {
+                        uri: r.file_arg.to_string(),
+                        uri_base_id: "%SRCROOT%",
+                    },
+                    region: SarifRegion {
+                        start_line: issue.line,
+                        start_column: issue.col,
+                        byte_offset: issue.offset,
+                        byte_length: issue.length,
+                    },
+                },
+            }],
+        });
+    }
+}
+
 fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     let c = if use_color() { &COLORS_ON } else { &COLORS_OFF };
 
@@ -1275,12 +1633,28 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                 print!("{}", output_text);
             } else {
                 // Atomic write: tempfile + rename in the same directory.
+                // Worth the rename semantics here, unlike the baseline: this
+                // is the user's source file, and a torn write loses their
+                // content rather than a regenerable artifact.
                 let file_path = Path::new(file_arg);
                 let parent = file_path.parent().unwrap_or(Path::new("."));
                 let mut tmp = tempfile::NamedTempFile::new_in(parent)
                     .with_context(|| format!("create tempfile in {}", parent.display()))?;
                 std::io::Write::write_all(&mut tmp, output_text.as_bytes())
                     .with_context(|| format!("write tempfile for {file_arg}"))?;
+                // A temp file is created 0600. Carry over the mode of the file
+                // being replaced, or --fix silently turns every source file it
+                // touches into 0600 and git reports a mode change on each one.
+                // The file was just read, so metadata is expected to succeed;
+                // a cosmetic mode bit is not worth failing the write over.
+                #[cfg(unix)]
+                if let Ok(meta) = std::fs::metadata(file_path) {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = meta.permissions().mode() & 0o7777;
+                    let _ = tmp
+                        .as_file()
+                        .set_permissions(std::fs::Permissions::from_mode(mode));
+                }
                 tmp.persist(file_path)
                     .with_context(|| format!("rename tempfile to {file_arg}"))?;
                 eprintln!(
@@ -1429,369 +1803,43 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             text_char_count
         };
 
+        let report = FileReport {
+            file_arg,
+            detected_script,
+            issues: &report_issues,
+            error_count,
+            warning_count,
+            tm_suppressed,
+            fixes_applied: fix_result.as_ref().map(|f| f.applied),
+            fixes_skipped: fix_result.as_ref().map(|f| f.skipped),
+            ai_signature: ai_signature.as_ref(),
+            translationese_signature: translationese_signature.as_ref(),
+            consistency_text: if has_text_changes && !params.dry_run {
+                fix_result
+                    .as_ref()
+                    .map_or(text.as_str(), |f| f.text.as_str())
+            } else {
+                text.as_str()
+            },
+            text_char_count: report_text_char_count,
+            multi,
+        };
+
         match params.format {
             LintFormat::Json => {
-                let output = CliFileOutput {
-                    file: file_arg.clone(),
-                    detected_script: detected_script.to_string(),
-                    total: report_issues.len(),
-                    issues: report_issues.clone(),
-                    errors: error_count,
-                    warnings: warning_count,
-                    tm_suppressed: if tm_suppressed > 0 {
-                        Some(tm_suppressed)
-                    } else {
-                        None
-                    },
-                    fixes_applied: fix_result.as_ref().map(|f| f.applied),
-                    fixes_skipped: fix_result.as_ref().map(|f| f.skipped),
-                    ai_signature: ai_signature.clone(),
-                    translationese_signature: translationese_signature.clone(),
-                    style_scorecard: if params.detect_style {
-                        Some(zhtw_mcp::engine::style_score::StyleScorecard::build(
-                            ai_signature.as_ref(),
-                            translationese_signature.as_ref(),
-                            &report_issues,
-                            report_text_char_count,
-                        ))
-                    } else {
-                        None
-                    },
-                    consistency: params
-                        .consistency
-                        .then(|| {
-                            let consistency_text = if has_text_changes && !params.dry_run {
-                                fix_result
-                                    .as_ref()
-                                    .map_or(text.as_str(), |f| f.text.as_str())
-                            } else {
-                                text.as_str()
-                            };
-                            zhtw_mcp::engine::consistency::compute_consistency_report(
-                                consistency_text,
-                                &report_issues,
-                                &params.glossary,
-                            )
-                        })
-                        .filter(|r| !r.is_empty()),
-                };
+                let output = render_json(&report, params);
                 if multi {
                     all_file_results.push(output);
                 } else {
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 }
             }
-            LintFormat::Human => {
-                let prefix = if multi {
-                    format!("{}{file_arg}{}:", c.bold, c.reset)
-                } else {
-                    String::new()
-                };
-                if report_issues.is_empty() {
-                    eprintln!("{prefix}{}No issues found.{}", c.dim, c.reset);
-                } else {
-                    for issue in &report_issues {
-                        let sev_color = match issue.severity {
-                            zhtw_mcp::rules::ruleset::Severity::Error => c.red,
-                            zhtw_mcp::rules::ruleset::Severity::Warning => c.yellow,
-                            zhtw_mcp::rules::ruleset::Severity::Info => c.cyan,
-                        };
-                        let sev = issue.severity.name();
-                        let rule_name = issue.rule_type.name();
-                        let suggestions =
-                            if issue.suggestions.len() == 1 && issue.suggestions[0].is_empty() {
-                                "(delete)".to_string()
-                            } else {
-                                issue.suggestions.join(", ")
-                            };
-                        let verify_tag = match issue.anchor_match {
-                            Some(true) => " [verified]",
-                            Some(false) => " [unverified]",
-                            None => "",
-                        };
-                        eprintln!(
-                            "{prefix}{}:{}: {}{}{} {}[{}]{} '{}{}{}' -> {}{}",
-                            issue.line,
-                            issue.col,
-                            sev_color,
-                            sev,
-                            c.reset,
-                            c.dim,
-                            rule_name,
-                            c.reset,
-                            c.bold,
-                            issue.found,
-                            c.reset,
-                            suggestions,
-                            verify_tag,
-                        );
-                        if params.explain {
-                            if let Some(ctx) = &issue.context {
-                                eprintln!("  {}context:{} {ctx}", c.dim, c.reset);
-                            }
-                            if let Some(eng) = &issue.english {
-                                eprintln!("  {}english:{} {eng}", c.dim, c.reset);
-                            }
-                        }
-                    }
-                    eprintln!(
-                        "\n{prefix}{}{} issue(s) found.{}",
-                        c.bold,
-                        report_issues.len(),
-                        c.reset
-                    );
-                }
-                // AI signature score (when computed).
-                if let Some(ref sig) = ai_signature {
-                    let level = if sig.score >= 0.7 {
-                        "high"
-                    } else if sig.score >= 0.4 {
-                        "medium"
-                    } else {
-                        "low"
-                    };
-                    eprintln!(
-                        "{prefix}{}AI score:{} {:.2} ({level})",
-                        c.cyan, c.reset, sig.score
-                    );
-                    for signal in &sig.top_signals {
-                        eprintln!("  {}{signal}{}", c.dim, c.reset);
-                    }
-                }
-                // Translationese signature score (when computed).
-                if let Some(ref sig) = translationese_signature {
-                    let level = if sig.score >= 0.7 {
-                        "high"
-                    } else if sig.score >= 0.4 {
-                        "medium"
-                    } else {
-                        "low"
-                    };
-                    eprintln!(
-                        "{prefix}{}翻譯腔 score:{} {:.2} ({level})",
-                        c.cyan, c.reset, sig.score
-                    );
-                    for signal in &sig.top_signals {
-                        eprintln!("  {}{signal}{}", c.dim, c.reset);
-                    }
-                }
-            }
-            LintFormat::Compact => {
-                // Grep-style one-line-per-issue, deduplicated for LLM token efficiency.
-                // Format: file:line:col:S:rule:from→to
-                // Uses shared Issue::compact_dedup_key() / Severity::letter().
-                use std::collections::HashMap;
-
-                // Group by dedup key, preserving first-occurrence order via index.
-                type CompactKey<'a> = (&'a str, &'a str, String, &'a str);
-                struct CompactGroup {
-                    first_loc: (usize, usize),
-                    locs: Vec<(usize, usize)>,
-                    context: Option<String>,
-                    english: Option<String>,
-                }
-                let mut groups: HashMap<CompactKey<'_>, CompactGroup> = HashMap::new();
-                let mut order: Vec<CompactKey<'_>> = Vec::new();
-                for issue in &report_issues {
-                    let key = issue.compact_dedup_key();
-                    let group = groups.entry(key.clone()).or_insert_with(|| {
-                        order.push(key);
-                        CompactGroup {
-                            first_loc: (issue.line, issue.col),
-                            locs: Vec::new(),
-                            context: issue.context.as_deref().map(str::to_string),
-                            english: issue.english.as_deref().map(str::to_string),
-                        }
-                    });
-                    group.locs.push((issue.line, issue.col));
-                }
-
-                let file_prefix = if file_arg == "--" {
-                    String::new()
-                } else {
-                    let display_path = std::env::current_dir()
-                        .ok()
-                        .and_then(|cwd| {
-                            Path::new(file_arg)
-                                .strip_prefix(&cwd)
-                                .ok()
-                                .map(|p| p.to_string_lossy().into_owned())
-                        })
-                        .unwrap_or_else(|| file_arg.clone());
-                    format!("{display_path}:")
-                };
-
-                // Emit in source order (first occurrence of each group).
-                order.sort_by_key(|k| groups[k].first_loc);
-                for key in &order {
-                    let (found, rt, sug_key, sev) = key;
-                    let group = &groups[key];
-                    // Render suggestion: first entry + count of alternatives.
-                    let parts: Vec<&str> = sug_key.split('|').collect();
-                    let display_sug = if parts.len() <= 1 {
-                        parts.first().copied().unwrap_or("?").to_string()
-                    } else {
-                        format!("{}+{}", parts[0], parts.len() - 1)
-                    };
-                    if group.locs.len() == 1 {
-                        print!(
-                            "{file_prefix}{}:{}:{sev}:{rt}:{found}\u{2192}{display_sug}",
-                            group.locs[0].0, group.locs[0].1
-                        );
-                    } else {
-                        let rest: Vec<String> = group.locs[1..]
-                            .iter()
-                            .map(|(l, c)| format!("{l}:{c}"))
-                            .collect();
-                        print!(
-                            "{file_prefix}{}:{}:{sev}:{rt}:{found}\u{2192}{display_sug} (\u{00d7}{} also at {})",
-                            group.first_loc.0, group.first_loc.1,
-                            group.locs.len(),
-                            rest.join(",")
-                        );
-                    }
-                    // --explain: append context/english on the same line.
-                    // Sanitize newlines to preserve one-line-per-issue format.
-                    if params.explain {
-                        if let Some(ctx) = &group.context {
-                            let sanitized = ctx.replace('\n', " ");
-                            print!(" [{sanitized}]");
-                        }
-                        if let Some(eng) = &group.english {
-                            print!(" ({eng})");
-                        }
-                    }
-                    println!();
-                }
-            }
+            LintFormat::Human => render_human(&report, params, c),
+            LintFormat::Compact => render_compact(&report, params.explain),
             LintFormat::Tabular => {
-                use std::fmt::Write as FmtWrite;
-                use zhtw_mcp::mcp::tools::{
-                    compress_locations, escape_tsv_field, group_issues, shorten_severity,
-                    shorten_type,
-                };
-
-                let groups = group_issues(&report_issues, params.explain);
-
-                let file_prefix = if file_arg == "--" {
-                    String::new()
-                } else {
-                    let display_path = std::env::current_dir()
-                        .ok()
-                        .and_then(|cwd| {
-                            Path::new(file_arg)
-                                .strip_prefix(&cwd)
-                                .ok()
-                                .map(|p| p.to_string_lossy().into_owned())
-                        })
-                        .unwrap_or_else(|| file_arg.clone());
-                    format!("{display_path}:")
-                };
-
-                if !report_issues.is_empty() {
-                    if !tabular_header_printed {
-                        if params.explain {
-                            println!("found\tsug\ttype\tsev\tn\tloc\texpl");
-                        } else {
-                            println!("found\tsug\ttype\tsev\tn\tloc");
-                        }
-                        tabular_header_printed = true;
-                    }
-                    for ((found, rt, _, sev), group) in &groups {
-                        let sug_str =
-                            if group.suggestions.len() == 1 && group.suggestions[0].is_empty() {
-                                "(delete)".to_string()
-                            } else {
-                                group
-                                    .suggestions
-                                    .iter()
-                                    .map(|s| escape_tsv_field(s))
-                                    .collect::<Vec<_>>()
-                                    .join(",")
-                            };
-                        // When a file prefix is present, each location
-                        // must be individually prefixed so consumers can
-                        // parse "file:L:C,file:L:C" tuples correctly.
-                        let loc_str = if file_prefix.is_empty() {
-                            compress_locations(&group.locs)
-                        } else {
-                            group
-                                .locs
-                                .iter()
-                                .map(|(l, c)| format!("{file_prefix}{l}:{c}"))
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        };
-                        let loc_escaped = escape_tsv_field(&loc_str);
-                        let mut line = String::new();
-                        let _ = write!(
-                            line,
-                            "{}\t{sug_str}\t{}\t{}\t{}\t{loc_escaped}",
-                            escape_tsv_field(found),
-                            shorten_type(rt),
-                            shorten_severity(sev),
-                            group.count,
-                        );
-                        if params.explain {
-                            if let Some(ref expl) = group.explanation {
-                                let _ = write!(line, "\t{}", escape_tsv_field(expl));
-                            } else {
-                                line.push('\t');
-                            }
-                        }
-                        println!("{line}");
-                    }
-                }
+                render_tabular(&report, params.explain, &mut tabular_header_printed);
             }
-            LintFormat::Sarif => {
-                for issue in &report_issues {
-                    let rule_name = issue.rule_type.name();
-                    let rule_id = format!("zhtw-mcp/{rule_name}");
-                    let level = match issue.severity {
-                        zhtw_mcp::rules::ruleset::Severity::Error => "error",
-                        zhtw_mcp::rules::ruleset::Severity::Warning => "warning",
-                        zhtw_mcp::rules::ruleset::Severity::Info => "note",
-                    };
-
-                    sarif_rules
-                        .entry(rule_id.clone())
-                        .or_insert_with(|| SarifRuleDef {
-                            id: rule_id.clone(),
-                            short_description: SarifMessage {
-                                text: format!("{rule_name} check"),
-                            },
-                        });
-
-                    let sugg_text =
-                        if issue.suggestions.len() == 1 && issue.suggestions[0].is_empty() {
-                            "(delete)".to_string()
-                        } else {
-                            issue.suggestions.join(", ")
-                        };
-
-                    sarif_results.push(SarifResult {
-                        rule_id,
-                        level,
-                        message: SarifMessage {
-                            text: format!("'{}' -> {sugg_text}", issue.found),
-                        },
-                        locations: [SarifLocation {
-                            physical_location: SarifPhysicalLocation {
-                                artifact_location: SarifArtifactLocation {
-                                    uri: file_arg.to_string(),
-                                    uri_base_id: "%SRCROOT%",
-                                },
-                                region: SarifRegion {
-                                    start_line: issue.line,
-                                    start_column: issue.col,
-                                    byte_offset: issue.offset,
-                                    byte_length: issue.length,
-                                },
-                            },
-                        }],
-                    });
-                }
-            }
+            LintFormat::Sarif => collect_sarif(&report, &mut sarif_rules, &mut sarif_results),
         }
     }
 

@@ -266,7 +266,7 @@ impl Server {
     pub fn handle_initialize(&mut self, req: &mut JsonRpcRequest) -> JsonRpcResponse {
         let params: InitializeParams = match parse_params(req, "initialize") {
             Ok(p) => p,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
         let _span = tracing::info_span!("mcp_request", method = "initialize").entered();
 
@@ -312,7 +312,7 @@ impl Server {
         let _span = tracing::info_span!("mcp_request", method = "tools/call").entered();
         let params: CallToolParams = match parse_params(req, "tools/call") {
             Ok(p) => p,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
 
         if params.name == "zhtw" {
@@ -333,7 +333,7 @@ impl Server {
         let result = match params.name.as_str() {
             "zhtw" => match self.tool_check(&params.arguments, bridge, req.id.clone()) {
                 Ok(r) => r,
-                Err(resp) => return resp,
+                Err(resp) => return *resp,
             },
             _ => CallToolResult::error(format!("unknown tool: {}", params.name)),
         };
@@ -347,13 +347,12 @@ impl Server {
     /// this trigger a structured error before any processing begins.
     const MAX_TEXT_BYTES: usize = 256 * 1024;
 
-    #[allow(clippy::result_large_err)]
     fn tool_check(
         &mut self,
         args: &Value,
         mut bridge: Option<&mut SamplingBridge<'_>>,
         id: Option<super::types::RequestId>,
-    ) -> Result<CallToolResult, JsonRpcResponse> {
+    ) -> ParamResult<CallToolResult> {
         let started = std::time::Instant::now();
         // Snapshot cache counters at start for per-request telemetry.
         let cache_hits_before = self.judgment_cache.hits;
@@ -792,14 +791,13 @@ impl Server {
 
                 // Filter out TM-suppressed issues before fixing: a term the
                 // user deliberately rejected must not be auto-corrected.
-                let fix_issues: Vec<Issue> = if self.tm_store.is_some() {
-                    issues
+                let fix_issues: Vec<Issue> = match &self.tm_store {
+                    Some(tm) => issues
                         .iter()
-                        .filter(|i| !self.tm_store.as_ref().unwrap().should_suppress(&i.found))
+                        .filter(|i| !tm.should_suppress(&i.found))
                         .cloned()
-                        .collect()
-                } else {
-                    issues.clone()
+                        .collect(),
+                    None => issues.clone(),
                 };
 
                 let excluded_pairs = to_offset_pairs(&excluded);
@@ -1014,7 +1012,7 @@ impl Server {
     pub fn handle_resources_read(&self, req: &mut JsonRpcRequest) -> JsonRpcResponse {
         let params: ResourceReadParams = match parse_params(req, "resources/read") {
             Ok(p) => p,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
 
         match resources::read_resource(&params.uri, self.scanner.spelling_rules()) {
@@ -1035,7 +1033,7 @@ impl Server {
     pub fn handle_prompts_get(&self, req: &mut JsonRpcRequest) -> JsonRpcResponse {
         let params: PromptGetParams = match parse_params(req, "prompts/get") {
             Ok(p) => p,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
 
         let prompt_args: std::collections::HashMap<String, String> = params
@@ -1079,19 +1077,28 @@ fn to_offset_pairs(ranges: &[ByteRange]) -> Vec<(usize, usize)> {
     ranges.iter().map(|r| (r.start, r.end)).collect()
 }
 
+/// Result of parsing a request or tool argument: the error side carries a
+/// ready-to-send JSON-RPC response.
+///
+/// The error is boxed because `JsonRpcResponse` is large, and an unboxed
+/// `Result` is sized for its largest variant, so every successful parse paid
+/// for an error that almost never happens. Boxing moves that cost to the
+/// failure branch and removes the `clippy::result_large_err` suppressions
+/// that used to sit on each of these helpers.
+type ParamResult<T> = Result<T, Box<JsonRpcResponse>>;
+
 /// Parse and take MCP request params, returning a typed struct or an error response.
-#[allow(clippy::result_large_err)]
 fn parse_params<T: serde::de::DeserializeOwned>(
     req: &mut JsonRpcRequest,
     method: &str,
-) -> Result<T, JsonRpcResponse> {
+) -> ParamResult<T> {
     serde_json::from_value(std::mem::take(&mut req.params)).map_err(|e| {
         tracing::warn!("bad {method} params: {e}");
-        JsonRpcResponse::error(
+        Box::new(JsonRpcResponse::error(
             req.id.clone(),
             INVALID_PARAMS,
             format!("invalid {method} parameters"),
-        )
+        ))
     })
 }
 
@@ -1192,63 +1199,61 @@ fn param_error(
     field: &str,
     value: &str,
     accepted: &[&str],
-) -> JsonRpcResponse {
-    JsonRpcResponse::error_with_data(
+) -> Box<JsonRpcResponse> {
+    Box::new(JsonRpcResponse::error_with_data(
         id.clone(),
         INVALID_PARAMS,
         format!("invalid '{field}': '{value}'"),
         json!({ "field": field, "value": value, "accepted": accepted }),
-    )
+    ))
 }
 
 /// Extract a required string field from a JSON object, returning a
 /// structured INVALID_PARAMS error on failure. Distinguishes missing
 /// field from present-but-wrong-type so clients get actionable diagnostics.
-#[allow(clippy::result_large_err)]
 fn require_str_validated<'a>(
     args: &'a Value,
     field: &str,
     id: &Option<super::types::RequestId>,
-) -> Result<&'a str, JsonRpcResponse> {
+) -> ParamResult<&'a str> {
     match args.get(field) {
-        None => Err(JsonRpcResponse::error_with_data(
+        None => Err(Box::new(JsonRpcResponse::error_with_data(
             id.clone(),
             INVALID_PARAMS,
             format!("missing required parameter '{field}'"),
             json!({ "field": field }),
-        )),
+        ))),
         Some(v) => v.as_str().ok_or_else(|| {
             let type_name = json_type_name(v);
-            JsonRpcResponse::error_with_data(
+            Box::new(JsonRpcResponse::error_with_data(
                 id.clone(),
                 INVALID_PARAMS,
                 format!("'{field}' must be a string, got {type_name}"),
                 json!({ "field": field, "expected_type": "string", "actual_type": type_name }),
-            )
+            ))
         }),
     }
 }
 
 /// Extract an optional string field, returning INVALID_PARAMS if the
 /// value is present but not a string. Returns `Ok(None)` when absent.
-#[allow(clippy::result_large_err)]
 fn optional_str_validated<'a>(
     args: &'a Value,
     field: &str,
     id: &Option<super::types::RequestId>,
-) -> Result<Option<&'a str>, JsonRpcResponse> {
+) -> ParamResult<Option<&'a str>> {
     match args.get(field) {
         None => Ok(None),
         Some(v) => match v.as_str() {
             Some(s) => Ok(Some(s)),
             None => {
                 let type_name = json_type_name(v);
-                Err(JsonRpcResponse::error_with_data(
+                Err(Box::new(JsonRpcResponse::error_with_data(
                     id.clone(),
                     INVALID_PARAMS,
                     format!("'{field}' must be a string, got {type_name}"),
                     json!({ "field": field, "expected_type": "string", "actual_type": type_name }),
-                ))
+                )))
             }
         },
     }
@@ -1268,11 +1273,7 @@ fn json_type_name(v: &Value) -> &'static str {
 
 /// Parse the optional "fix_mode" field from tool arguments.
 /// Returns an INVALID_PARAMS error for unrecognized values.
-#[allow(clippy::result_large_err)]
-fn parse_fix_mode(
-    args: &Value,
-    id: &Option<super::types::RequestId>,
-) -> Result<FixMode, JsonRpcResponse> {
+fn parse_fix_mode(args: &Value, id: &Option<super::types::RequestId>) -> ParamResult<FixMode> {
     match optional_str_validated(args, "fix_mode", id)? {
         Some("orthographic") => Ok(FixMode::Orthographic),
         Some("lexical_safe") => Ok(FixMode::LexicalSafe),
@@ -1289,11 +1290,10 @@ fn parse_fix_mode(
 
 /// Parse the optional "content_type" field from tool arguments.
 /// Returns an INVALID_PARAMS error for unrecognized values.
-#[allow(clippy::result_large_err)]
 fn parse_content_type(
     args: &Value,
     id: &Option<super::types::RequestId>,
-) -> Result<ContentType, JsonRpcResponse> {
+) -> ParamResult<ContentType> {
     match optional_str_validated(args, "content_type", id)? {
         Some("markdown") => Ok(ContentType::Markdown),
         Some("markdown-scan-code") => Ok(ContentType::MarkdownScanCode),
@@ -1310,11 +1310,7 @@ fn parse_content_type(
 
 /// Parse the optional "profile" field from tool arguments.
 /// Returns an INVALID_PARAMS error for unrecognized values.
-#[allow(clippy::result_large_err)]
-fn parse_profile(
-    args: &Value,
-    id: &Option<super::types::RequestId>,
-) -> Result<Profile, JsonRpcResponse> {
+fn parse_profile(args: &Value, id: &Option<super::types::RequestId>) -> ParamResult<Profile> {
     match optional_str_validated(args, "profile", id)? {
         None => Ok(Profile::Base),
         Some(s) => Profile::from_str_strict(s)
@@ -1324,11 +1320,10 @@ fn parse_profile(
 
 /// Parse the optional "political_stance" field from tool arguments.
 /// Returns an INVALID_PARAMS error for unrecognized values.
-#[allow(clippy::result_large_err)]
 fn parse_political_stance(
     args: &Value,
     id: &Option<super::types::RequestId>,
-) -> Result<Option<PoliticalStance>, JsonRpcResponse> {
+) -> ParamResult<Option<PoliticalStance>> {
     match optional_str_validated(args, "political_stance", id)? {
         None => Ok(None),
         Some(s) => PoliticalStance::from_str_strict(s)
@@ -1366,11 +1361,10 @@ impl FixOutputMode {
 }
 
 /// Parse the optional "fix_output" parameter from tool arguments.
-#[allow(clippy::result_large_err)]
 fn parse_fix_output(
     args: &Value,
     id: &Option<super::types::RequestId>,
-) -> Result<FixOutputMode, JsonRpcResponse> {
+) -> ParamResult<FixOutputMode> {
     match optional_str_validated(args, "fix_output", id)? {
         Some("full") | None => Ok(FixOutputMode::Full),
         Some("search_replace") => Ok(FixOutputMode::SearchReplace),
@@ -1409,12 +1403,11 @@ enum OutputMode {
 /// Parse the optional "output" mode from tool arguments.
 /// When no explicit value is given, uses the provided default (which may
 /// be auto-detected from the client identity).
-#[allow(clippy::result_large_err)]
 fn parse_output_mode(
     args: &Value,
     default: OutputMode,
     id: &Option<super::types::RequestId>,
-) -> Result<OutputMode, JsonRpcResponse> {
+) -> ParamResult<OutputMode> {
     match optional_str_validated(args, "output", id)? {
         Some("compact") => Ok(OutputMode::Compact),
         Some("full") => Ok(OutputMode::Full),

@@ -196,8 +196,7 @@ pub fn apply_fixes_with_context(
         // text and emoji sequences; the broader set in ai_score.rs is
         // appropriate for detection/scoring but too aggressive for fixing.
         let ai_zero_width_removal = issue.rule_type == IssueType::AiStyle
-            && issue.suggestions.len() == 1
-            && issue.suggestions[0].is_empty()
+            && crate::rules::ruleset::is_delete_suggestion(&issue.suggestions)
             && !issue.found.is_empty()
             && issue.found.chars().all(|ch| {
                 ch == '\u{200B}' || (ch == '\u{FEFF}' && issue.offset > 0) // preserve file-start BOM

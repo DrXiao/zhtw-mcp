@@ -790,14 +790,24 @@ impl IssueType {
     }
 }
 
+/// Text shown for a rule that deletes its match rather than replacing it.
+pub const DELETE_SUGGESTION: &str = "(delete)";
+
+/// True when a suggestion list means "delete the match": exactly one entry,
+/// and that entry empty. Every output format has to special-case this, so the
+/// predicate lives next to the issue rather than in each formatter.
+pub fn is_delete_suggestion(suggestions: &[String]) -> bool {
+    suggestions.len() == 1 && suggestions[0].is_empty()
+}
+
 impl Issue {
     /// Compact suggestion string: first suggestion only, `+N` suffix for alternatives.
     /// Falls back to `english` field when no suggestions exist.
     pub fn compact_suggestion(&self) -> String {
         if self.suggestions.is_empty() {
             self.english.as_deref().unwrap_or("?").to_string()
-        } else if self.suggestions.len() == 1 && self.suggestions[0].is_empty() {
-            "(delete)".to_string()
+        } else if is_delete_suggestion(&self.suggestions) {
+            DELETE_SUGGESTION.to_string()
         } else if self.suggestions.len() == 1 {
             self.suggestions[0].clone()
         } else {
@@ -830,5 +840,37 @@ impl From<RuleType> for IssueType {
             RuleType::Variant => IssueType::Variant,
             RuleType::AiFiller => IssueType::AiStyle,
         }
+    }
+}
+
+#[cfg(test)]
+mod delete_suggestion_tests {
+    use super::*;
+
+    fn sugs(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn only_a_lone_empty_suggestion_means_delete() {
+        assert!(is_delete_suggestion(&sugs(&[""])));
+        // An empty list means "no suggestion", not "delete".
+        assert!(!is_delete_suggestion(&[]));
+        assert!(!is_delete_suggestion(&sugs(&["軟體"])));
+        // Two entries, one empty, is an alternatives list.
+        assert!(!is_delete_suggestion(&sugs(&["", "軟體"])));
+    }
+
+    #[test]
+    fn compact_suggestion_renders_the_delete_sentinel() {
+        let issue = Issue::new(
+            0,
+            3,
+            "\u{200B}",
+            sugs(&[""]),
+            IssueType::AiStyle,
+            Severity::Info,
+        );
+        assert_eq!(issue.compact_suggestion(), DELETE_SUGGESTION);
     }
 }
