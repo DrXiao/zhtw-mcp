@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -274,23 +273,9 @@ impl OverrideStore {
 /// Writes to a temporary file in the same directory, then renames over
 /// the target. This prevents corruption on crash/power-loss.
 fn atomic_write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
-    let raw_parent = path.parent().unwrap_or_else(|| Path::new("."));
-
-    // Normalize empty parent (bare filename like "overrides.json") to "." so
-    // that NamedTempFile::new_in gets a valid directory.
-    let parent = if raw_parent.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        raw_parent
-    };
-    std::fs::create_dir_all(parent).with_context(|| format!("create dir {}", parent.display()))?;
     let json = serde_json::to_string_pretty(value).context("serialize JSON")?;
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("create temp file in {}", parent.display()))?;
-    tmp.write_all(json.as_bytes()).context("write temp JSON")?;
-    tmp.persist(path)
-        .with_context(|| format!("persist {}", path.display()))?;
-    Ok(())
+    crate::atomic::replace_file(path, json.as_bytes())
+        .with_context(|| format!("write {}", path.display()))
 }
 
 /// Best-effort rename of path to path.with_extension(ext).

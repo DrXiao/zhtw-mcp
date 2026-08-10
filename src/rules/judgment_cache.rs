@@ -1,13 +1,13 @@
 // Span-level judgment cache (51.4).
 //
-// Persists LLM disambiguation results so repeated encounters of the same
-// term in similar contexts skip the LLM entirely.  Keyed on a 9-field
-// composite: ruleset_hash, judgment_prompt_version, local_disambig_version,
-// profile, content_type, normalized_context, ambiguous_term,
-// candidate_set_hash, english_anchor.
+// Persists LLM disambiguation results so repeated encounters of the same term
+// in similar contexts skip the LLM entirely. Keyed on a 9-field composite:
+// ruleset_hash, judgment_prompt_version, local_disambig_version, profile,
+// content_type, normalized_context, ambiguous_term, candidate_set_hash,
+// english_anchor.
 //
 // Storage: ~/.config/zhtw-mcp/judgment_cache.json (same pattern as
-// override/suppression stores).  Schema-versioned with backup-and-reset.
+// override/suppression stores). Schema-versioned with backup-and-reset.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -265,25 +265,19 @@ impl JudgmentCache {
         if !self.dirty {
             return;
         }
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         match serde_json::to_string(&self.store) {
-            Ok(json) => {
-                // Atomic write: write to .tmp, then rename over the target.
-                let tmp = self.path.with_extension("json.tmp");
-                if std::fs::write(&tmp, &json).is_ok() {
-                    if std::fs::rename(&tmp, &self.path).is_ok() {
-                        self.dirty = false;
-                    } else {
-                        // Rename failed; try direct write as fallback.
-                        let _ = std::fs::remove_file(&tmp);
-                        if std::fs::write(&self.path, json).is_ok() {
-                            self.dirty = false;
-                        }
-                    }
-                }
-            }
+            Ok(json) => match crate::atomic::replace_file(&self.path, json.as_bytes()) {
+                Ok(()) => self.dirty = false,
+
+                // Staying dirty means Drop retries. There is deliberately no
+                // write-in-place fallback: a direct write over the live file is
+                // the corruption the atomic path exists to avoid, and losing a
+                // cache entry is cheaper than losing the file.
+                Err(e) => tracing::warn!(
+                    "failed to write judgment cache to {}: {e}",
+                    self.path.display()
+                ),
+            },
             Err(e) => tracing::warn!("failed to serialize judgment cache: {e}"),
         }
     }

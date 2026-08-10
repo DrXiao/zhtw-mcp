@@ -281,11 +281,6 @@ impl ScanCache {
             }
         }
 
-        let Some(parent) = self.path.parent() else {
-            return;
-        };
-        let _ = std::fs::create_dir_all(parent);
-
         let entries_vec: Vec<&CacheEntry> = entries.values().collect();
         let Ok(bytes) = serde_json::to_vec(&entries_vec) else {
             return;
@@ -308,7 +303,7 @@ impl ScanCache {
 
         // Write without lock if lock file creation failed; skip entirely if
         // lock is held by another process.
-        if (locked || lock_file.is_err()) && atomic_write(parent, &self.path, &bytes) {
+        if (locked || lock_file.is_err()) && atomic_write(&self.path, &bytes) {
             self.dirty = false;
         }
 
@@ -324,23 +319,20 @@ impl Drop for ScanCache {
     }
 }
 
-/// Atomic write via tempfile + rename.  Returns true on success.
-/// Writes directly to the open fd (not re-opening by path).
+/// Atomic write via [`crate::atomic::replace_file`], reporting success as a
+/// bool because the caller only needs to know whether it may clear `dirty`.
 ///
-/// Failure stays non-fatal because the cache is best effort, but it is
-/// reported at warn rather than swallowed.  The default subscriber filter
-/// is warn, so anything quieter is dropped unless the user already
-/// suspects something, which is the wrong way round for a symptom whose
-/// only other sign is every run being slow for no stated reason.
-fn atomic_write(parent: &Path, dest: &Path, bytes: &[u8]) -> bool {
-    use std::io::Write;
-    let write = || -> std::io::Result<()> {
-        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-        tmp.write_all(bytes)?;
-        tmp.persist(dest)?;
-        Ok(())
-    };
-    match write() {
+/// Failure stays non-fatal, but it is logged rather than swallowed: a cache
+/// that can never write is otherwise invisible, and the only symptom is
+/// every run being slow for no stated reason.
+///
+/// At `warn` rather than `debug` because the default subscriber filter is
+/// `warn`, so anything quieter is dropped unless the user already suspects
+/// something and passes `--debug`.  That is the wrong way round for a
+/// symptom nobody would think to look for.  Matches how the override and
+/// judgment caches report their own store failures.
+fn atomic_write(dest: &Path, bytes: &[u8]) -> bool {
+    match crate::atomic::replace_file(dest, bytes) {
         Ok(()) => true,
         Err(e) => {
             tracing::warn!("scan cache write to {} failed: {e}", dest.display());

@@ -1,4 +1,6 @@
 #[cfg(feature = "native")]
+pub mod atomic;
+#[cfg(feature = "native")]
 pub mod audit;
 #[cfg(feature = "native")]
 pub mod baseline;
