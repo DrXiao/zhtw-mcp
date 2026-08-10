@@ -761,6 +761,16 @@ struct SarifDriver {
     rules: Vec<SarifRuleDef>,
 }
 
+/// SARIF consumers validate `informationUri` as a URI and drop the run if it is
+/// not one, so an empty `repository` in Cargo.toml must not reach the output.
+/// Fail the build instead of substituting a literal: a hardcoded fallback is
+/// what pointed this field at the wrong GitHub org in the first place.
+const SARIF_INFORMATION_URI: &str = env!("CARGO_PKG_REPOSITORY");
+const _: () = assert!(
+    !SARIF_INFORMATION_URI.is_empty(),
+    "Cargo.toml must declare `repository`: it becomes SARIF informationUri"
+);
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SarifRuleDef {
@@ -1881,7 +1891,7 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                     driver: SarifDriver {
                         name: "zhtw-mcp",
                         version: env!("CARGO_PKG_VERSION"),
-                        information_uri: "https://github.com/aspect-build/zhtw-mcp",
+                        information_uri: SARIF_INFORMATION_URI,
                         rules: sarif_rules.into_values().collect(),
                     },
                 },

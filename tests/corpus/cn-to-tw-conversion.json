@@ -174,6 +174,19 @@
         { "found": "雲計算", "replace": "雲端運算", "rule_type": "cross_strait" },
         { "found": "虛擬機", "replace": "虛擬機器", "rule_type": "cross_strait" }
       ]
+    },
+    {
+      "id": "cn_retro_review",
+      "repeat": 55,
+      "input": "这次复联复盘时,团队复用了缓存组件并复查了内存泄漏。",
+      "scan_text": "這次復聯復盤時,團隊複用了緩存組件並複查了內存洩漏。",
+      "expected_fixed": "這次復聯復盤時，團隊複用了快取元件並複查了記憶體洩漏。",
+      "expected_issues": [
+        { "found": ",", "replace": "，", "rule_type": "punctuation" },
+        { "found": "緩存", "replace": "快取", "rule_type": "cross_strait" },
+        { "found": "組件", "replace": "元件", "rule_type": "cross_strait" },
+        { "found": "內存", "replace": "記憶體", "rule_type": "cross_strait" }
+      ]
     }
   ]
 }

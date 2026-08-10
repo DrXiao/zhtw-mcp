@@ -118,7 +118,7 @@ pub struct CompiledRule {
 // ---------------------------------------------------------------------------
 
 /// The compiled spelling rule database.  Owns the AC automata and
-/// all per-rule compiled data.  Constructed by `compile_spelling_rules()`.
+/// all per-rule compiled data.  Constructed by `compile_spelling_rules_filtered()`.
 pub struct CompiledSpellingDb {
     /// Charwise double-array Aho-Corasick (primary).
     /// Not Debug because daachorse types don't implement it.
@@ -133,7 +133,7 @@ pub struct CompiledSpellingDb {
     pub absorber_strings: Vec<String>,
 
     // -- Per-rule parallel arrays (indexed by rule position) --
-    // These arrays are populated during compile_spelling_rules() and used
+    // These arrays are populated during compile_spelling_rules_filtered() and used
     // by structural validation tests (filter_flags_match_rule_properties,
     // filter_vecs_aligned, rule_classes_match_filter_flags).
     /// The spelling rules themselves (filtered and deduplicated).
@@ -151,13 +151,12 @@ pub struct CompiledSpellingDb {
     /// time — `EditorialConfidence` is `Copy`, so no Arc needed.
     pub spelling_editorial_confidence: Vec<Option<crate::rules::ruleset::EditorialConfidence>>,
     /// Per-rule positive clue IDs into the clue AC pattern list.
-    #[allow(dead_code)]
     pub rule_pos_clue_ids: Vec<Option<Vec<u16>>>,
     /// Per-rule negative clue IDs into the clue AC pattern list.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // folded into rule_filter_flags at compile time; read by tests
     pub rule_neg_clue_ids: Vec<Option<Vec<u16>>>,
     /// Per-rule parsed positional clues (checked after context-clue gate).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // folded into rule_filter_flags at compile time; read by tests
     pub rule_positional_clues: Vec<Option<Vec<PositionalClue>>>,
     /// Per-rule bitflags gating optional filter stages (spelling::FILTER_*).
     /// Used at compilation time to derive rule_classes;
@@ -629,7 +628,7 @@ fn inflate_spelling_issues_inner(
 }
 
 // ---------------------------------------------------------------------------
-// compile_spelling_rules()
+// compile_spelling_rules_filtered()
 // ---------------------------------------------------------------------------
 
 /// Rule types to exclude from the compiled AC automaton.
@@ -671,17 +670,9 @@ impl ProfileFilter {
 /// builds AC automata (charwise primary, bytewise fallback), interns
 /// context clues, and computes per-rule filter flags and dispatch classes.
 ///
-/// `profile_filter` optionally excludes rule types that the target profile
-/// would always reject, shrinking the DAAC by ~5% under the default profile.
-#[allow(dead_code)]
-pub fn compile_spelling_rules(
-    spelling_rules: Vec<SpellingRule>,
-) -> anyhow::Result<CompiledSpellingDb> {
-    compile_spelling_rules_filtered(spelling_rules, &ProfileFilter::none())
-}
-
-/// Like `compile_spelling_rules` but applies a profile filter to exclude
-/// always-rejected rule types from the AC automaton.
+/// `filter` optionally excludes rule types that the target profile would always
+/// reject, shrinking the DAAC by ~5% under the default profile; pass
+/// `ProfileFilter::none()` to keep every rule.
 pub fn compile_spelling_rules_filtered(
     spelling_rules: Vec<SpellingRule>,
     filter: &ProfileFilter,

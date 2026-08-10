@@ -27,7 +27,7 @@ jobs:
     timeout-minutes: 20
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
 
     - name: Install Rust toolchain
       run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
@@ -46,13 +46,30 @@ jobs:
     - name: make check
       run: make check
 
+  # Reads Cargo.lock against the RustSec advisory DB. Deliberately has no
+  # Swatinem/rust-cache step: this job never compiles the workspace, and sharing
+  # the check job's cache key would let it save an empty target/ tree over the
+  # real cache.
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install cargo-audit
+      uses: taiki-e/install-action@cargo-audit
+
+    - name: cargo audit
+      run: cargo audit
+
   check-size:
     needs: check
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
 
     - name: Install Rust toolchain
       run: rustup toolchain install stable --profile minimal

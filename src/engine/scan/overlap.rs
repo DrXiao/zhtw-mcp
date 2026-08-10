@@ -14,7 +14,7 @@ use crate::rules::ruleset::Issue;
 /// This avoids the ghost-suppression flaw in a forward greedy scan, where A
 /// can be wrongly discarded because B beats A and then C beats B — even though
 /// A and C would not have overlapped.
-#[allow(dead_code)]
+#[allow(dead_code)] // scanner uses the _with_scratch form; this one is read by tests
 pub(crate) fn resolve_overlaps(issues: &mut Vec<Issue>) {
     let mut order = Vec::new();
     let mut keep = Vec::new();

@@ -517,6 +517,20 @@ fn cli_lint_sarif_output() {
     assert_eq!(parsed["version"], "2.1.0");
     let runs = parsed["runs"].as_array().unwrap();
     assert_eq!(runs.len(), 1);
+    // Consumers render informationUri as the tool's home link and validate it
+    // as a URI. Two independent properties, because equality alone would be
+    // tautological (Cargo defines CARGO_PKG_REPOSITORY as "" when the manifest
+    // drops the key, so both sides would go empty together) and a shape check
+    // alone would accept any plausible-looking wrong URL.
+    let repo = env!("CARGO_PKG_REPOSITORY");
+    assert!(
+        repo.starts_with("https://"),
+        "Cargo.toml must declare a repository URL, got {repo:?}"
+    );
+    let info_uri = runs[0]["tool"]["driver"]["informationUri"]
+        .as_str()
+        .expect("informationUri present");
+    assert_eq!(info_uri, repo, "SARIF informationUri must track Cargo.toml");
     let results = runs[0]["results"].as_array().unwrap();
     assert!(!results.is_empty(), "should have SARIF results");
     assert!(
