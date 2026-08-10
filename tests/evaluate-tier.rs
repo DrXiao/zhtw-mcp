@@ -1,8 +1,14 @@
 // Tier distribution evaluation: measures LLM avoidance across corpora.
 //
 // The three-tier pipeline automatically resolves/suppresses issues locally
-// where possible, sending only genuine gray-zone ambiguity to Tier 3 (LLM).
-// No user configuration needed — the system dynamically handles the tradeoff.
+// where possible, sending only genuine gray-zone ambiguity to Tier 3 (LLM). No
+// user configuration needed — the system dynamically handles the tradeoff.
+//
+// These print a table AND assert a floor. They used to only print, which made
+// six tests that could not fail: a regression that sent every issue to the LLM,
+// or one that stopped finding issues altogether, would still have reported
+// success. Each corpus now pins two numbers, because either one alone is
+// gameable. See TierReport::assert_gates.
 
 use zhtw_mcp::engine::disambig::{disambiguate_batch, DisambigConfig, DisambigStats};
 use zhtw_mcp::engine::s2t::S2TConverter;
@@ -35,6 +41,42 @@ impl TierReport {
         }
         let avoided = self.hard_anchor + self.tier2_resolved + self.suppressed;
         (avoided as f64) / (total_eligible as f64) * 100.0
+    }
+
+    /// Share of all scanner hits that would reach the LLM.
+    fn llm_bound_pct(&self) -> f64 {
+        if self.total_issues == 0 {
+            return 0.0;
+        }
+        (self.gray_zone as f64) / (self.total_issues as f64) * 100.0
+    }
+
+    /// Assert the two properties that make the tier model worth having.
+    ///
+    /// `min_issues` keeps the ratio honest: a scanner that finds nothing
+    /// posts a perfect avoidance rate, so the denominator needs its own
+    /// floor.  `max_llm_pct` is the actual gate, that almost everything
+    /// resolves before Tier 3.
+    ///
+    /// Both carry headroom over measured values so a rule change moves the
+    /// numbers without breaking the build, while a collapse still fails.
+    fn assert_gates(&self, min_issues: usize, max_llm_pct: f64) {
+        assert!(
+            self.total_issues >= min_issues,
+            "{} ({}): scanner found {} issues, expected at least {min_issues}; \
+             a shrinking denominator flatters every ratio below it",
+            self.corpus,
+            self.profile.name(),
+            self.total_issues,
+        );
+        assert!(
+            self.llm_bound_pct() <= max_llm_pct,
+            "{} ({}): {:.1}% of {} issues reach Tier 3, budget is {max_llm_pct:.1}%",
+            self.corpus,
+            self.profile.name(),
+            self.llm_bound_pct(),
+            self.total_issues,
+        );
     }
 }
 
@@ -96,7 +138,7 @@ fn evaluate_texts(
     }
 }
 
-fn print_report(reports: &[TierReport]) {
+fn print_report(reports: &[&TierReport]) {
     eprintln!();
     eprintln!(
         "{:<20} {:<8} {:>6} {:>8} {:>6} {:>8} {:>6} {:>6} {:>8}",
@@ -139,7 +181,9 @@ fn eval_deterministic_tier_distribution() {
         Profile::Base,
         false,
     );
-    print_report(&[report]);
+    print_report(&[&report]);
+    // Measured 2026-08-10: 7 issues, 14.3% LLM-bound.
+    report.assert_gates(5, 30.0);
 }
 
 // -- Corpus B: CN cross-strait (bulk terminology) ---------------------------
@@ -163,7 +207,11 @@ fn eval_cross_strait_tier_distribution() {
         Profile::Base,
         false,
     );
-    print_report(&[report]);
+    print_report(&[&report]);
+
+    // Measured 2026-08-10: 27 issues, 3.7% LLM-bound. Bulk terminology is the
+    // case the deterministic tier exists for, so the budget is tight.
+    report.assert_gates(20, 15.0);
 }
 
 // -- Corpus C: ambiguous terms (polysemous, context-dependent) --------------
@@ -187,7 +235,11 @@ fn eval_ambiguous_tier_distribution() {
         Profile::Base,
         false,
     );
-    print_report(&[report]);
+    print_report(&[&report]);
+
+    // Measured 2026-08-10: 10 issues, 20.0% LLM-bound. This corpus is
+    // deliberately polysemous, so a higher share reaching Tier 3 is correct.
+    report.assert_gates(7, 40.0);
 }
 
 // -- Corpus D: mixed markdown (structural integrity) ------------------------
@@ -210,7 +262,11 @@ fn eval_mixed_content_tier_distribution() {
         Profile::Base,
         false,
     );
-    print_report(&[report]);
+    print_report(&[&report]);
+
+    // Measured 2026-08-10: 4 issues, 25.0% LLM-bound. Small corpus, so one
+    // issue moving swings the percentage; the budget is loose accordingly.
+    report.assert_gates(3, 45.0);
 }
 
 // -- Aggregated summary across all corpora ----------------------------------
@@ -264,7 +320,12 @@ fn eval_aggregate_tier_summary() {
 
     eprintln!();
     eprintln!("=== TIER DISTRIBUTION SUMMARY ===");
-    print_report(&[base, strict]);
+
+    // Measured 2026-08-10: 48 issues, 10.4% LLM-bound, identical on both
+    // profiles. Asserted per profile so a strict-only regression is caught.
+    base.assert_gates(40, 25.0);
+    strict.assert_gates(40, 25.0);
+    print_report(&[&base, &strict]);
 }
 
 // -- Large CN corpus --------------------------------------------------------
@@ -294,5 +355,7 @@ fn eval_large_cn_corpus_tier_distribution() {
 
     eprintln!();
     eprintln!("=== CN-TO-TW LARGE CORPUS (8 production sentences) ===");
-    print_report(&[report]);
+    print_report(&[&report]);
+    // Measured 2026-08-10: 47 issues, 8.5% LLM-bound.
+    report.assert_gates(35, 25.0);
 }
