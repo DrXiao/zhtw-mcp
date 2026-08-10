@@ -18,7 +18,7 @@ distclean: clean
 
 check: $(S2T_DATA)
 	cargo test
-	cargo clippy -- -D warnings
+	cargo clippy --all-targets -- -D warnings
 	cargo fmt --check
 	python3 scripts/check-ruleset.py --lint
 
