@@ -145,7 +145,11 @@ zhtw-mcp convert file.md --content-type markdown
 
 This is a two-stage pipeline: first a built-in character/phrase converter (SC→TC), then iterative vocabulary normalization via the standard scanner.
 
-When the `translate` feature is enabled, the `lint` subcommand supports `--verify` to confirm ambiguous substitutions against English anchor terms. The `convert` subcommand does not accept `--verify`; it runs the full calibration step unconditionally when the feature is active.
+### `--verify` sends text off the machine
+
+When the `translate` feature is enabled (it is, by default), `lint` and `convert` both accept `--verify` to confirm ambiguous substitutions against English anchor terms. This is the only part of either subcommand that touches the network: it sends the sentence around each unresolved issue, up to 4 KB per run, to `translate.googleapis.com`. Nothing else in the tool leaves the machine.
+
+It is off unless you pass the flag. Build with `--no-default-features` (plus the features you want) to remove the capability entirely; `--verify` then fails with an explanatory error rather than silently doing nothing.
 
 ## Editor integration setup
 

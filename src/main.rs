@@ -88,8 +88,9 @@ fn main() -> Result<()> {
     let mut consistency = false;
     let mut detect_ai = false;
     let mut detect_translationese = false;
-    // Emit composite three-axis scorecard when --detect-style is used
-    // (set alongside detect_ai + detect_translationese in that arm).
+
+    // Emit composite three-axis scorecard when --detect-style is used (set
+    // alongside detect_ai + detect_translationese in that arm).
     let mut detect_style = false;
     let mut translationese_domain =
         zhtw_mcp::engine::translationese_score::TranslationeseDomain::General;
@@ -283,12 +284,14 @@ fn main() -> Result<()> {
                         }
                         "--detect-style" => {
                             // Combined shorthand: enable both AI filler and
-                            // translationese detection.  Scores remain
+                            // translationese detection. Scores remain
                             // orthogonal — reported side by side, never merged.
                             detect_ai = true;
                             detect_translationese = true;
                             detect_style = true;
-                            // Keep the same optional threshold syntax as --detect-ai.
+
+                            // Keep the same optional threshold syntax as
+                            // --detect-ai.
                             if let Some(next) = args.get(i + 1) {
                                 match next.as_str() {
                                     "low" => {
@@ -313,7 +316,9 @@ fn main() -> Result<()> {
                         }
                         #[cfg(not(feature = "translate"))]
                         "--verify" => {
-                            anyhow::bail!("--verify requires the 'translate' feature (rebuild without --no-default-features)");
+                            anyhow::bail!(
+                                "--verify requires the 'translate' feature; rebuild with --features translate"
+                            );
                         }
                         "--telemetry" => {
                             telemetry = true;
@@ -335,13 +340,26 @@ fn main() -> Result<()> {
                 setup_host = Some(args.get(i).context("setup requires a host name")?.clone());
             }
             "convert" => {
-                // convert subcommand: SC→TW pipeline (built-in s2t + zhtw-mcp fix).
-                // Reads SC text from files or stdin, outputs corrected zh-TW.
+                // convert subcommand: SC→TW pipeline (built-in s2t + zhtw-mcp
+                // fix). Reads SC text from files or stdin, outputs corrected
+                // zh-TW.
                 i += 1;
                 let mut convert_files: Vec<String> = Vec::new();
                 let mut convert_content_type: Option<String> = None;
+                #[cfg(feature = "translate")]
+                let mut convert_verify = false;
                 while i < args.len() {
                     match args[i].as_str() {
+                        #[cfg(feature = "translate")]
+                        "--verify" => {
+                            convert_verify = true;
+                        }
+                        #[cfg(not(feature = "translate"))]
+                        "--verify" => {
+                            anyhow::bail!(
+                                "--verify requires the 'translate' feature; rebuild with --features translate"
+                            );
+                        }
                         "--content-type" => {
                             i += 1;
                             convert_content_type = Some(
@@ -369,6 +387,8 @@ fn main() -> Result<()> {
                     &convert_files,
                     convert_content_type.as_deref(),
                     overrides_path.unwrap_or_else(zhtw_mcp::rules::store::default_overrides_path),
+                    #[cfg(feature = "translate")]
+                    convert_verify,
                 );
             }
             "tm" => {
@@ -387,7 +407,8 @@ fn main() -> Result<()> {
                         );
                     }
                     "record" => {
-                        // Parse --found, --suggested, --chose, --context key-value args.
+                        // Parse --found, --suggested, --chose, --context
+                        // key-value args.
                         i += 1;
                         while i < args.len() && args[i].starts_with("--") {
                             match args[i].as_str() {
@@ -508,9 +529,9 @@ fn main() -> Result<()> {
         return run_setup(host_str);
     }
 
-    // TM subcommand: manage translation memory.
-    // Respect .zhtw-mcp.toml translation_memory override so `tm record`
-    // writes to the same file that `lint` reads.
+    // TM subcommand: manage translation memory. Respect .zhtw-mcp.toml
+    // translation_memory override so `tm record` writes to the same file that
+    // `lint` reads.
     if let Some(cmd) = tm_cmd {
         let cwd = std::env::current_dir().unwrap_or_default();
         let project_cfg = match &config_path {
@@ -1085,8 +1106,9 @@ fn render_compact(r: &FileReport<'_>, explain: bool) {
                 rest.join(",")
             );
         }
-        // --explain: append context/english on the same line.
-        // Sanitize newlines to preserve one-line-per-issue format.
+
+        // --explain: append context/english on the same line. Sanitize newlines
+        // to preserve one-line-per-issue format.
         if explain {
             if let Some(ctx) = &group.context {
                 let sanitized = ctx.replace('\n', " ");
@@ -1137,6 +1159,7 @@ fn render_tabular(r: &FileReport<'_>, explain: bool, header_printed: &mut bool) 
                 .collect::<Vec<_>>()
                 .join(",")
         };
+
         // When a file prefix is present, each location must be individually
         // prefixed so consumers can parse "file:L:C,file:L:C" tuples correctly.
         let loc_str = if file_prefix.is_empty() {
@@ -1362,8 +1385,8 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
 
     // Phase 1: Read + S2T + cache check + scan.
     //
-    // This closure is shared between sequential and parallel (rayon) paths.
-    // It captures only &-refs to immutable state plus the Mutex-wrapped cache,
+    // This closure is shared between sequential and parallel (rayon) paths. It
+    // captures only &-refs to immutable state plus the Mutex-wrapped cache,
     // making it Fn + Send + Sync.
     let fix_mode_str = format!("{:?}", params.fix_mode);
     let scan_file = |file_arg: &str| -> Result<(
@@ -1401,8 +1424,8 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             exempt_blockquotes: cfg.exempt_blockquotes,
         };
 
-        // Open file via fd, stat from the fd (TOCTOU-safe).
-        // Check cache BEFORE reading — fast path avoids file I/O entirely.
+        // Open file via fd, stat from the fd (TOCTOU-safe). Check cache BEFORE
+        // reading — fast path avoids file I/O entirely.
         if file_arg != "--" {
             let file =
                 std::fs::File::open(file_arg).with_context(|| format!("open file: {file_arg}"))?;
@@ -1422,10 +1445,11 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                 c.check_fast(file_arg, mtime, meta.len(), &cache_params)
                     .into_hit()
             });
-            // Glossary banned-term injection and the consistency report
-            // both scan the original text buffer; the fast path can
-            // only short-circuit when neither feature needs it.  Same
-            // story for fix/SC/verify.
+
+            // Glossary banned-term injection and the consistency report both
+            // scan the original text buffer; the fast path can only
+            // short-circuit when neither feature needs it. Same story for
+            // fix/SC/verify.
             let need_text_post_scan = params.fix_mode != zhtw_mcp::fixer::FixMode::None
                 || !params.glossary.is_empty()
                 || params.consistency
@@ -1441,8 +1465,8 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                 };
             if let Some(hit) = fast_hit {
                 if !hit.input_was_sc && !need_text_post_scan {
-                    // Cache hit AND no later phase needs the text:
-                    // skip file read and scan.
+                    // Cache hit AND no later phase needs the text: skip file
+                    // read and scan.
                     return Ok((
                         String::new(),
                         false,
@@ -1451,10 +1475,11 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                         content_type,
                     ));
                 }
-                // SC files need the text for S2T write-back; glossary
-                // / consistency / fix / verify need the original
-                // buffer.  Fall through to the slow path so we read
-                // the file and reuse the cached scan output below.
+
+                // SC files need the text for S2T write-back; glossary /
+                // consistency / fix / verify need the original buffer. Fall
+                // through to the slow path so we read the file and reuse the
+                // cached scan output below.
             }
 
             // Slow path: read file from the same fd.
@@ -1470,8 +1495,8 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             }
             let text_char_count = text.chars().count();
 
-            // Slow-path cache: check content hash (mtime missed but content
-            // may be unchanged, e.g. after `touch`).
+            // Slow-path cache: check content hash (mtime missed but content may
+            // be unchanged, e.g. after `touch`).
             let content_hit = scan_cache.as_ref().and_then(|mtx| {
                 let mut c = mtx.lock().ok()?;
                 c.check_content(file_arg, text.as_bytes(), &cache_params)
@@ -1497,10 +1522,10 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                 }
             };
 
-            // Drop text eagerly when not needed for fix/write-back/verify
-            // to avoid accumulating all files' text in parallel scans.
-            // Project glossary banned-term scanning and the 35.1
-            // consistency report both scan the original buffer.
+            // Drop text eagerly when not needed for fix/write-back/verify to
+            // avoid accumulating all files' text in parallel scans. Project
+            // glossary banned-term scanning and the 35.1 consistency report
+            // both scan the original buffer.
             let need_text = input_was_sc
                 || params.fix_mode != zhtw_mcp::fixer::FixMode::None
                 || !params.glossary.is_empty()
@@ -1544,12 +1569,13 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
         Ok((text, input_was_sc, text_char_count, output, content_type))
     };
 
-    // Parallel scan when multiple files and no stdin pipe.
-    // Rayon parallelism gives N/cores speedup on multi-file lint.
+    // Parallel scan when multiple files and no stdin pipe. Rayon parallelism
+    // gives N/cores speedup on multi-file lint.
     let has_stdin = resolved.iter().any(|f| f == "--");
-    // Type alias keeps clippy::type_complexity happy and gives the
-    // tuple slot ordering a single source of truth: (raw text, was-SC
-    // input flag, char count, scan output, content type).
+
+    // Type alias keeps clippy::type_complexity happy and gives the tuple slot
+    // ordering a single source of truth: (raw text, was-SC input flag, char
+    // count, scan output, content type).
     type ScanResult = Result<(
         String,
         bool,
@@ -1577,12 +1603,12 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
         let mut translationese_signature = output.translationese_signature;
         let mut issues = output.issues;
 
-        // 35.9 — Apply project glossary precedence (proper_noun
-        // suppression + banned-term injection) before disambiguation,
-        // so the rest of the pipeline sees the canonical issue list.
-        // Synthetic banned-term issues land with `line: 0, col: 0` from
-        // `Issue::new`; reapply LineIndex so output formatters and the
-        // 35.1 consistency report see correct coordinates.
+        // 35.9 — Apply project glossary precedence (proper_noun suppression +
+        // banned-term injection) before disambiguation, so the rest of the
+        // pipeline sees the canonical issue list. Synthetic banned-term issues
+        // land with `line: 0, col: 0` from `Issue::new`; reapply LineIndex so
+        // output formatters and the 35.1 consistency report see correct
+        // coordinates.
         issues = apply_glossary_to_issues(&text, content_type, issues);
 
         // Tier 2: local disambiguation.
@@ -1620,8 +1646,8 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             None
         };
 
-        // Write fixed text (unless --dry-run).
-        // Text is written when either S2T conversion was applied or ruleset fixes were made.
+        // Write fixed text (unless --dry-run). Text is written when either S2T
+        // conversion was applied or ruleset fixes were made.
         let fix_applied = fix_result.as_ref().map_or(0, |f| f.applied);
         let has_text_changes = input_was_sc || fix_applied > 0;
         if has_text_changes {
@@ -1642,21 +1668,22 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                 // stdin: emit fixed text to stdout.
                 print!("{}", output_text);
             } else {
-                // Atomic write: tempfile + rename in the same directory.
-                // Worth the rename semantics here, unlike the baseline: this
-                // is the user's source file, and a torn write loses their
-                // content rather than a regenerable artifact.
+                // Atomic write: tempfile + rename in the same directory. Worth
+                // the rename semantics here, unlike the baseline: this is the
+                // user's source file, and a torn write loses their content
+                // rather than a regenerable artifact.
                 let file_path = Path::new(file_arg);
                 let parent = file_path.parent().unwrap_or(Path::new("."));
                 let mut tmp = tempfile::NamedTempFile::new_in(parent)
                     .with_context(|| format!("create tempfile in {}", parent.display()))?;
                 std::io::Write::write_all(&mut tmp, output_text.as_bytes())
                     .with_context(|| format!("write tempfile for {file_arg}"))?;
+
                 // A temp file is created 0600. Carry over the mode of the file
                 // being replaced, or --fix silently turns every source file it
                 // touches into 0600 and git reports a mode change on each one.
-                // The file was just read, so metadata is expected to succeed;
-                // a cosmetic mode bit is not worth failing the write over.
+                // The file was just read, so metadata is expected to succeed; a
+                // cosmetic mode bit is not worth failing the write over.
                 #[cfg(unix)]
                 if let Ok(meta) = std::fs::metadata(file_path) {
                     use std::os::unix::fs::PermissionsExt;
@@ -1674,8 +1701,8 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             }
         }
 
-        // Count remaining issues after fix/S2T (rescan converted text).
-        // Single rescan serves both issue reporting and AI signature refresh.
+        // Count remaining issues after fix/S2T (rescan converted text). Single
+        // rescan serves both issue reporting and AI signature refresh.
         let report_issues = if has_text_changes && !params.dry_run {
             let rescan_text = fix_result
                 .as_ref()
@@ -1694,7 +1721,8 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             }
             let mut rescan = rescan_output.issues;
             if let Some(ref fix) = fix_result {
-                // Suppress convergent-chain noise from the fixer's own replacements.
+                // Suppress convergent-chain noise from the fixer's own
+                // replacements.
                 zhtw_mcp::fixer::suppress_convergent_issues(&mut rescan, &fix.applied_fixes);
             }
             apply_glossary_to_issues(rescan_text, content_type, rescan)
@@ -1726,8 +1754,8 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
 
         // Apply TM suppressions: downgrade rejected terms to Info severity.
         // Only lexical/contextual issue types; orthographic types are immune.
-        // Glossary-banned issues (35.9 precedence: banned > TM) are also
-        // immune — the project explicitly asked for these to always fire.
+        // Glossary-banned issues (35.9 precedence: banned > TM) are also immune
+        // — the project explicitly asked for these to always fire.
         let mut tm_suppressed: usize = 0;
         let report_issues = if let Some(ref tm) = tm_store {
             let mut issues = report_issues;
@@ -1923,7 +1951,8 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
         );
     }
 
-    // Exit 1 if total error-severity or warning-severity issues exceed thresholds.
+    // Exit 1 if total error-severity or warning-severity issues exceed
+    // thresholds.
     let errors_exceeded = total_errors > params.max_errors;
     let warnings_exceeded = params
         .max_warnings
@@ -1940,10 +1969,16 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
 /// Built-in SC→TC conversion (character/phrase level via embedded OpenCC
 /// dictionaries) then zhtw-mcp aggressive fix for context-aware zh-TW
 /// phrase correction. No external OpenCC dependency required.
+/// `verify` opts into the Google Translate anchor check, which sends the
+/// sentences around each remaining issue off the machine.  Off by default:
+/// conversion is otherwise entirely local, and a converter that phones home
+/// unless told not to is the wrong default for anyone holding an
+/// unpublished document.
 fn run_convert(
     file_args: &[String],
     content_type_str: Option<&str>,
     overrides_path: PathBuf,
+    #[cfg(feature = "translate")] verify: bool,
 ) -> Result<()> {
     use zhtw_mcp::engine::scan::{ContentType, Scanner};
     use zhtw_mcp::fixer::{apply_fixes_with_context, FixMode};
@@ -1964,7 +1999,8 @@ fn run_convert(
         }
     }
 
-    // Step 1: SC→TC character/phrase conversion (built-in, no OpenCC dependency).
+    // Step 1: SC→TC character/phrase conversion (built-in, no OpenCC
+    // dependency).
     let s2t = zhtw_mcp::engine::s2t::S2TConverter::new();
     let s2t_output = s2t.convert(&raw_input);
 
@@ -2041,9 +2077,10 @@ fn run_convert(
         text = fix_result.text;
     }
 
-    // Step 4: Final verification via Google Translate (if feature enabled).
+    // Step 4: Optional verification via Google Translate. Requires --verify;
+    // see the note on this function.
     #[cfg(feature = "translate")]
-    {
+    if verify {
         let excluded =
             zhtw_mcp::engine::scan::build_exclusions_for_content_type(&text, content_type);
         let scan_out = scanner.scan_with_prebuilt_excluded(
@@ -2260,9 +2297,9 @@ fn run_pack_cmd(cmd: &str, arg: Option<&str>, packs_dir: &std::path::Path) -> Re
 
 /// Resolve files changed since a given git ref.
 fn resolve_diff_files(git_ref: &str) -> Result<Vec<String>> {
-    // Reject refs starting with - to prevent git flag injection.
-    // Command::new does not invoke a shell, but a ref like --output=x
-    // would still be interpreted as a git flag by the subprocess.
+    // Reject refs starting with - to prevent git flag injection. Command::new
+    // does not invoke a shell, but a ref like --output=x would still be
+    // interpreted as a git flag by the subprocess.
     anyhow::ensure!(
         !git_ref.starts_with('-'),
         "--diff-from ref must not start with '-'"
@@ -2420,15 +2457,16 @@ fn is_excluded(path: &str, patterns: &[String]) -> bool {
                 return true;
             }
         } else if pat.ends_with("/**") {
-            // Directory component match: vendor/** matches /path/to/vendor/file.md
-            // but not /path/to/some_vendor/file.md.
+            // Directory component match: vendor/** matches
+            // /path/to/vendor/file.md but not /path/to/some_vendor/file.md.
             let prefix = &pat[..pat.len() - 3];
             let sep_prefix = format!("/{prefix}/");
             if path.contains(&sep_prefix) || path.ends_with(&format!("/{prefix}")) {
                 return true;
             }
         } else {
-            // Path-component match: check if any path component equals the pattern.
+            // Path-component match: check if any path component equals the
+            // pattern.
             let sep_pat = format!("/{pat}/");
             if path.contains(&sep_pat)
                 || path.ends_with(&format!("/{pat}"))
