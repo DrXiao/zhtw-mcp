@@ -23,11 +23,26 @@ import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-DICT_DIR = REPO / "data" / "opencc"
 OUTPUT = REPO / "src" / "engine" / "s2t_data.rs"
 
-# OpenCC raw file base URL (pinned to master for reproducibility).
-OPENCC_RAW = "https://raw.githubusercontent.com/BYVoid/OpenCC/master/data/dictionary"
+# Pinned OpenCC commit.  This used to say "master", with a comment claiming
+# that was for reproducibility, which it is not: master moves, downloaded
+# files are cached forever, so two developers at the same repo commit built
+# different conversion tables depending on when they first cloned.
+#
+# To bump: change OPENCC_COMMIT, run this script, and paste the printed
+# source hash into EXPECTED_SOURCE_HASH.  The check below refuses to
+# generate if only one of the two moved, so a bump cannot be half-applied.
+OPENCC_COMMIT = "5249273a3e5606852f088c9a8b23522145d94f78"
+EXPECTED_SOURCE_HASH = "959b88f60c9dcc0d"
+
+OPENCC_RAW = (
+    f"https://raw.githubusercontent.com/BYVoid/OpenCC/{OPENCC_COMMIT}/data/dictionary"
+)
+
+# Cache keyed by commit, so bumping the pin fetches fresh files instead of
+# silently reusing whatever an earlier run happened to download.
+DICT_DIR = REPO / "data" / "opencc" / OPENCC_COMMIT[:12]
 
 # Dictionary files to process.
 DICT_FILES = {
@@ -298,6 +313,21 @@ def main():
     chars = filter_safe_chars(chars_raw, ambiguous_chars)
     tw_variants = parse_char_dict(dict_path("tw_variants"))
     source_hash = compute_source_hash()
+
+    # The pin is only worth having if something checks it.  A mismatch means
+    # either the pinned commit was bumped without refreshing the expected
+    # hash, or the cached files no longer match the commit they are filed
+    # under; both produce conversion tables nobody reviewed.
+    if source_hash != EXPECTED_SOURCE_HASH:
+        print(
+            f"error: dictionary source hash {source_hash} does not match "
+            f"EXPECTED_SOURCE_HASH {EXPECTED_SOURCE_HASH}.\n"
+            f"  If you bumped OPENCC_COMMIT (currently {OPENCC_COMMIT[:12]}), "
+            f'review the diff and set EXPECTED_SOURCE_HASH = "{source_hash}".\n'
+            f"  Otherwise the cache at {DICT_DIR} is corrupt: delete it and re-run.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     safe_keys = {key for key, _ in chars}
     overlap = safe_keys & ambiguous_chars
