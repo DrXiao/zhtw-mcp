@@ -316,9 +316,7 @@ fn main() -> Result<()> {
                         }
                         #[cfg(not(feature = "translate"))]
                         "--verify" => {
-                            anyhow::bail!(
-                                "--verify requires the 'translate' feature; rebuild with --features translate"
-                            );
+                            anyhow::bail!("--verify requires the 'translate' feature (rebuild without --no-default-features)");
                         }
                         "--telemetry" => {
                             telemetry = true;
@@ -350,16 +348,6 @@ fn main() -> Result<()> {
                 let mut convert_verify = false;
                 while i < args.len() {
                     match args[i].as_str() {
-                        #[cfg(feature = "translate")]
-                        "--verify" => {
-                            convert_verify = true;
-                        }
-                        #[cfg(not(feature = "translate"))]
-                        "--verify" => {
-                            anyhow::bail!(
-                                "--verify requires the 'translate' feature; rebuild with --features translate"
-                            );
-                        }
                         "--content-type" => {
                             i += 1;
                             convert_content_type = Some(
@@ -367,6 +355,14 @@ fn main() -> Result<()> {
                                     .context("--content-type requires a value")?
                                     .clone(),
                             );
+                        }
+                        #[cfg(feature = "translate")]
+                        "--verify" => {
+                            convert_verify = true;
+                        }
+                        #[cfg(not(feature = "translate"))]
+                        "--verify" => {
+                            anyhow::bail!("--verify requires the 'translate' feature (rebuild without --no-default-features)");
                         }
                         "--" => {
                             convert_files.push("--".into());
@@ -1245,16 +1241,25 @@ fn collect_sarif(
     }
 }
 
-fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
-    let c = if use_color() { &COLORS_ON } else { &COLORS_OFF };
+/// Everything a lint batch builds once and then reuses for every file.
+struct LintSetup {
+    cfg: zhtw_mcp::rules::ruleset::ProfileConfig,
+    scanner: zhtw_mcp::engine::scan::Scanner,
+    ruleset_hash: String,
+    s2t: zhtw_mcp::engine::s2t::S2TConverter,
+    tm_store: Option<zhtw_mcp::rules::store::TranslationMemoryStore>,
+    scan_cache: Option<std::sync::Mutex<zhtw_mcp::cache::ScanCache>>,
+}
 
-    let profile = match params.profile_name {
-        None => zhtw_mcp::rules::ruleset::Profile::Base,
-        Some(s) => zhtw_mcp::rules::ruleset::Profile::from_str_strict(s)
-            .ok_or_else(|| anyhow::anyhow!("unknown profile: {s} (expected 'base' or 'strict')"))?,
-    };
-
-    // Build effective config: profile base + capability flags.
+/// Resolve flags and config into the scanner, stores, and cache the batch
+/// runs against.  Split out of `run_lint_batch` because none of it depends
+/// on the files being linted: it is pure setup, and reviewing it does not
+/// require holding the per-file loop in your head.
+fn build_lint_setup(
+    params: &LintBatchParams<'_>,
+    profile: zhtw_mcp::rules::ruleset::Profile,
+) -> Result<LintSetup> {
+    // Effective config: profile base plus capability flags.
     let mut cfg = profile.config();
     if params.relaxed {
         cfg = cfg.with_relaxed();
@@ -1290,7 +1295,6 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     let filter = zhtw_mcp::engine::scan::ProfileFilter::from_config(&cfg);
     let scanner =
         zhtw_mcp::engine::scan::Scanner::new_filtered(spelling_rules, case_rules, &filter);
-    let s2t = zhtw_mcp::engine::s2t::S2TConverter::new();
 
     // Open translation memory (if path provided and file exists/creatable).
     let tm_store = params.tm_path.as_ref().and_then(|p| {
@@ -1315,6 +1319,64 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     let scan_cache =
         use_cache.then(|| std::sync::Mutex::new(zhtw_mcp::cache::ScanCache::open_default()));
 
+    Ok(LintSetup {
+        cfg,
+        scanner,
+        ruleset_hash,
+        s2t: zhtw_mcp::engine::s2t::S2TConverter::new(),
+        tm_store,
+        scan_cache,
+    })
+}
+
+/// Running counts across every file in one lint batch.  Grouped because
+/// the six of them are always read and written together; six loose
+/// counters in a 700-line function is how one of them gets missed.
+#[derive(Default)]
+struct LintTotals {
+    errors: usize,
+    warnings: usize,
+    deterministic: usize,
+    heuristic: usize,
+    llm_judged: usize,
+    unresolved: usize,
+}
+
+impl LintTotals {
+    fn report_telemetry(&self, file_count: usize) {
+        eprintln!(
+            "[telemetry] files={} total_issues={} errors={} warnings={}",
+            file_count,
+            self.errors + self.warnings,
+            self.errors,
+            self.warnings,
+        );
+        eprintln!(
+            "[telemetry] resolution: deterministic={} heuristic={} llm_judged={} unresolved={}",
+            self.deterministic, self.heuristic, self.llm_judged, self.unresolved,
+        );
+    }
+}
+
+fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
+    let c = if use_color() { &COLORS_ON } else { &COLORS_OFF };
+
+    let profile = match params.profile_name {
+        None => zhtw_mcp::rules::ruleset::Profile::Base,
+        Some(s) => zhtw_mcp::rules::ruleset::Profile::from_str_strict(s)
+            .ok_or_else(|| anyhow::anyhow!("unknown profile: {s} (expected 'base' or 'strict')"))?,
+    };
+
+    let setup = build_lint_setup(params, profile)?;
+    let LintSetup {
+        cfg,
+        ref scanner,
+        ref ruleset_hash,
+        ref s2t,
+        ref scan_cache,
+        ..
+    } = setup;
+
     // --diff-from: resolve changed files via git, use as file args.
     let diff_files: Vec<String>;
     let file_args = if let Some(git_ref) = params.diff_from {
@@ -1327,58 +1389,15 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     // Resolve directories into individual files; de-duplicate and sort.
     let resolved = resolve_file_args(file_args, params.exclude_patterns)?;
     let multi = resolved.len() > 1;
-    let mut total_errors: usize = 0;
-    let mut total_warnings: usize = 0;
-    let mut total_deterministic: usize = 0;
-    let mut total_heuristic: usize = 0;
-    let mut total_llm_judged: usize = 0;
-    let mut total_unresolved: usize = 0;
-    let mut all_file_results: Vec<CliFileOutput> = Vec::new();
-    let mut sarif_results: Vec<SarifResult> = Vec::new();
-    let mut sarif_rules: std::collections::BTreeMap<String, SarifRuleDef> =
-        std::collections::BTreeMap::new();
-
-    // Load baseline if provided.
-    let mut baseline = params
-        .baseline_path
-        .map(zhtw_mcp::baseline::Baseline::load)
-        .transpose()?
-        .unwrap_or_default();
-    let mut baseline_count: usize = 0;
-    let mut tabular_header_printed = false;
-
-    let apply_glossary_to_issues =
-        |work_text: &str,
-         content_type: zhtw_mcp::engine::scan::ContentType,
-         issues: Vec<zhtw_mcp::rules::ruleset::Issue>| {
-            if params.glossary.is_empty() {
-                return issues;
-            }
-            let md_opts = zhtw_mcp::engine::markdown::MdScanOptions::new(
-                matches!(
-                    content_type,
-                    zhtw_mcp::engine::scan::ContentType::MarkdownScanCode
-                ),
-                cfg.exempt_blockquotes,
-            );
-            let excluded = zhtw_mcp::engine::scan::build_exclusions_for_content_type_with_options(
-                work_text,
-                content_type,
-                md_opts,
-            );
-            let mut issues = zhtw_mcp::rules::glossary::apply_glossary(
-                work_text,
-                &excluded,
-                issues,
-                &params.glossary,
-            );
-            let line_index = zhtw_mcp::engine::lineindex::LineIndex::new(work_text);
-            line_index.fill_line_col_sorted(
-                &mut issues,
-                zhtw_mcp::engine::lineindex::ColumnEncoding::Utf16,
-            );
-            issues
-        };
+    let mut state = BatchState {
+        // Load baseline if provided.
+        baseline: params
+            .baseline_path
+            .map(zhtw_mcp::baseline::Baseline::load)
+            .transpose()?
+            .unwrap_or_default(),
+        ..Default::default()
+    };
 
     /// Maximum file size for CLI lint mode (16 MiB).
     const MAX_CLI_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -1576,13 +1595,6 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     // Type alias keeps clippy::type_complexity happy and gives the tuple slot
     // ordering a single source of truth: (raw text, was-SC input flag, char
     // count, scan output, content type).
-    type ScanResult = Result<(
-        String,
-        bool,
-        usize,
-        zhtw_mcp::engine::scan::ScanOutput,
-        zhtw_mcp::engine::scan::ContentType,
-    )>;
     let scan_results: Vec<ScanResult> = if resolved.len() > 1 && !has_stdin {
         use rayon::prelude::*;
         resolved.par_iter().map(|f| scan_file(f)).collect()
@@ -1591,299 +1603,20 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     };
 
     // Phase 2: Fix + report (always sequential for ordered output).
+    let ctx = FileCtx {
+        params,
+        colors: c,
+        setup: &setup,
+        profile,
+        multi,
+    };
     for (file_arg, scan_result) in resolved.iter().zip(scan_results) {
-        let (text, input_was_sc, text_char_count, output, content_type) = scan_result?;
-
-        let detected_script = if input_was_sc {
-            "simplified"
-        } else {
-            output.detected_script.name()
-        };
-        let mut ai_signature = output.ai_signature;
-        let mut translationese_signature = output.translationese_signature;
-        let mut issues = output.issues;
-
-        // 35.9 — Apply project glossary precedence (proper_noun suppression +
-        // banned-term injection) before disambiguation, so the rest of the
-        // pipeline sees the canonical issue list. Synthetic banned-term issues
-        // land with `line: 0, col: 0` from `Issue::new`; reapply LineIndex so
-        // output formatters and the 35.1 consistency report see correct
-        // coordinates.
-        issues = apply_glossary_to_issues(&text, content_type, issues);
-
-        // Tier 2: local disambiguation.
-        let disambig_cfg = zhtw_mcp::engine::disambig::DisambigConfig {
-            profile,
-            ..Default::default()
-        };
-        let _disambig_stats =
-            zhtw_mcp::engine::disambig::disambiguate_batch(&mut issues, &text, &disambig_cfg);
-
-        let scan = |input: &str| -> zhtw_mcp::engine::scan::ScanOutput {
-            scanner.scan_for_content_type_with_config(input, content_type, cfg)
-        };
-
-        // Apply fixes if requested. Filter out TM-suppressed issues so the
-        // fixer does not auto-correct terms the user deliberately rejected.
-        let fix_result = if params.fix_mode != zhtw_mcp::fixer::FixMode::None {
-            let fix_issues: Vec<_> = if let Some(ref tm) = tm_store {
-                issues
-                    .iter()
-                    .filter(|i| !tm.should_suppress(&i.found))
-                    .cloned()
-                    .collect()
-            } else {
-                issues.clone()
-            };
-            Some(zhtw_mcp::fixer::apply_fixes_with_context(
-                &text,
-                &fix_issues,
-                params.fix_mode,
-                &[],
-                Some(scanner.segmenter()),
-            ))
-        } else {
-            None
-        };
-
-        // Write fixed text (unless --dry-run). Text is written when either S2T
-        // conversion was applied or ruleset fixes were made.
-        let fix_applied = fix_result.as_ref().map_or(0, |f| f.applied);
-        let has_text_changes = input_was_sc || fix_applied > 0;
-        if has_text_changes {
-            let output_text = fix_result
-                .as_ref()
-                .map_or(text.as_str(), |f| f.text.as_str());
-            let s2t_label = if input_was_sc && fix_applied == 0 {
-                " (S2T only)"
-            } else {
-                ""
-            };
-            if params.dry_run {
-                eprintln!(
-                    "{}{}{}: {} fix(es) would be applied{s2t_label} {}(dry run){}",
-                    c.bold, file_arg, c.reset, fix_applied, c.dim, c.reset
-                );
-            } else if file_arg == "--" {
-                // stdin: emit fixed text to stdout.
-                print!("{}", output_text);
-            } else {
-                // Atomic write: tempfile + rename in the same directory. Worth
-                // the rename semantics here, unlike the baseline: this is the
-                // user's source file, and a torn write loses their content
-                // rather than a regenerable artifact.
-                let file_path = Path::new(file_arg);
-                let parent = file_path.parent().unwrap_or(Path::new("."));
-                let mut tmp = tempfile::NamedTempFile::new_in(parent)
-                    .with_context(|| format!("create tempfile in {}", parent.display()))?;
-                std::io::Write::write_all(&mut tmp, output_text.as_bytes())
-                    .with_context(|| format!("write tempfile for {file_arg}"))?;
-
-                // A temp file is created 0600. Carry over the mode of the file
-                // being replaced, or --fix silently turns every source file it
-                // touches into 0600 and git reports a mode change on each one.
-                // The file was just read, so metadata is expected to succeed; a
-                // cosmetic mode bit is not worth failing the write over.
-                #[cfg(unix)]
-                if let Ok(meta) = std::fs::metadata(file_path) {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mode = meta.permissions().mode() & 0o7777;
-                    let _ = tmp
-                        .as_file()
-                        .set_permissions(std::fs::Permissions::from_mode(mode));
-                }
-                tmp.persist(file_path)
-                    .with_context(|| format!("rename tempfile to {file_arg}"))?;
-                eprintln!(
-                    "{}{}{}: {} fix(es) applied{s2t_label}",
-                    c.bold, file_arg, c.reset, fix_applied
-                );
-            }
-        }
-
-        // Count remaining issues after fix/S2T (rescan converted text). Single
-        // rescan serves both issue reporting and AI signature refresh.
-        let report_issues = if has_text_changes && !params.dry_run {
-            let rescan_text = fix_result
-                .as_ref()
-                .map_or(text.as_str(), |f| f.text.as_str());
-            let rescan_output = scan(rescan_text);
-            // Refresh AI signature from the fixed text (avoids a second scan).
-            let ai_active = cfg.ai_filler_detection
-                || cfg.ai_semantic_safety
-                || cfg.ai_density_detection
-                || cfg.ai_structural_patterns;
-            if ai_active {
-                ai_signature = rescan_output.ai_signature;
-            }
-            if cfg.translationese_detection {
-                translationese_signature = rescan_output.translationese_signature;
-            }
-            let mut rescan = rescan_output.issues;
-            if let Some(ref fix) = fix_result {
-                // Suppress convergent-chain noise from the fixer's own
-                // replacements.
-                zhtw_mcp::fixer::suppress_convergent_issues(&mut rescan, &fix.applied_fixes);
-            }
-            apply_glossary_to_issues(rescan_text, content_type, rescan)
-        } else {
-            issues
-        };
-
-        // --verify: calibrate issues via Google Translate.
-        #[cfg(feature = "translate")]
-        let report_issues = if params.verify {
-            let calibrate_text = if has_text_changes && !params.dry_run {
-                fix_result
-                    .as_ref()
-                    .map_or(text.as_str(), |f| f.text.as_str())
-            } else {
-                &text
-            };
-            let mut issues_mut = report_issues;
-            let result =
-                zhtw_mcp::engine::translate::calibrate_issues(calibrate_text, &mut issues_mut);
-            eprintln!(
-                "{}  verify: {} matched, {} unmatched, {} no_english, api_ok={}{}",
-                c.dim, result.matched, result.unmatched, result.no_english, result.api_ok, c.reset,
-            );
-            issues_mut
-        } else {
-            report_issues
-        };
-
-        // Apply TM suppressions: downgrade rejected terms to Info severity.
-        // Only lexical/contextual issue types; orthographic types are immune.
-        // Glossary-banned issues (35.9 precedence: banned > TM) are also immune
-        // — the project explicitly asked for these to always fire.
-        let mut tm_suppressed: usize = 0;
-        let report_issues = if let Some(ref tm) = tm_store {
-            let mut issues = report_issues;
-            for issue in &mut issues {
-                match issue.rule_type {
-                    zhtw_mcp::rules::ruleset::IssueType::Punctuation
-                    | zhtw_mcp::rules::ruleset::IssueType::Case
-                    | zhtw_mcp::rules::ruleset::IssueType::Variant
-                    | zhtw_mcp::rules::ruleset::IssueType::Grammar
-                    | zhtw_mcp::rules::ruleset::IssueType::AiStyle => continue,
-                    _ => {}
-                }
-                let is_glossary_banned = zhtw_mcp::rules::glossary::is_glossary_banned(issue);
-                if is_glossary_banned {
-                    continue;
-                }
-                if tm.should_suppress(&issue.found)
-                    && issue.severity != zhtw_mcp::rules::ruleset::Severity::Info
-                {
-                    issue.severity = zhtw_mcp::rules::ruleset::Severity::Info;
-                    tm_suppressed += 1;
-                }
-            }
-            issues
-        } else {
-            report_issues
-        };
-
-        // --update-baseline: add all issues to the baseline.
-        if params.update_baseline {
-            for issue in &report_issues {
-                baseline.insert(file_arg, issue);
-            }
-        }
-
-        // --baseline: filter out baseline issues, count them separately.
-        let new_issues: Vec<_> = if params.baseline_path.is_some() && !params.update_baseline {
-            report_issues
-                .iter()
-                .filter(|i| {
-                    if baseline.contains(file_arg, i) {
-                        baseline_count += 1;
-                        false
-                    } else {
-                        true
-                    }
-                })
-                .cloned()
-                .collect()
-        } else {
-            report_issues.clone()
-        };
-
-        let error_count = new_issues
-            .iter()
-            .filter(|i| i.severity == zhtw_mcp::rules::ruleset::Severity::Error)
-            .count();
-        let warning_count = new_issues
-            .iter()
-            .filter(|i| i.severity == zhtw_mcp::rules::ruleset::Severity::Warning)
-            .count();
-        total_errors += error_count;
-        total_warnings += warning_count;
-
-        // Accumulate resolution tier stats from the final reported issues.
-        for issue in &new_issues {
-            use zhtw_mcp::rules::ruleset::ResolutionTier;
-            match ResolutionTier::classify(issue) {
-                ResolutionTier::Deterministic => total_deterministic += 1,
-                ResolutionTier::Heuristic => total_heuristic += 1,
-                ResolutionTier::LlmJudged => total_llm_judged += 1,
-                ResolutionTier::Unresolved => total_unresolved += 1,
-            }
-        }
-
-        // Use new_issues for reporting (baseline issues filtered out).
-        let report_issues = new_issues;
-        let report_text_char_count = if has_text_changes && !params.dry_run {
-            fix_result
-                .as_ref()
-                .map_or(text_char_count, |f| f.text.chars().count())
-        } else {
-            text_char_count
-        };
-
-        let report = FileReport {
-            file_arg,
-            detected_script,
-            issues: &report_issues,
-            error_count,
-            warning_count,
-            tm_suppressed,
-            fixes_applied: fix_result.as_ref().map(|f| f.applied),
-            fixes_skipped: fix_result.as_ref().map(|f| f.skipped),
-            ai_signature: ai_signature.as_ref(),
-            translationese_signature: translationese_signature.as_ref(),
-            consistency_text: if has_text_changes && !params.dry_run {
-                fix_result
-                    .as_ref()
-                    .map_or(text.as_str(), |f| f.text.as_str())
-            } else {
-                text.as_str()
-            },
-            text_char_count: report_text_char_count,
-            multi,
-        };
-
-        match params.format {
-            LintFormat::Json => {
-                let output = render_json(&report, params);
-                if multi {
-                    all_file_results.push(output);
-                } else {
-                    println!("{}", serde_json::to_string_pretty(&output)?);
-                }
-            }
-            LintFormat::Human => render_human(&report, params, c),
-            LintFormat::Compact => render_compact(&report, params.explain),
-            LintFormat::Tabular => {
-                render_tabular(&report, params.explain, &mut tabular_header_printed);
-            }
-            LintFormat::Sarif => collect_sarif(&report, &mut sarif_rules, &mut sarif_results),
-        }
+        process_scanned_file(&ctx, file_arg, scan_result, &mut state)?;
     }
 
     // Multi-file JSON: emit array of per-file results.
     if multi && matches!(params.format, LintFormat::Json) {
-        println!("{}", serde_json::to_string_pretty(&all_file_results)?);
+        println!("{}", serde_json::to_string_pretty(&state.file_results)?);
     }
 
     // --update-baseline: save the baseline file.
@@ -1891,21 +1624,21 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
         let bl_path = params
             .baseline_path
             .context("--update-baseline requires --baseline <file>")?;
-        baseline.save(bl_path)?;
+        state.baseline.save(bl_path)?;
         eprintln!(
             "{}Baseline updated:{} {} fingerprint(s) in {}",
             c.dim,
             c.reset,
-            baseline.len(),
+            state.baseline.len(),
             bl_path.display()
         );
     }
 
     // Report baseline summary if filtering was active.
-    if params.baseline_path.is_some() && !params.update_baseline && baseline_count > 0 {
+    if params.baseline_path.is_some() && !params.update_baseline && state.baseline_count > 0 {
         eprintln!(
-            "{}{baseline_count} baseline issue(s) suppressed.{}",
-            c.dim, c.reset
+            "{}{} baseline issue(s) suppressed.{}",
+            c.dim, state.baseline_count, c.reset
         );
     }
 
@@ -1920,10 +1653,10 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                         name: "zhtw-mcp",
                         version: env!("CARGO_PKG_VERSION"),
                         information_uri: SARIF_INFORMATION_URI,
-                        rules: sarif_rules.into_values().collect(),
+                        rules: state.sarif_rules.into_values().collect(),
                     },
                 },
-                results: &sarif_results,
+                results: &state.sarif_results,
             }],
         };
         println!("{}", serde_json::to_string_pretty(&sarif)?);
@@ -1938,29 +1671,372 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
 
     // Print telemetry summary to stderr when --telemetry is set.
     if params.telemetry {
-        eprintln!(
-            "[telemetry] files={} total_issues={} errors={} warnings={}",
-            resolved.len(),
-            total_errors + total_warnings,
-            total_errors,
-            total_warnings,
-        );
-        eprintln!(
-            "[telemetry] resolution: deterministic={} heuristic={} llm_judged={} unresolved={}",
-            total_deterministic, total_heuristic, total_llm_judged, total_unresolved,
-        );
+        state.totals.report_telemetry(resolved.len());
     }
 
     // Exit 1 if total error-severity or warning-severity issues exceed
     // thresholds.
-    let errors_exceeded = total_errors > params.max_errors;
+    let errors_exceeded = state.totals.errors > params.max_errors;
     let warnings_exceeded = params
         .max_warnings
-        .is_some_and(|limit| total_warnings > limit);
+        .is_some_and(|limit| state.totals.warnings > limit);
     if errors_exceeded || warnings_exceeded {
         process::exit(1);
     }
 
+    Ok(())
+}
+
+/// One file after phase 1: (raw text, was-SC input, char count, scan
+/// output, content type).  Aliased so the tuple slot ordering has a
+/// single source of truth.
+type ScanResult = Result<(
+    String,
+    bool,
+    usize,
+    zhtw_mcp::engine::scan::ScanOutput,
+    zhtw_mcp::engine::scan::ContentType,
+)>;
+
+/// Immutable context shared by every file in a lint batch.
+struct FileCtx<'a> {
+    params: &'a LintBatchParams<'a>,
+    colors: &'a Colors,
+    setup: &'a LintSetup,
+    profile: zhtw_mcp::rules::ruleset::Profile,
+    multi: bool,
+}
+
+/// Everything the per-file pass accumulates and the batch drains after
+/// the loop.  These move together, so they live together.
+#[derive(Default)]
+struct BatchState {
+    totals: LintTotals,
+    file_results: Vec<CliFileOutput>,
+    sarif_results: Vec<SarifResult>,
+    sarif_rules: std::collections::BTreeMap<String, SarifRuleDef>,
+    baseline: zhtw_mcp::baseline::Baseline,
+    baseline_count: usize,
+    tabular_header_printed: bool,
+}
+
+/// Fix, rescan, verify, and report one already-scanned file.
+///
+/// Split out of `run_lint_batch` so the per-file pipeline can be read
+/// without the batch setup and the phase-1 parallel scan around it.
+fn process_scanned_file(
+    ctx: &FileCtx<'_>,
+    file_arg: &str,
+    scan_result: ScanResult,
+    state: &mut BatchState,
+) -> Result<()> {
+    let params = ctx.params;
+    let c = ctx.colors;
+    let scanner = &ctx.setup.scanner;
+    let cfg = ctx.setup.cfg;
+    let tm_store = &ctx.setup.tm_store;
+    let profile = ctx.profile;
+    let multi = ctx.multi;
+
+    let (text, input_was_sc, text_char_count, output, content_type) = scan_result?;
+
+    let detected_script = if input_was_sc {
+        "simplified"
+    } else {
+        output.detected_script.name()
+    };
+    let mut ai_signature = output.ai_signature;
+    let mut translationese_signature = output.translationese_signature;
+    let mut issues = output.issues;
+
+    // 35.9 — Apply project glossary precedence (proper_noun suppression +
+    // banned-term injection) before disambiguation, so the rest of the pipeline
+    // sees the canonical issue list. Synthetic banned-term issues land with
+    // `line: 0, col: 0` from `Issue::new`; reapply LineIndex so output
+    // formatters and the 35.1 consistency report see correct coordinates.
+    issues = zhtw_mcp::rules::glossary::apply_glossary_with_coordinates(
+        &text,
+        content_type,
+        &cfg,
+        issues,
+        &params.glossary,
+    );
+
+    // Tier 2: local disambiguation.
+    let disambig_cfg = zhtw_mcp::engine::disambig::DisambigConfig {
+        profile,
+        ..Default::default()
+    };
+    let _disambig_stats =
+        zhtw_mcp::engine::disambig::disambiguate_batch(&mut issues, &text, &disambig_cfg);
+
+    let scan = |input: &str| -> zhtw_mcp::engine::scan::ScanOutput {
+        scanner.scan_for_content_type_with_config(input, content_type, cfg)
+    };
+
+    // Apply fixes if requested. Filter out TM-suppressed issues so the fixer
+    // does not auto-correct terms the user deliberately rejected.
+    let fix_result = if params.fix_mode != zhtw_mcp::fixer::FixMode::None {
+        let fix_issues: Vec<_> = if let Some(ref tm) = tm_store {
+            issues
+                .iter()
+                .filter(|i| !tm.should_suppress(&i.found))
+                .cloned()
+                .collect()
+        } else {
+            issues.clone()
+        };
+        Some(zhtw_mcp::fixer::apply_fixes_with_context(
+            &text,
+            &fix_issues,
+            params.fix_mode,
+            &[],
+            Some(scanner.segmenter()),
+        ))
+    } else {
+        None
+    };
+
+    // Write fixed text (unless --dry-run). Text is written when either S2T
+    // conversion was applied or ruleset fixes were made.
+    let fix_applied = fix_result.as_ref().map_or(0, |f| f.applied);
+    let has_text_changes = input_was_sc || fix_applied > 0;
+    if has_text_changes {
+        let output_text = fix_result
+            .as_ref()
+            .map_or(text.as_str(), |f| f.text.as_str());
+        let s2t_label = if input_was_sc && fix_applied == 0 {
+            " (S2T only)"
+        } else {
+            ""
+        };
+        if params.dry_run {
+            eprintln!(
+                "{}{}{}: {} fix(es) would be applied{s2t_label} {}(dry run){}",
+                c.bold, file_arg, c.reset, fix_applied, c.dim, c.reset
+            );
+        } else if file_arg == "--" {
+            // stdin: emit fixed text to stdout.
+            print!("{}", output_text);
+        } else {
+            // Atomic write: tempfile + rename in the same directory. Worth the
+            // rename semantics here, unlike the baseline: this is the user's
+            // source file, and a torn write loses their content rather than a
+            // regenerable artifact.
+            let file_path = Path::new(file_arg);
+            let parent = file_path.parent().unwrap_or(Path::new("."));
+            let mut tmp = tempfile::NamedTempFile::new_in(parent)
+                .with_context(|| format!("create tempfile in {}", parent.display()))?;
+            std::io::Write::write_all(&mut tmp, output_text.as_bytes())
+                .with_context(|| format!("write tempfile for {file_arg}"))?;
+
+            // A temp file is created 0600. Carry over the mode of the file
+            // being replaced, or --fix silently turns every source file it
+            // touches into 0600 and git reports a mode change on each one. The
+            // file was just read, so metadata is expected to succeed; a
+            // cosmetic mode bit is not worth failing the write over.
+            #[cfg(unix)]
+            if let Ok(meta) = std::fs::metadata(file_path) {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = meta.permissions().mode() & 0o7777;
+                let _ = tmp
+                    .as_file()
+                    .set_permissions(std::fs::Permissions::from_mode(mode));
+            }
+            tmp.persist(file_path)
+                .with_context(|| format!("rename tempfile to {file_arg}"))?;
+            eprintln!(
+                "{}{}{}: {} fix(es) applied{s2t_label}",
+                c.bold, file_arg, c.reset, fix_applied
+            );
+        }
+    }
+
+    // Count remaining issues after fix/S2T (rescan converted text). Single
+    // rescan serves both issue reporting and AI signature refresh.
+    let report_issues = if has_text_changes && !params.dry_run {
+        let rescan_text = fix_result
+            .as_ref()
+            .map_or(text.as_str(), |f| f.text.as_str());
+        let rescan_output = scan(rescan_text);
+        // Refresh AI signature from the fixed text (avoids a second scan).
+        let ai_active = cfg.ai_filler_detection
+            || cfg.ai_semantic_safety
+            || cfg.ai_density_detection
+            || cfg.ai_structural_patterns;
+        if ai_active {
+            ai_signature = rescan_output.ai_signature;
+        }
+        if cfg.translationese_detection {
+            translationese_signature = rescan_output.translationese_signature;
+        }
+        let mut rescan = rescan_output.issues;
+        if let Some(ref fix) = fix_result {
+            // Suppress convergent-chain noise from the fixer's own
+            // replacements.
+            zhtw_mcp::fixer::suppress_convergent_issues(&mut rescan, &fix.applied_fixes);
+        }
+        zhtw_mcp::rules::glossary::apply_glossary_with_coordinates(
+            rescan_text,
+            content_type,
+            &cfg,
+            rescan,
+            &params.glossary,
+        )
+    } else {
+        issues
+    };
+
+    // --verify: calibrate issues via Google Translate.
+    #[cfg(feature = "translate")]
+    let report_issues = if params.verify {
+        let calibrate_text = if has_text_changes && !params.dry_run {
+            fix_result
+                .as_ref()
+                .map_or(text.as_str(), |f| f.text.as_str())
+        } else {
+            &text
+        };
+        let mut issues_mut = report_issues;
+        let result = zhtw_mcp::engine::translate::calibrate_issues(calibrate_text, &mut issues_mut);
+        eprintln!(
+            "{}  verify: {} matched, {} unmatched, {} no_english, api_ok={}{}",
+            c.dim, result.matched, result.unmatched, result.no_english, result.api_ok, c.reset,
+        );
+        issues_mut
+    } else {
+        report_issues
+    };
+
+    // Apply TM suppressions: downgrade rejected terms to Info severity. Only
+    // lexical/contextual issue types; orthographic types are immune.
+    // Glossary-banned issues (35.9 precedence: banned > TM) are also immune —
+    // the project explicitly asked for these to always fire.
+    let mut tm_suppressed: usize = 0;
+    let report_issues = if let Some(ref tm) = tm_store {
+        let mut issues = report_issues;
+        for issue in &mut issues {
+            match issue.rule_type {
+                zhtw_mcp::rules::ruleset::IssueType::Punctuation
+                | zhtw_mcp::rules::ruleset::IssueType::Case
+                | zhtw_mcp::rules::ruleset::IssueType::Variant
+                | zhtw_mcp::rules::ruleset::IssueType::Grammar
+                | zhtw_mcp::rules::ruleset::IssueType::AiStyle => continue,
+                _ => {}
+            }
+            let is_glossary_banned = zhtw_mcp::rules::glossary::is_glossary_banned(issue);
+            if is_glossary_banned {
+                continue;
+            }
+            if tm.should_suppress(&issue.found)
+                && issue.severity != zhtw_mcp::rules::ruleset::Severity::Info
+            {
+                issue.severity = zhtw_mcp::rules::ruleset::Severity::Info;
+                tm_suppressed += 1;
+            }
+        }
+        issues
+    } else {
+        report_issues
+    };
+
+    // --update-baseline: add all issues to the baseline.
+    if params.update_baseline {
+        for issue in &report_issues {
+            state.baseline.insert(file_arg, issue);
+        }
+    }
+
+    // --baseline: filter out baseline issues, count them separately.
+    let new_issues: Vec<_> = if params.baseline_path.is_some() && !params.update_baseline {
+        report_issues
+            .iter()
+            .filter(|i| {
+                if state.baseline.contains(file_arg, i) {
+                    state.baseline_count += 1;
+                    false
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect()
+    } else {
+        report_issues.clone()
+    };
+
+    let error_count = new_issues
+        .iter()
+        .filter(|i| i.severity == zhtw_mcp::rules::ruleset::Severity::Error)
+        .count();
+    let warning_count = new_issues
+        .iter()
+        .filter(|i| i.severity == zhtw_mcp::rules::ruleset::Severity::Warning)
+        .count();
+    state.totals.errors += error_count;
+    state.totals.warnings += warning_count;
+
+    // Accumulate resolution tier stats from the final reported issues.
+    for issue in &new_issues {
+        use zhtw_mcp::rules::ruleset::ResolutionTier;
+        match ResolutionTier::classify(issue) {
+            ResolutionTier::Deterministic => state.totals.deterministic += 1,
+            ResolutionTier::Heuristic => state.totals.heuristic += 1,
+            ResolutionTier::LlmJudged => state.totals.llm_judged += 1,
+            ResolutionTier::Unresolved => state.totals.unresolved += 1,
+        }
+    }
+
+    // Use new_issues for reporting (baseline issues filtered out).
+    let report_issues = new_issues;
+    let report_text_char_count = if has_text_changes && !params.dry_run {
+        fix_result
+            .as_ref()
+            .map_or(text_char_count, |f| f.text.chars().count())
+    } else {
+        text_char_count
+    };
+
+    let report = FileReport {
+        file_arg,
+        detected_script,
+        issues: &report_issues,
+        error_count,
+        warning_count,
+        tm_suppressed,
+        fixes_applied: fix_result.as_ref().map(|f| f.applied),
+        fixes_skipped: fix_result.as_ref().map(|f| f.skipped),
+        ai_signature: ai_signature.as_ref(),
+        translationese_signature: translationese_signature.as_ref(),
+        consistency_text: if has_text_changes && !params.dry_run {
+            fix_result
+                .as_ref()
+                .map_or(text.as_str(), |f| f.text.as_str())
+        } else {
+            text.as_str()
+        },
+        text_char_count: report_text_char_count,
+        multi,
+    };
+
+    match params.format {
+        LintFormat::Json => {
+            let output = render_json(&report, params);
+            if multi {
+                state.file_results.push(output);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+        }
+        LintFormat::Human => render_human(&report, params, c),
+        LintFormat::Compact => render_compact(&report, params.explain),
+        LintFormat::Tabular => {
+            render_tabular(&report, params.explain, &mut state.tabular_header_printed);
+        }
+        LintFormat::Sarif => {
+            collect_sarif(&report, &mut state.sarif_rules, &mut state.sarif_results)
+        }
+    }
     Ok(())
 }
 
@@ -1972,8 +2048,8 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
 /// `verify` opts into the Google Translate anchor check, which sends the
 /// sentences around each remaining issue off the machine.  Off by default:
 /// conversion is otherwise entirely local, and a converter that phones home
-/// unless told not to is the wrong default for anyone holding an
-/// unpublished document.
+/// unless told not to is the wrong default for anyone holding an unpublished
+/// document.
 fn run_convert(
     file_args: &[String],
     content_type_str: Option<&str>,

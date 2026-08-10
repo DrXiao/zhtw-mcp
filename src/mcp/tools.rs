@@ -49,7 +49,8 @@ pub struct Server {
     /// Translation memory: persistent correction tracking.
     tm_store: Option<TranslationMemoryStore>,
     ruleset_hash: String,
-    /// Span-level judgment cache for persistent LLM disambiguation results (51.4).
+    /// Span-level judgment cache for persistent LLM disambiguation results
+    /// (51.4).
     judgment_cache: crate::rules::judgment_cache::JudgmentCache,
     /// Parsed client capabilities from the initialize handshake.
     client_capabilities: ClientCapabilities,
@@ -121,7 +122,8 @@ impl Server {
         self.client_capabilities.logging
     }
 
-    /// Handle pre-initialization routing shared between sync and async transports.
+    /// Handle pre-initialization routing shared between sync and async
+    /// transports.
     ///
     /// Returns `Some(response)` if the method was handled (initialize, ping,
     /// notifications, or rejection before init). Returns `None` if the caller
@@ -135,8 +137,9 @@ impl Server {
             tracing::info!("exit notification, terminating");
             // Flush judgment cache before exit (process::exit skips Drop).
             self.judgment_cache.flush();
-            // MCP spec: unconditional process exit.
-            // Exit code 0 if shutdown was requested first, 1 otherwise.
+
+            // MCP spec: unconditional process exit. Exit code 0 if shutdown was
+            // requested first, 1 otherwise.
             let code = if self.shutdown_requested { 0 } else { 1 };
             std::process::exit(code);
         }
@@ -347,6 +350,98 @@ impl Server {
     /// this trigger a structured error before any processing begins.
     const MAX_TEXT_BYTES: usize = 256 * 1024;
 
+    /// Scan, stance-filter, calibrate, disambiguate, sample, and suppress.
+    ///
+    /// Both `fix_mode` paths run exactly this before they diverge; keeping
+    /// it in one place is what stops a change landing on only one of them.
+    fn run_scan_stage(
+        &mut self,
+        args: &ScanStageArgs<'_>,
+        bridge: &mut Option<&mut SamplingBridge<'_>>,
+    ) -> ScanStage {
+        let ScanStageArgs {
+            text,
+            content_type,
+            cfg,
+            profile,
+            stance,
+            s2t_converted,
+            ..
+        } = *args;
+
+        // Build the exclusion ranges once: the fix path reuses them for the
+        // fixer and the post-fix remap.
+        let md_opts = crate::engine::markdown::MdScanOptions::new(
+            matches!(
+                content_type,
+                crate::engine::scan::ContentType::MarkdownScanCode
+            ),
+            cfg.exempt_blockquotes,
+        );
+        let excluded = crate::engine::scan::build_exclusions_for_content_type_with_options(
+            text,
+            content_type,
+            md_opts,
+        );
+        let mut scan =
+            self.scanner
+                .scan_with_prebuilt_excluded_config(text, &excluded, cfg, content_type);
+
+        let detected_script = if s2t_converted {
+            "simplified"
+        } else {
+            scan.detected_script.name()
+        };
+        let mut issues = std::mem::take(&mut scan.issues);
+        let scanner_hit_count = issues.len();
+        if let Some(st) = stance {
+            filter_by_stance(&mut issues, st);
+        }
+
+        // Calibrate issues via Google Translate anchor matching.
+        #[cfg(feature = "translate")]
+        let calibrate_result = if args.verify {
+            Some(calibrate_issues(text, &mut issues))
+        } else {
+            None
+        };
+
+        // Tier 2: local disambiguation. Resolves issues via context clues,
+        // profile priors, and collocations before LLM sampling.
+        let disambig_cfg = DisambigConfig {
+            profile,
+            ..Default::default()
+        };
+        let disambig_stats = disambiguate_batch(&mut issues, text, &disambig_cfg);
+
+        // Tier 3: LLM sampling for gray-zone issues only.
+        let sampling_stats = if let Some(b) = bridge.as_mut() {
+            let mut cache_ctx = super::sampling::SamplingCacheCtx {
+                cache: &mut self.judgment_cache,
+                ruleset_hash: &self.ruleset_hash,
+                profile: profile.name(),
+                content_type: content_type.name(),
+            };
+            refine_issues_with_sampling(&mut issues, b, text, Some(&mut cache_ctx))
+        } else {
+            SamplingStats::default()
+        };
+
+        self.apply_suppressions(&mut issues);
+
+        ScanStage {
+            excluded,
+            scan,
+            issues,
+            detected_script,
+            scanner_hit_count,
+            disambig_stats,
+            sampling_stats,
+            #[cfg(feature = "translate")]
+            calibrate_result,
+        }
+    }
+
     fn tool_check(
         &mut self,
         args: &Value,
@@ -395,14 +490,16 @@ impl Server {
         let verify = parse_verify(args);
 
         let stance_name = stance.unwrap_or(PoliticalStance::RocCentric).name();
-        // Explicit bool overrides default; absent means inherit profile default.
-        // Default profile enables both ai_filler_detection and
+
+        // Explicit bool overrides default; absent means inherit profile
+        // default. Default profile enables both ai_filler_detection and
         // translationese_detection.
         let detect_ai_opt = args.get("detect_ai").and_then(|v| v.as_bool());
         let detect_translationese_opt = args.get("detect_translationese").and_then(|v| v.as_bool());
-        // Explicit opt-in for the composite three-axis scorecard —
-        // mirrors the CLI `--detect-style` shorthand, off-by-default to
-        // keep the standard payload lean.
+
+        // Explicit opt-in for the composite three-axis scorecard — mirrors the
+        // CLI `--detect-style` shorthand, off-by-default to keep the standard
+        // payload lean.
         let detect_style = args
             .get("detect_style")
             .and_then(|v| v.as_bool())
@@ -474,150 +571,70 @@ impl Server {
             ));
         }
 
-        // Build effective config: profile base + capability flags.
-        let mut cfg = profile.config();
-        if relaxed {
-            cfg = cfg.with_relaxed();
-        }
-        if exempt_blockquotes {
-            cfg = cfg.with_exempt_blockquotes(true);
-        }
-        if let Some(st) = stance {
-            cfg = cfg.with_stance(st);
-        }
-        // `detect_style` mirrors the CLI shorthand: it always computes the
-        // full three-axis scorecard, regardless of explicit per-axis disables.
-        if detect_style {
-            cfg.translationese_detection = true;
-        } else if let Some(b) = detect_translationese_opt {
-            cfg.translationese_detection = b;
-        }
-        if let Some(domain_str) = &translationese_domain_opt {
-            match crate::engine::translationese_score::TranslationeseDomain::from_str_strict(
-                domain_str,
-            ) {
-                Some(d) => cfg.translationese_domain = d,
-                None => {
-                    return Err(param_error(
-                        &id,
-                        "translationese_domain",
-                        domain_str,
-                        &["general", "technical", "literary", "news"],
-                    ));
-                }
-            }
-        }
-        // Resolve effective AI detection: explicit arg wins over profile default.
-        // All four AI sub-flags move as a unit — enabling detection turns them
-        // all on, disabling turns them all off.
-        let detect_ai = if detect_style {
-            true
-        } else {
-            detect_ai_opt.unwrap_or(cfg.ai_filler_detection)
-        };
-        cfg.ai_filler_detection = detect_ai;
-        cfg.ai_semantic_safety = detect_ai;
-        cfg.ai_density_detection = detect_ai;
-        cfg.ai_structural_patterns = detect_ai;
-        if detect_ai {
-            // Apply threshold level: low=0.5 (sensitive), medium=1.0, high=1.5 (conservative).
-            cfg.ai_threshold_multiplier = match ai_threshold {
-                Some("low") => 0.5,
-                Some("medium") | None => 1.0,
-                Some("high") => 1.5,
-                Some(other) => {
-                    return Err(param_error(
-                        &id,
-                        "ai_threshold",
-                        other,
-                        &["low", "medium", "high"],
-                    ));
-                }
-            };
-        }
+        let cfg = build_check_config(
+            profile,
+            &CheckFlags {
+                relaxed,
+                exempt_blockquotes,
+                stance,
+                detect_style,
+                detect_ai: detect_ai_opt,
+                detect_translationese: detect_translationese_opt,
+                translationese_domain: translationese_domain_opt.as_deref(),
+                ai_threshold,
+            },
+            &id,
+        )?;
 
         let apply_glossary_to_issues = |work_text: &str, issues: Vec<Issue>| -> Vec<Issue> {
-            if glossary.is_empty() {
-                return issues;
-            }
-            let md_opts = crate::engine::markdown::MdScanOptions::new(
-                matches!(
-                    content_type,
-                    crate::engine::scan::ContentType::MarkdownScanCode
-                ),
-                cfg.exempt_blockquotes,
-            );
-            let excluded = crate::engine::scan::build_exclusions_for_content_type_with_options(
+            crate::rules::glossary::apply_glossary_with_coordinates(
                 work_text,
                 content_type,
-                md_opts,
-            );
-            let mut issues =
-                crate::rules::glossary::apply_glossary(work_text, &excluded, issues, &glossary);
-            let line_index = crate::engine::lineindex::LineIndex::new(work_text);
-            line_index
-                .fill_line_col_sorted(&mut issues, crate::engine::lineindex::ColumnEncoding::Utf16);
-            issues
+                &cfg,
+                issues,
+                &glossary,
+            )
+        };
+
+        let stage_args = ScanStageArgs {
+            text,
+            content_type,
+            cfg,
+            profile,
+            stance,
+            s2t_converted: s2t_converted.is_some(),
+            #[cfg(feature = "translate")]
+            verify,
         };
 
         let result = match fix_mode {
             FixMode::None => {
-                // Lint-only path.
-                let output =
-                    self.scanner
-                        .scan_for_content_type_with_config(text, content_type, cfg);
-                let detected_script = if s2t_converted.is_some() {
-                    "simplified"
-                } else {
-                    output.detected_script.name()
-                };
-                let coverage = output.coverage.as_ref();
-                let oral_density = output.oral_density;
-                let quality_flags = &output.quality_flags;
-                let ai_signature = output.ai_signature;
-                let translationese_signature = output.translationese_signature;
-                let mut issues = output.issues;
-                let scanner_hit_count = issues.len();
-                if let Some(st) = stance {
-                    filter_by_stance(&mut issues, st);
-                }
-                // Calibrate issues via Google Translate anchor matching.
-                #[cfg(feature = "translate")]
-                let calibrate_result = if verify {
-                    Some(calibrate_issues(text, &mut issues))
-                } else {
-                    None
-                };
+                // Lint-only path: the shared stage is the whole pipeline.
+                let stage = self.run_scan_stage(&stage_args, &mut bridge);
+                let ScanStage {
+                    scan,
+                    mut issues,
+                    detected_script,
+                    scanner_hit_count,
+                    disambig_stats,
+                    sampling_stats,
+                    #[cfg(feature = "translate")]
+                    calibrate_result,
+                    ..
+                } = stage;
+                let coverage = scan.coverage.as_ref();
+                let oral_density = scan.oral_density;
+                let quality_flags = &scan.quality_flags;
+                let ai_signature = scan.ai_signature;
+                let translationese_signature = scan.translationese_signature;
 
-                // Tier 2: local disambiguation.  Resolves issues via context
-                // clues, profile priors, and collocations before LLM sampling.
-                let disambig_cfg = DisambigConfig {
-                    profile,
-                    ..Default::default()
-                };
-                let disambig_stats = disambiguate_batch(&mut issues, text, &disambig_cfg);
-
-                // Tier 3: LLM sampling for gray-zone issues only.
-                let sampling_stats = if let Some(b) = bridge.as_mut() {
-                    let mut cache_ctx = super::sampling::SamplingCacheCtx {
-                        cache: &mut self.judgment_cache,
-                        ruleset_hash: &self.ruleset_hash,
-                        profile: profile.name(),
-                        content_type: content_type.name(),
-                    };
-                    refine_issues_with_sampling(&mut issues, b, text, Some(&mut cache_ctx))
-                } else {
-                    SamplingStats::default()
-                };
-                self.apply_suppressions(&mut issues);
+                // TM applies here because nothing rewrites the text on this
+                // path; the fix path defers it until after the rescan.
                 let tm_suppressed = self.apply_tm(&mut issues);
                 apply_ignore_set(&mut issues, &ignore_set);
 
                 // 35.9 — Apply project glossary precedence (banned > TM):
                 // proper_nouns suppress, banned inject synthetic Errors.
-                // Recompute exclusion ranges so banned-term scanning
-                // respects code blocks, URLs, and frontmatter.  Re-fill
-                // line/col on synthetic issues.
                 issues = apply_glossary_to_issues(text, issues);
 
                 // 35.1 — Document-wide consistency report.
@@ -652,9 +669,8 @@ impl Server {
                 let trace =
                     Trace::new("zhtw", &self.ruleset_hash, text).with_issue_count(issues.len());
 
-                // Pre-build the composite scorecard so its lifetime spans
-                // the build_check_output call (the params struct only
-                // borrows it).
+                // Pre-build the composite scorecard so its lifetime spans the
+                // build_check_output call (the params struct only borrows it).
                 let style_scorecard = style_scorecard_for(
                     detect_style,
                     ai_signature.as_ref(),
@@ -698,72 +714,29 @@ impl Server {
             }
 
             mode @ (FixMode::Orthographic | FixMode::LexicalSafe | FixMode::LexicalContextual) => {
-                // Fix path: scan, apply fixes, re-scan for residual issues.
-                let md_opts = crate::engine::markdown::MdScanOptions::new(
-                    matches!(
-                        content_type,
-                        crate::engine::scan::ContentType::MarkdownScanCode
-                    ),
-                    cfg.exempt_blockquotes,
-                );
-                let excluded = crate::engine::scan::build_exclusions_for_content_type_with_options(
-                    text,
-                    content_type,
-                    md_opts,
-                );
-                let scan_out = self.scanner.scan_with_prebuilt_excluded_config(
-                    text,
-                    &excluded,
-                    cfg,
-                    content_type,
-                );
-                let detected_script = if s2t_converted.is_some() {
-                    "simplified"
-                } else {
-                    scan_out.detected_script.name()
-                };
-                let mut issues = scan_out.issues;
-                let scanner_hit_count = issues.len();
-                if let Some(st) = stance {
-                    filter_by_stance(&mut issues, st);
-                }
+                // Fix path: shared stage, then apply fixes and re-scan for
+                // residual issues.
+                let stage = self.run_scan_stage(&stage_args, &mut bridge);
+                let ScanStage {
+                    excluded,
+                    mut issues,
+                    detected_script,
+                    scanner_hit_count,
+                    disambig_stats,
+                    sampling_stats,
+                    #[cfg(feature = "translate")]
+                    calibrate_result,
+                    ..
+                } = stage;
 
-                // Calibrate issues via Google Translate anchor matching.
-                #[cfg(feature = "translate")]
-                let calibrate_result = if verify {
-                    Some(calibrate_issues(text, &mut issues))
-                } else {
-                    None
-                };
-
-                // Tier 2: local disambiguation.
-                let disambig_cfg = DisambigConfig {
-                    profile,
-                    ..Default::default()
-                };
-                let disambig_stats = disambiguate_batch(&mut issues, text, &disambig_cfg);
-
-                // Tier 3: LLM sampling for gray-zone issues only.
-                let sampling_stats = if let Some(b) = bridge.as_mut() {
-                    let mut cache_ctx = super::sampling::SamplingCacheCtx {
-                        cache: &mut self.judgment_cache,
-                        ruleset_hash: &self.ruleset_hash,
-                        profile: profile.name(),
-                        content_type: content_type.name(),
-                    };
-                    refine_issues_with_sampling(&mut issues, b, text, Some(&mut cache_ctx))
-                } else {
-                    SamplingStats::default()
-                };
-
-                self.apply_suppressions(&mut issues);
                 // TM is NOT applied here: the fixer filter (should_suppress)
                 // prevents fixing TM-rejected terms, and the post-fix apply_tm
                 // handles severity downgrade + counting on the final residual.
                 apply_ignore_set(&mut issues, &ignore_set);
                 issues = apply_glossary_to_issues(text, issues);
 
-                // Snapshot AFTER suppressions so restored severity reflects final state.
+                // Snapshot AFTER suppressions so restored severity reflects
+                // final state.
                 struct PreservedState {
                     term: String,
                     orig_offset: usize,
@@ -843,8 +816,8 @@ impl Server {
                     state_by_offset.entry(remapped).or_default().push(idx);
                 }
 
-                // Re-apply preserved states using identity-safe matching:
-                // term + remapped offset + length + english must all match.
+                // Re-apply preserved states using identity-safe matching: term
+                // + remapped offset + length + english must all match.
                 for issue in &mut remaining_issues {
                     if let Some(candidates) = state_by_offset.get(&issue.offset) {
                         if let Some(&idx) = candidates.iter().find(|&&idx| {
@@ -863,8 +836,8 @@ impl Server {
                     }
                 }
 
-                // Suppress convergent-chain noise: remove re-scan issues
-                // whose offset falls within a byte range written by the fixer.
+                // Suppress convergent-chain noise: remove re-scan issues whose
+                // offset falls within a byte range written by the fixer.
                 suppress_convergent_issues(&mut remaining_issues, &fix_result.applied_fixes);
 
                 remaining_issues = apply_glossary_to_issues(&fix_result.text, remaining_issues);
@@ -907,9 +880,8 @@ impl Server {
                     .with_issue_count(remaining_issues.len())
                     .with_output(&fix_result.text);
 
-                // Composite scorecard against the post-fix text and
-                // remaining issues, so the scorecard reflects the
-                // user-visible state.
+                // Composite scorecard against the post-fix text and remaining
+                // issues, so the scorecard reflects the user-visible state.
                 let style_scorecard = style_scorecard_for(
                     detect_style,
                     ai_signature.as_ref(),
@@ -986,11 +958,12 @@ impl Server {
                 | IssueType::AiStyle => continue,
                 _ => {}
             }
-            // Glossary-banned terms are project-wide truth (banned > TM
-            // per the documented precedence).  The provenance tag is
-            // set by `apply_glossary` either by injecting a synthetic
-            // Error or by upgrading a covering issue; either way TM
-            // must not downgrade these.
+
+            // Glossary-banned terms are project-wide truth (banned > TM per the
+            // documented precedence). The provenance tag is set by
+            // `apply_glossary` either by injecting a synthetic Error or by
+            // upgrading a covering issue; either way TM must not downgrade
+            // these.
             let is_glossary_banned = crate::rules::glossary::is_glossary_banned(issue);
             if is_glossary_banned {
                 continue;
@@ -1072,7 +1045,8 @@ fn json_response(
     }
 }
 
-/// Convert excluded byte ranges to the (start, end) pairs expected by apply_fixes.
+/// Convert excluded byte ranges to the (start, end) pairs expected by
+/// apply_fixes.
 fn to_offset_pairs(ranges: &[ByteRange]) -> Vec<(usize, usize)> {
     ranges.iter().map(|r| (r.start, r.end)).collect()
 }
@@ -1087,7 +1061,8 @@ fn to_offset_pairs(ranges: &[ByteRange]) -> Vec<(usize, usize)> {
 /// that used to sit on each of these helpers.
 type ParamResult<T> = Result<T, Box<JsonRpcResponse>>;
 
-/// Parse and take MCP request params, returning a typed struct or an error response.
+/// Parse and take MCP request params, returning a typed struct or an error
+/// response.
 fn parse_params<T: serde::de::DeserializeOwned>(
     req: &mut JsonRpcRequest,
     method: &str,
@@ -1451,7 +1426,9 @@ fn default_output_mode(client_name: Option<&str>) -> OutputMode {
     match client_name {
         Some(name) => {
             let lower = name.to_ascii_lowercase();
-            // Strip trailing version suffix: "Cursor/0.1.0" → "cursor", "cline 1.2" → "cline"
+
+            // Strip trailing version suffix: "Cursor/0.1.0" → "cursor", "cline
+            // 1.2" → "cline"
             let base = lower
                 .split('/')
                 .next()
@@ -1602,9 +1579,8 @@ fn build_explanation(issue: &Issue) -> Option<String> {
         }
     }
 
-    // Grammar, AiStyle, and Translationese issues already embed context in
-    // the main explanation; skip the shared Context: append to avoid
-    // duplication.
+    // Grammar, AiStyle, and Translationese issues already embed context in the
+    // main explanation; skip the shared Context: append to avoid duplication.
     if !matches!(
         issue.rule_type,
         IssueType::Grammar | IssueType::AiStyle | IssueType::Translationese
@@ -1696,7 +1672,8 @@ struct IssueSummary {
     /// Omitted (0) when sampling is inactive or unused.
     #[serde(skip_serializing_if = "is_zero")]
     sampling_used: usize,
-    /// Number of eligible issues skipped because the sampling budget was exhausted.
+    /// Number of eligible issues skipped because the sampling budget was
+    /// exhausted.
     /// Omitted (0) when budget was not exhausted.
     #[serde(skip_serializing_if = "is_zero")]
     sampling_skipped: usize,
@@ -1787,9 +1764,9 @@ struct AnchorProvenance<'a> {
     anchor_match: Option<bool>,
 }
 
-// `EditorialConfidence` is canonical-defined in `crate::rules::ruleset`
-// so that `SpellingRule.editorial_confidence` and the per-issue field
-// share a single type.  Re-exported here for the explain pipeline.
+// `EditorialConfidence` is canonical-defined in `crate::rules::ruleset` so that
+// `SpellingRule.editorial_confidence` and the per-issue field share a single
+// type. Re-exported here for the explain pipeline.
 use crate::rules::ruleset::EditorialConfidence;
 
 /// Structured per-issue explain metadata (35.2).
@@ -1868,26 +1845,24 @@ fn derive_explain_meta(issue: &Issue) -> ExplainMeta<'_> {
         })
     });
 
-    // -- Editorial confidence.
-    // Rule-level annotation wins (from assets/ruleset.json
-    // `editorial_confidence`); else heuristics on rule type / severity /
-    // anchor_match / context_clues.
+    // -- Editorial confidence. Rule-level annotation wins (from
+    // assets/ruleset.json `editorial_confidence`); else heuristics on rule type
+    // / severity / anchor_match / context_clues.
     let editorial_confidence = issue
         .editorial_confidence
         .unwrap_or_else(|| heuristic_editorial_confidence(issue));
 
-    // -- False-friend detection.
-    // Confusable rules are the canonical false friends.  Rule-tagged
-    // low-confidence terms are also surfaced as false friends because
-    // their surface form is shared across regions with divergent senses.
+    // -- False-friend detection. Confusable rules are the canonical false
+    // friends. Rule-tagged low-confidence terms are also surfaced as false
+    // friends because their surface form is shared across regions with
+    // divergent senses.
     let is_false_friend = matches!(issue.rule_type, IssueType::Confusable)
         || matches!(editorial_confidence, EditorialConfidence::Low)
             && issue.editorial_confidence.is_some();
 
-    // -- Auto-fix safety + review need.
-    // Invariant: `low` confidence forces auto_fix_safe=false +
-    // needs_review=true.  Otherwise punctuation / case / variant / typo
-    // hits with a single suggestion are auto-fix safe.
+    // -- Auto-fix safety + review need. Invariant: `low` confidence forces
+    // auto_fix_safe=false + needs_review=true. Otherwise punctuation / case /
+    // variant / typo hits with a single suggestion are auto-fix safe.
     let single_unambiguous = issue.suggestions.len() == 1
         && matches!(
             issue.rule_type,
@@ -2060,7 +2035,8 @@ struct CompactOutput<'a> {
     summary_metrics: Option<&'a SummaryMetrics>,
 }
 
-/// Summary-only output: issue counts + AI signature, no individual issues or text.
+/// Summary-only output: issue counts + AI signature, no individual issues or
+/// text.
 #[derive(Serialize)]
 struct SummaryOutput<'a> {
     accepted: bool,
@@ -2179,8 +2155,9 @@ fn build_telemetry(
     let (est_prompt_tokens, est_completion_tokens) = bridge
         .map(|b| (b.est_prompt_tokens, b.est_completion_tokens))
         .unwrap_or((0, 0));
-    // ambiguous_terms: all terms that entered Tier 2 evaluation
-    // (resolved + suppressed + gray_zone), not just those forwarded to Tier 3.
+
+    // ambiguous_terms: all terms that entered Tier 2 evaluation (resolved +
+    // suppressed + gray_zone), not just those forwarded to Tier 3.
     let ambiguous_terms = (disambig_stats.tier2_resolved
         + disambig_stats.suppressed
         + disambig_stats.gray_zone) as u64;
@@ -2208,6 +2185,130 @@ fn build_telemetry(
 /// Serializes typed structs directly to avoid intermediate `serde_json::Value`
 /// allocations. Uses compact JSON by default; set `ZHTW_PRETTY=1` env var
 /// for indented output during debugging.
+/// Inputs to [Server::run_scan_stage], which both `fix_mode` paths share.
+struct ScanStageArgs<'a> {
+    text: &'a str,
+    content_type: crate::engine::scan::ContentType,
+    cfg: crate::rules::ruleset::ProfileConfig,
+    profile: Profile,
+    stance: Option<PoliticalStance>,
+    /// True when the input was Simplified and got converted upstream, in
+    /// which case the detected script is reported as such.
+    s2t_converted: bool,
+    #[cfg(feature = "translate")]
+    verify: bool,
+}
+
+/// What the shared stage produces: the scan plus the issue list after
+/// stance filtering, anchor calibration, Tier 2, Tier 3, and suppressions.
+///
+/// Translation memory is deliberately NOT applied here.  It is the one
+/// step whose position differs between the two paths, so it stays at the
+/// call sites where the difference is visible.
+struct ScanStage {
+    /// Exclusion ranges, kept so the fix path can hand them to the fixer
+    /// and remap them instead of rebuilding.
+    excluded: Vec<crate::engine::excluded::ByteRange>,
+    /// The scan output with `issues` drained into the field below.
+    scan: crate::engine::scan::ScanOutput,
+    issues: Vec<Issue>,
+    detected_script: &'static str,
+    /// Issue count straight out of the scanner, before any filtering.
+    scanner_hit_count: usize,
+    disambig_stats: crate::engine::disambig::DisambigStats,
+    sampling_stats: SamplingStats,
+    #[cfg(feature = "translate")]
+    calibrate_result: Option<crate::engine::translate::CalibrateResult>,
+}
+
+/// Capability flags as parsed from the `zhtw` tool arguments, before they
+/// are folded into a [ProfileConfig].  `None` means "inherit the profile
+/// default"; `Some` is an explicit caller override.
+struct CheckFlags<'a> {
+    relaxed: bool,
+    exempt_blockquotes: bool,
+    stance: Option<PoliticalStance>,
+    detect_style: bool,
+    detect_ai: Option<bool>,
+    detect_translationese: Option<bool>,
+    translationese_domain: Option<&'a str>,
+    ai_threshold: Option<&'a str>,
+}
+
+/// Fold the profile base and the caller's capability flags into one
+/// config.  Separate from `tool_check` because it is pure argument
+/// resolution: every rejection it can produce is a bad parameter value,
+/// and none of it depends on the text being checked.
+fn build_check_config(
+    profile: Profile,
+    flags: &CheckFlags<'_>,
+    id: &Option<super::types::RequestId>,
+) -> ParamResult<crate::rules::ruleset::ProfileConfig> {
+    let mut cfg = profile.config();
+    if flags.relaxed {
+        cfg = cfg.with_relaxed();
+    }
+    if flags.exempt_blockquotes {
+        cfg = cfg.with_exempt_blockquotes(true);
+    }
+    if let Some(st) = flags.stance {
+        cfg = cfg.with_stance(st);
+    }
+
+    // `detect_style` mirrors the CLI shorthand: it always computes the full
+    // three-axis scorecard, regardless of explicit per-axis disables.
+    if flags.detect_style {
+        cfg.translationese_detection = true;
+    } else if let Some(b) = flags.detect_translationese {
+        cfg.translationese_detection = b;
+    }
+    if let Some(domain_str) = flags.translationese_domain {
+        match crate::engine::translationese_score::TranslationeseDomain::from_str_strict(domain_str)
+        {
+            Some(d) => cfg.translationese_domain = d,
+            None => {
+                return Err(param_error(
+                    id,
+                    "translationese_domain",
+                    domain_str,
+                    &["general", "technical", "literary", "news"],
+                ));
+            }
+        }
+    }
+
+    // Resolve effective AI detection: explicit arg wins over profile default.
+    // All four AI sub-flags move as a unit — enabling detection turns them all
+    // on, disabling turns them all off.
+    let detect_ai = if flags.detect_style {
+        true
+    } else {
+        flags.detect_ai.unwrap_or(cfg.ai_filler_detection)
+    };
+    cfg.ai_filler_detection = detect_ai;
+    cfg.ai_semantic_safety = detect_ai;
+    cfg.ai_density_detection = detect_ai;
+    cfg.ai_structural_patterns = detect_ai;
+    if detect_ai {
+        // Apply threshold level: low=0.5 (sensitive), medium=1.0, high=1.5
+        // (conservative).
+        cfg.ai_threshold_multiplier = match flags.ai_threshold {
+            Some("low") => 0.5,
+            Some("medium") | None => 1.0,
+            Some("high") => 1.5,
+            Some(other) => {
+                return Err(param_error(
+                    id,
+                    "ai_threshold",
+                    other,
+                    &["low", "medium", "high"],
+                ));
+            }
+        };
+    }
+    Ok(cfg)
+}
+
 /// Build the composite three-axis scorecard when the caller explicitly
 /// opts in via `detect_style` (CLI: `--detect-style` flag, MCP:
 /// `detect_style: true` argument).  Pure aggregation — returns `None`
@@ -2466,26 +2567,29 @@ fn build_issues_list<'a>(
 ///
 /// Groups issues by (found, rule_type, suggestions, severity) key. Each group
 /// becomes one entry with count and locations. Serialized directly via
-/// `#[derive(Serialize)]` on `CompactGroup` — no intermediate `Value` per group.
+/// `#[derive(Serialize)]` on `CompactGroup` — no intermediate `Value` per
+/// group.
 fn build_compact_groups(issues: &[Issue], explain: bool, include_stats: bool) -> Vec<CompactGroup> {
     use std::collections::BTreeMap;
 
-    // Key: (found, rule_type, suggestions_joined, severity, resolution_tier_discriminant)
-    // Include severity so that sampling can produce mixed-severity occurrences
-    // of the same term without silently inheriting the first occurrence's level.
-    // When include_stats is true, also partition by resolution tier so the
-    // per-group resolution field is accurate.
-    // Uses shared IssueType::name() and Severity::name() from ruleset.rs.
-    // We use BTreeMap for deterministic ordering.
+    // Key: (found, rule_type, suggestions_joined, severity,
+    // resolution_tier_discriminant) Include severity so that sampling can
+    // produce mixed-severity occurrences of the same term without silently
+    // inheriting the first occurrence's level. When include_stats is true, also
+    // partition by resolution tier so the per-group resolution field is
+    // accurate. Uses shared IssueType::name() and Severity::name() from
+    // ruleset.rs. We use BTreeMap for deterministic ordering.
     let mut groups: BTreeMap<(&str, &str, String, &str, u8), CompactGroup> = BTreeMap::new();
 
     for issue in issues {
         let rt = issue.rule_type.name();
         let sug_key = issue.suggestions.join("|");
         let sev_key = issue.severity.name();
-        // Compute resolution tier once; reuse for both grouping key and field value.
-        // Discriminant 0 when stats disabled (all group together); distinct
-        // per-tier when enabled so the resolution field stays accurate.
+
+        // Compute resolution tier once; reuse for both grouping key and field
+        // value. Discriminant 0 when stats disabled (all group together);
+        // distinct per-tier when enabled so the resolution field stays
+        // accurate.
         let tier = if include_stats {
             Some(ResolutionTier::classify(issue))
         } else {
@@ -2552,7 +2656,8 @@ pub fn escape_tsv_field(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Deduplicated issue group shared by MCP tabular output and CLI tabular format.
+/// Deduplicated issue group shared by MCP tabular output and CLI tabular
+/// format.
 ///
 /// Groups issues by (found, rule_type, suggestions, severity) key. Each group
 /// stores shared fields once and collects per-occurrence locations.
@@ -2703,9 +2808,9 @@ fn build_tabular_output(
         out.push_str("found\tsug\ttype\tsev\tn\tloc\n");
     }
 
-    // Data rows.  Use abbreviated severity (E/W/I) and rule type codes
-    // (cs/cf/v/pol/typo/punc/case/gram) to reduce token count.
-    // Escape tab/newline in data fields to prevent TSV injection.
+    // Data rows. Use abbreviated severity (E/W/I) and rule type codes
+    // (cs/cf/v/pol/typo/punc/case/gram) to reduce token count. Escape
+    // tab/newline in data fields to prevent TSV injection.
     for ((found, rt, _, sev), group) in &groups {
         let found_safe = escape_tsv_field(found);
         let suggestions_str = group
@@ -2715,14 +2820,14 @@ fn build_tabular_output(
             .collect::<Vec<_>>()
             .join(",");
 
-        // Map full group-key names to abbreviated codes directly,
-        // avoiding an O(groups*issues) scan that could also mismatch
-        // when the same found term appears in multiple groups.
+        // Map full group-key names to abbreviated codes directly, avoiding an
+        // O(groups*issues) scan that could also mismatch when the same found
+        // term appears in multiple groups.
         let short_rt = shorten_type(rt);
         let short_sev = shorten_severity(sev);
 
-        // Compress locations: if all share the same column, emit
-        // "L1,L4,L7:C" instead of "L1:C,L4:C,L7:C".
+        // Compress locations: if all share the same column, emit "L1,L4,L7:C"
+        // instead of "L1:C,L4:C,L7:C".
         let locs_str = compress_locations(&group.locs);
 
         let _ = write!(
@@ -2777,6 +2882,7 @@ fn build_fix_diff(
         }
         FixOutputMode::Patch => {
             use std::fmt::Write;
+
             // TSV patch format: header-once, sorted descending by offset so
             // clients can apply in order without index shifting.
             let mut patches: Vec<(usize, usize, &str, &str)> = fix_records
@@ -3194,9 +3300,9 @@ mod tests {
 
     #[test]
     fn build_explanation_for_translationese_does_not_duplicate_context() {
-        // Regression: the main Translationese arm already appends the
-        // context, so the shared "Context:" tail must be suppressed for
-        // this issue type or the narrative gets repeated.
+        // Regression: the main Translationese arm already appends the context,
+        // so the shared "Context:" tail must be suppressed for this issue type
+        // or the narrative gets repeated.
         let issue = Issue::new(
             0,
             3,
