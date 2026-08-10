@@ -62,6 +62,11 @@ def dict_path(name: str) -> Path:
 # (e.g. 后 後/后, 里 裡/里) so single-char fallback would guess wrong. This is a
 # deliberate subset, not "every char OpenCC lists with >1 candidate" -- most of
 # those (个 個, 万 萬, 当 當) have an overwhelmingly dominant reading and are safe.
+#
+# Excluding a char means it falls back to identity, which for a Simplified-only
+# char such as 复 leaves Simplified in the output. That residual is deliberate:
+# guessing one reading instead mis-converts the others (see EXTRA_PHRASES).
+# Reduce it by adding phrase entries, never by picking a default character.
 MANUAL_AMBIGUOUS_CHARS = {
     "干",
     "复",
@@ -102,6 +107,8 @@ def parse_dict(path: Path, *, keep_identity: bool = False) -> list[tuple[str, st
             if key == val and not keep_identity:
                 continue  # identity mapping
             entries.append((key, val))
+    # Preserve pre-sorted deterministic ordering (longest key first, then lexicographical)
+    entries.sort(key=lambda x: (-len(x[0]), x[0]))
     return entries
 
 
@@ -111,12 +118,30 @@ def parse_char_dict(path: Path) -> list[tuple[str, str]]:
     for key, val in parse_dict(path):
         if len(key) == 1 and len(val) == 1:
             entries.append((key, val))
+    # Preserve pre-sorted deterministic ordering (longest key first, then lexicographical)
+    entries.sort(key=lambda x: (-len(x[0]), x[0]))
     return entries
 
 
 def parse_ambiguous_chars() -> set[str]:
     """Return chars that must never use unconditional single-char fallback."""
     return set(MANUAL_AMBIGUOUS_CHARS)
+
+
+# Phrase entries OpenCC's STPhrases lacks, added so an ambiguous char resolves
+# from context instead of falling back to identity.  Each pair is hand-verified
+# zh-TW; do not guess a reading here.  This is the only safe way to reduce the
+# residual: picking one reading for the bare character mis-converts the others
+# (复 alone is 復/複/覆, and in technical prose 複 dominates).
+#
+# Purely additive: upstream always wins.  DICT_FILES tracks OpenCC master, so an
+# entry that is a gap today can be filled upstream tomorrow, and that must not
+# break the build.  Redundant and overridden entries are reported so they can be
+# retired, not treated as errors.
+EXTRA_PHRASES = {
+    "复盘": "復盤",
+    "复联": "復聯",
+}
 
 
 def filter_safe_chars(
@@ -128,18 +153,39 @@ def filter_safe_chars(
 
 def parse_phrases_with_ambiguous_protection(
     path: Path, ambiguous_chars: set[str]
-) -> list[tuple[str, str]]:
-    """Parse STPhrases and keep identity rows only when they protect ambiguous chars."""
+) -> tuple[list[tuple[str, str]], int]:
+    """Parse STPhrases and keep identity rows only when they protect ambiguous chars.
+
+    Returns the entries and how many EXTRA_PHRASES supplements were actually
+    applied, which is fewer than len(EXTRA_PHRASES) once upstream catches up.
+    """
     entries = []
-    seen = set()
+    applied = 0
+    seen = {}
     for key, val in parse_dict(path, keep_identity=True):
         if key == val and not any(ch in ambiguous_chars for ch in key):
             continue
         if key in seen:
             continue
-        seen.add(key)
+        seen[key] = val
         entries.append((key, val))
-    return entries
+    for key, val in EXTRA_PHRASES.items():
+        if key in seen:
+            upstream = seen[key]
+            note = "same value" if upstream == val else f"upstream keeps {upstream!r}"
+            print(
+                f"note: EXTRA_PHRASES[{key!r}] is now covered by STPhrases "
+                f"({note}); the local entry is unused and can be retired.",
+                file=sys.stderr,
+            )
+            continue
+        entries.append((key, val))
+        applied += 1
+    # Already ordered: parse_dict() sorts, and the filtering above preserves it.
+    # EXTRA_PHRASES lands at the end, which is fine, because the AC is
+    # leftmost-longest and every key is unique, so pattern order cannot affect
+    # matching.
+    return entries, applied
 
 
 def compute_source_hash() -> str:
@@ -158,6 +204,7 @@ def escape_rust_str(s: str) -> str:
 
 def generate_rust(
     phrases: list[tuple[str, str]],
+    extras_applied: int,
     chars: list[tuple[str, str]],
     ambiguous_chars: set[str],
     tw_variants: list[tuple[str, str]],
@@ -170,7 +217,8 @@ def generate_rust(
         "// Dictionary data: Apache-2.0 (OpenCC project).",
         "",
         "/// SC->TC phrase mappings (longest-match substitution).",
-        f"/// {len(phrases)} entries from STPhrases.txt.",
+        f"/// {len(phrases)} entries: STPhrases.txt plus "
+        f"{extras_applied} local additions (EXTRA_PHRASES).",
         f"pub const ST_PHRASES: &[(&str, &str)] = &[",
     ]
 
@@ -242,7 +290,8 @@ def main():
             sys.exit(1)
 
     ambiguous_chars = parse_ambiguous_chars()
-    phrases = parse_phrases_with_ambiguous_protection(
+
+    phrases, extras_applied = parse_phrases_with_ambiguous_protection(
         dict_path("st_phrases"), ambiguous_chars
     )
     chars_raw = parse_char_dict(dict_path("st_characters"))
@@ -259,7 +308,10 @@ def main():
         )
         sys.exit(1)
 
-    print(f"STPhrases:    {len(phrases):>6} entries")
+    print(
+        f"STPhrases:    {len(phrases):>6} entries "
+        f"({extras_applied} of {len(EXTRA_PHRASES)} local applied)"
+    )
     print(f"STCharacters: {len(chars):>6} entries (safe single-char only)")
     print(f"Ambiguous:    {len(ambiguous_chars):>6} chars excluded")
     print(f"TWVariants:   {len(tw_variants):>6} entries")
@@ -268,7 +320,9 @@ def main():
     if args.dry_run:
         return
 
-    content = generate_rust(phrases, chars, ambiguous_chars, tw_variants, source_hash)
+    content = generate_rust(
+        phrases, extras_applied, chars, ambiguous_chars, tw_variants, source_hash
+    )
 
     if args.check:
         if not OUTPUT.exists():
