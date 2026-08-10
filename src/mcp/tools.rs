@@ -3408,7 +3408,9 @@ mod tests {
         assert_eq!(summary.tier2_gray_zone, 1);
     }
 
-    fn make_initialized_server() -> (Server, tempfile::TempDir) {
+    fn make_initialized_server_with_version(
+        version: &str,
+    ) -> (Server, tempfile::TempDir, JsonRpcResponse) {
         let dir = tempfile::tempdir().unwrap();
         let mut server = Server::new(
             OverrideStore::open(&dir.path().join("overrides.json")).unwrap(),
@@ -3423,14 +3425,19 @@ mod tests {
             id: Some(RequestId::Int(0)),
             method: "initialize".into(),
             params: serde_json::json!({
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": version,
                 "capabilities": {},
                 "clientInfo": { "name": "test", "version": "0.1" }
             }),
         };
-        let resp = server.dispatch_preinit(&mut init_req);
-        assert!(resp.unwrap().unwrap().error.is_none());
+        let resp = server.dispatch_preinit(&mut init_req).unwrap().unwrap();
 
+        (server, dir, resp)
+    }
+
+    fn make_initialized_server() -> (Server, tempfile::TempDir) {
+        let (server, dir, resp) = make_initialized_server_with_version(MCP_PROTOCOL_VERSION);
+        assert!(resp.error.is_none());
         (server, dir)
     }
 
@@ -3451,6 +3458,21 @@ mod tests {
         assert!(!content.is_empty());
         let text = content[0].get("text").and_then(|v| v.as_str()).unwrap();
         serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn initialize_protocol_version_mismatch() {
+        // Assuming the mismatch version is 2024-01-01.
+        let (server, _dir, resp) = make_initialized_server_with_version("2024-01-01");
+        assert!(
+            resp.error.is_none(),
+            "initialize should succeed on version mismatch"
+        );
+        assert_eq!(
+            resp.result.as_ref().unwrap()["protocolVersion"],
+            MCP_PROTOCOL_VERSION
+        );
+        assert!(server.initialized);
     }
 
     #[test]
