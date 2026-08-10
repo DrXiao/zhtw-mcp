@@ -5,8 +5,8 @@
 //      cached ScanOutput without reading the file.
 //   2. Slow path (mtime miss): read file, blake3 hash, full cache key check.
 //
-// TTL-based expiry (default 24h) and MAX_ENTRIES cap prevent unbounded
-// growth.  Atomic writes via tempfile+rename with flock serialization.
+// TTL-based expiry (default 24h) and MAX_ENTRIES cap prevent unbounded growth.
+// Atomic writes via tempfile+rename with flock serialization.
 //
 // MCP path does NOT use this cache (stateless by design).
 
@@ -51,20 +51,26 @@ pub struct ScanParams {
     pub ruleset_hash: String,
     pub profile: String,
     pub content_type: String,
-    // Currently always "None" because caching is disabled when fix_mode
-    // is active.  Kept for forward-compatibility.
+
+    // Currently always "None" because caching is disabled when fix_mode is
+    // active. Kept for forward-compatibility.
     pub fix_mode: String,
     // Whether AI detection is active — changes scan results.
     pub detect_ai: bool,
     // Whether translationese detection is active — changes scan results.
     pub detect_translationese: bool,
-    // Translationese domain calibration — changes thresholds and serialized reports.
+
+    // Translationese domain calibration — changes thresholds and serialized
+    // reports.
     #[serde(default = "default_translationese_domain")]
     pub translationese_domain: String,
-    // AI threshold level (formatted f32) — different multipliers produce different results.
+
+    // AI threshold level (formatted f32) — different multipliers produce
+    // different results.
     pub ai_threshold: String,
-    // Markdown blockquote-exemption flag — changes which spans get
-    // scanned, so cache hits must be invalidated when toggled.
+
+    // Markdown blockquote-exemption flag — changes which spans get scanned, so
+    // cache hits must be invalidated when toggled.
     #[serde(default)]
     pub exempt_blockquotes: bool,
 }
@@ -105,7 +111,8 @@ pub struct CacheHit {
 pub enum CacheResult {
     /// Fast-path hit: mtime+size match, no file read needed.
     Hit(Box<CacheHit>),
-    /// mtime changed or no entry: caller must read file and call `check_content`.
+    /// mtime changed or no entry: caller must read file and call
+    /// `check_content`.
     Miss,
 }
 
@@ -245,8 +252,9 @@ impl ScanCache {
         if !self.dirty {
             return;
         }
-        // Destructured so the entries borrow stays independent of `path`,
-        // which the write below needs while `entries` is still live.
+
+        // Destructured so the entries borrow stays independent of `path`, which
+        // the write below needs while `entries` is still live.
         let Self {
             path,
             entries,
@@ -283,8 +291,8 @@ impl ScanCache {
             return;
         };
 
-        // Acquire exclusive lock on the cache file (or a .lock sidecar)
-        // to prevent concurrent CLI processes from clobbering writes.
+        // Acquire exclusive lock on the cache file (or a .lock sidecar) to
+        // prevent concurrent CLI processes from clobbering writes.
         let lock_path = self.path.with_extension("lock");
         let lock_file = std::fs::OpenOptions::new()
             .create(true)
@@ -292,14 +300,14 @@ impl ScanCache {
             .truncate(true)
             .open(&lock_path);
 
-        // Best-effort lock: if another process holds it, skip this flush
-        // but keep dirty=true so Drop retries.
+        // Best-effort lock: if another process holds it, skip this flush but
+        // keep dirty=true so Drop retries.
         let locked = lock_file
             .as_ref()
             .is_ok_and(|f| f.try_lock_exclusive().is_ok());
 
-        // Write without lock if lock file creation failed; skip entirely
-        // if lock is held by another process.
+        // Write without lock if lock file creation failed; skip entirely if
+        // lock is held by another process.
         if (locked || lock_file.is_err()) && atomic_write(parent, &self.path, &bytes) {
             self.dirty = false;
         }
@@ -318,10 +326,27 @@ impl Drop for ScanCache {
 
 /// Atomic write via tempfile + rename.  Returns true on success.
 /// Writes directly to the open fd (not re-opening by path).
+///
+/// Failure stays non-fatal because the cache is best effort, but it is
+/// reported at warn rather than swallowed.  The default subscriber filter
+/// is warn, so anything quieter is dropped unless the user already
+/// suspects something, which is the wrong way round for a symptom whose
+/// only other sign is every run being slow for no stated reason.
 fn atomic_write(parent: &Path, dest: &Path, bytes: &[u8]) -> bool {
     use std::io::Write;
-    tempfile::NamedTempFile::new_in(parent)
-        .is_ok_and(|mut tmp| tmp.write_all(bytes).is_ok() && tmp.persist(dest).is_ok())
+    let write = || -> std::io::Result<()> {
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        tmp.write_all(bytes)?;
+        tmp.persist(dest)?;
+        Ok(())
+    };
+    match write() {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("scan cache write to {} failed: {e}", dest.display());
+            false
+        }
+    }
 }
 
 /// Default cache file location: ~/.cache/zhtw-mcp/scan-cache.json
