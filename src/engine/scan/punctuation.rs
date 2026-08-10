@@ -1,5 +1,5 @@
-// Punctuation scanning: half-width to full-width detection, dunhao
-// (enumeration comma), and range indicator normalization.
+// Punctuation scanning: half-width to full-width detection, dunhao (enumeration
+// comma), and range indicator normalization.
 
 use crate::engine::excluded::{is_excluded, ByteRange};
 use crate::rules::ruleset::{Issue, ProfileConfig, Severity};
@@ -9,7 +9,8 @@ use super::{
 };
 
 impl Scanner {
-    /// Punctuation scan: detect half-width punctuation that should be full-width
+    /// Punctuation scan: detect half-width punctuation that should be
+    /// full-width
     /// in a CJK context.
     ///
     /// Handles: , . ! ? ; ( ) : (2.1 + 2.2).
@@ -27,6 +28,10 @@ impl Scanner {
         let mut ascii_quote_pos_in_para = 0usize;
 
         for (i, &b) in bytes.iter().enumerate() {
+            // Cheap prefilter so the exclusion range check below runs only for
+            // candidate bytes. The dispatch match further down repeats this
+            // byte set; a byte added here but not there is skipped, not a
+            // panic.
             match b {
                 b',' | b'.' | b'!' | b'?' | b';' | b'(' | b')' | b':' | b'"' => {}
                 _ => continue,
@@ -38,7 +43,8 @@ impl Scanner {
 
             match b {
                 b',' => {
-                    // Guard: digit on both sides → thousands separator (e.g. 1,000).
+                    // Guard: digit on both sides → thousands separator (e.g.
+                    // 1,000).
                     let digit_before = i > 0 && bytes[i - 1].is_ascii_digit();
                     let digit_after = i + 1 < len && bytes[i + 1].is_ascii_digit();
                     if digit_before && digit_after {
@@ -61,7 +67,9 @@ impl Scanner {
                     if period_before || period_after {
                         continue;
                     }
-                    // Guard: followed by ASCII alphanumeric → decimal / extension.
+
+                    // Guard: followed by ASCII alphanumeric → decimal /
+                    // extension.
                     if i + 1 < len && bytes[i + 1].is_ascii_alphanumeric() {
                         continue;
                     }
@@ -76,8 +84,8 @@ impl Scanner {
                     ));
                 }
                 b'!' | b'?' | b';' => {
-                    // Guard: Markdown image syntax ![alt](url) — ! followed by [
-                    // is never a prose exclamation mark.
+                    // Guard: Markdown image syntax ![alt](url) — ! followed by
+                    // [ is never a prose exclamation mark.
                     if b == b'!' && i + 1 < len && bytes[i + 1] == b'[' {
                         continue;
                     }
@@ -96,9 +104,10 @@ impl Scanner {
                     issues.push(punct_issue(i, found, suggestion, context));
                 }
                 b'(' | b')' => {
-                    // Require CJK immediately adjacent (no whitespace skip) on both
-                    // sides to avoid flagging functional ASCII parens: method calls
-                    // like foo(), markdown links [text](url), spaced 中文 (note).
+                    // Require CJK immediately adjacent (no whitespace skip) on
+                    // both sides to avoid flagging functional ASCII parens:
+                    // method calls like foo(), markdown links [text](url),
+                    // spaced 中文 (note).
                     if !immediate_cjk(text, i, true) || !immediate_cjk(text, i + 1, false) {
                         continue;
                     }
@@ -132,18 +141,22 @@ impl Scanner {
                     if i + 2 < len && bytes[i + 1] == b'/' && bytes[i + 2] == b'/' {
                         continue;
                     }
-                    // Guard: ]: → Markdown reference/footnote definition ([^id]: text, [id]: url).
+
+                    // Guard: ]: → Markdown reference/footnote definition
+                    // ([^id]: text, [id]: url).
                     if i > 0 && bytes[i - 1] == b']' {
                         continue;
                     }
-                    // Guard: definition-list colon — `: ` at the start of a line
-                    // (possibly indented) is Markdown structural markup.
+
+                    // Guard: definition-list colon — `: ` at the start of a
+                    // line (possibly indented) is Markdown structural markup.
                     // Pattern: (BOF or \n)(spaces/tabs)*`: `.
                     if i + 1 < len && bytes[i + 1] == b' ' {
                         let line_start = if i == 0 {
                             true
                         } else {
-                            // Walk backwards over spaces/tabs to find \n or BOF.
+                            // Walk backwards over spaces/tabs to find \n or
+                            // BOF.
                             let mut j = i - 1;
                             loop {
                                 if bytes[j] == b'\n' {
@@ -201,7 +214,12 @@ impl Scanner {
                     ascii_quote_prev_end = i + 1;
                     ascii_quote_pos_in_para += 1;
                 }
-                _ => unreachable!(),
+
+                // Not a candidate byte: the prefilter above already skipped it.
+                // Skipping rather than panicking keeps a future edit that adds
+                // a byte to only one of the two lists a missed lint instead of
+                // a crash.
+                _ => continue,
             }
         }
     }
@@ -210,7 +228,8 @@ impl Scanner {
     ///
     /// Scans for sequences of short items separated by full-width ， that
     /// likely represent coordinate lists and should use 、 instead.
-    /// Severity: Info (advisory -- the heuristic false-positives on short clauses).
+    /// Severity: Info (advisory -- the heuristic false-positives on short
+    /// clauses).
     pub(crate) fn scan_dunhao(&self, text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue>) {
         let comma = "\u{FF0C}"; // ，
         let comma_len = comma.len(); // 3 bytes
@@ -231,7 +250,8 @@ impl Scanner {
             return;
         }
 
-        // is_short[j]: segment between positions[j] and positions[j+1] is 1-4 chars.
+        // is_short[j]: segment between positions[j] and positions[j+1] is 1-4
+        // chars.
         let is_short: Vec<bool> = (0..positions.len() - 1)
             .map(|j| {
                 let seg = text[positions[j] + comma_len..positions[j + 1]].trim();
@@ -240,8 +260,8 @@ impl Scanner {
             })
             .collect();
 
-        // Find runs of consecutive short segments. A run of length N means
-        // N+1 commas bounding N+2 items. Require N >= 2.
+        // Find runs of consecutive short segments. A run of length N means N+1
+        // commas bounding N+2 items. Require N >= 2.
         let mut i = 0;
         while i < is_short.len() {
             if !is_short[i] {
@@ -275,8 +295,10 @@ impl Scanner {
     /// the byte-level ASCII scan in scan_punctuation() cannot detect.
     ///
     /// Requires CJK adjacency on at least one side to avoid false positives on
-    /// English typographic smart quotes and apostrophes (e.g., "Hello" or it's).
-    /// \u{2019} is the standard typographic apostrophe in English — without this
+    /// English typographic smart quotes and apostrophes (e.g., "Hello" or
+    /// it's).
+    /// \u{2019} is the standard typographic apostrophe in English — without
+    /// this
     /// guard, words like "don't" would be destroyed.
     ///
     /// Double quotes are emitted as issues; `fix_quote_pairing()` in quotes.rs
@@ -295,15 +317,17 @@ impl Scanner {
                     if is_excluded(byte_offset, byte_offset + ch_len, excluded) {
                         continue;
                     }
-                    // Require CJK context on at least one side to avoid flagging
-                    // English smart quotes (e.g., "Hello," she said.).
+
+                    // Require CJK context on at least one side to avoid
+                    // flagging English smart quotes (e.g., "Hello," she said.).
                     let left_cjk = adjacent_cjk_inner(text, byte_offset, true, 3);
                     let right_cjk = adjacent_cjk_inner(text, byte_offset + ch_len, false, 3);
                     if !left_cjk && !right_cjk {
                         continue;
                     }
-                    // Placeholder suggestion; fix_quote_pairing() overwrites with
-                    // depth-aware nesting.
+
+                    // Placeholder suggestion; fix_quote_pairing() overwrites
+                    // with depth-aware nesting.
                     let suggestion = if ch == '\u{201c}' {
                         "\u{300c}" // 「
                     } else {
@@ -320,9 +344,10 @@ impl Scanner {
                     if is_excluded(byte_offset, byte_offset + ch_len, excluded) {
                         continue;
                     }
+
                     // Guard: ASCII letter immediately adjacent means English
                     // apostrophe/contraction (it's, don't, 's, 'll), not a CN
-                    // quote.  This catches "中文's" and "中文 'twas" that would
+                    // quote. This catches "中文's" and "中文 'twas" that would
                     // otherwise false-positive due to nearby CJK context.
                     let ascii_before =
                         byte_offset > 0 && text.as_bytes()[byte_offset - 1].is_ascii_alphabetic();
@@ -331,8 +356,10 @@ impl Scanner {
                     if ascii_before || ascii_after {
                         continue;
                     }
-                    // Require CJK context on at least one side to avoid flagging
-                    // English typographic apostrophes in pure-English text.
+
+                    // Require CJK context on at least one side to avoid
+                    // flagging English typographic apostrophes in pure-English
+                    // text.
                     let left_cjk = adjacent_cjk_inner(text, byte_offset, true, 3);
                     let right_cjk = adjacent_cjk_inner(text, byte_offset + ch_len, false, 3);
                     if !left_cjk && !right_cjk {
@@ -394,7 +421,9 @@ impl Scanner {
                 if !(left_digit || left_cjk) || !(right_digit || right_cjk) {
                     continue;
                 }
-                // Require at least one CJK side to avoid flagging in pure ASCII.
+
+                // Require at least one CJK side to avoid flagging in pure
+                // ASCII.
                 if !left_cjk && !right_cjk {
                     continue;
                 }
@@ -403,9 +432,9 @@ impl Scanner {
                     continue;
                 }
             } else {
-                // Hyphen as range indicator. Very conservative to avoid
-                // false positives on markdown, CLI flags, minus signs.
-                // Skip consecutive dashes.
+                // Hyphen as range indicator. Very conservative to avoid false
+                // positives on markdown, CLI flags, minus signs. Skip
+                // consecutive dashes.
                 if (i > 0 && bytes[i - 1] == b'-') || (i + 1 < len && bytes[i + 1] == b'-') {
                     continue;
                 }

@@ -16,7 +16,8 @@ use super::ruleset::{CaseRule, SpellingRule};
 ///   3 — JSON-file overrides, sled removed
 pub const SCHEMA_VERSION: u32 = 3;
 
-/// Acquire an exclusive advisory lock on a lockfile adjacent to the target path.
+/// Acquire an exclusive advisory lock on a lockfile adjacent to the target
+/// path.
 ///
 /// Returns the locked `File` handle; the lock is released when the handle is
 /// dropped. This prevents concurrent MCP server instances from racing on the
@@ -274,8 +275,9 @@ impl OverrideStore {
 /// the target. This prevents corruption on crash/power-loss.
 fn atomic_write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
     let raw_parent = path.parent().unwrap_or_else(|| Path::new("."));
-    // Normalize empty parent (bare filename like "overrides.json") to "."
-    // so that NamedTempFile::new_in gets a valid directory.
+
+    // Normalize empty parent (bare filename like "overrides.json") to "." so
+    // that NamedTempFile::new_in gets a valid directory.
     let parent = if raw_parent.as_os_str().is_empty() {
         Path::new(".")
     } else {
@@ -292,7 +294,8 @@ fn atomic_write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
 }
 
 /// Best-effort rename of path to path.with_extension(ext).
-/// Silently ignored on failure because the important thing is to not fail startup.
+/// Silently ignored on failure because the important thing is to not fail
+/// startup.
 fn backup_file(path: &Path, ext: &str) {
     let backup = path.with_extension(ext);
     let _ = std::fs::rename(path, &backup);
@@ -385,9 +388,10 @@ impl SuppressionStore {
             atomic_write_json(path, &s)?;
             s
         };
-        // Build lookup set and enforce uniqueness invariant: if the JSON
-        // file was hand-edited to contain duplicates, deduplicate so that
-        // remove() keeps Vec and HashSet in sync.
+
+        // Build lookup set and enforce uniqueness invariant: if the JSON file
+        // was hand-edited to contain duplicates, deduplicate so that remove()
+        // keeps Vec and HashSet in sync.
         let mut term_set = HashSet::with_capacity(suppressions.terms.len());
         suppressions.terms.retain(|t| term_set.insert(t.clone()));
         Ok(Self {
@@ -578,21 +582,24 @@ impl TranslationMemoryStore {
     pub fn record(&mut self, entry: TmEntry) -> Result<()> {
         let _lock = acquire_lock(&self.path)?;
 
-        // Deduplicate by found: latest decision wins. O(1) via index.
-        let existing = self.index.get(&entry.found).copied();
+        // Deduplicate by found: latest decision wins. O(1) via index. The slot
+        // and the value it held travel together so rollback cannot pair an
+        // index with the wrong entry.
+        let previous = self
+            .index
+            .get(&entry.found)
+            .copied()
+            .map(|pos| (pos, self.memory.entries[pos].clone()));
 
         // Enforce entry cap (new entries only; updates always allowed).
-        if existing.is_none() && self.memory.entries.len() >= TM_MAX_ENTRIES {
+        if previous.is_none() && self.memory.entries.len() >= TM_MAX_ENTRIES {
             anyhow::bail!(
                 "translation memory full ({TM_MAX_ENTRIES} entries); \
                  clear or export before recording more"
             );
         }
 
-        // Save old entry for rollback before mutating.
-        let old_entry = existing.map(|pos| self.memory.entries[pos].clone());
-
-        if let Some(pos) = existing {
+        if let Some((pos, _)) = previous {
             self.memory.entries[pos] = entry;
         } else {
             let new_idx = self.memory.entries.len();
@@ -603,10 +610,9 @@ impl TranslationMemoryStore {
 
         if let Err(e) = self.flush() {
             // Rollback: restore previous state.
-            if let Some(old) = old_entry {
-                self.memory.entries[existing.unwrap()] = old;
-            } else {
-                let removed = self.memory.entries.pop().expect("just pushed");
+            if let Some((pos, old)) = previous {
+                self.memory.entries[pos] = old;
+            } else if let Some(removed) = self.memory.entries.pop() {
                 self.index.remove(&removed.found);
             }
             return Err(e);
@@ -651,7 +657,9 @@ impl TranslationMemoryStore {
     }
 
     /// Import TM entries from a file. Merges with existing entries (dedup
-    /// by `found` only — latest decision per term wins). Returns `(added, updated)`.
+    /// by `found` only — latest decision per term wins).
+    ///
+    /// Returns `(added, updated)`.
     pub fn import(&mut self, src: &Path) -> Result<(usize, usize)> {
         let _lock = acquire_lock(&self.path)?;
         let content =
@@ -729,7 +737,9 @@ pub fn discover_tm_path(start_dir: &Path) -> PathBuf {
         if candidate.is_file() {
             return candidate;
         }
-        // At .git root: use this directory for TM even if file does not exist yet.
+
+        // At .git root: use this directory for TM even if file does not exist
+        // yet.
         if dir.join(".git").exists() {
             return dir.join(".zhtw-tm.json");
         }
@@ -855,7 +865,8 @@ impl PackStore {
     }
 
     /// Reject pack names that could escape the packs directory (path traversal)
-    /// or cause filesystem issues (Windows reserved names, trailing dots/spaces).
+    /// or cause filesystem issues (Windows reserved names, trailing
+    /// dots/spaces).
     fn validate_pack_name(name: &str) -> Result<()> {
         if name.is_empty()
             || name.contains('/')
@@ -1484,7 +1495,8 @@ mod tests {
             .unwrap();
         assert!(store.should_suppress("線程"));
 
-        // Accept with different context: overwrites the rejection (dedup by found).
+        // Accept with different context: overwrites the rejection (dedup by
+        // found).
         store
             .record(TmEntry {
                 found: "線程".into(),
@@ -1629,9 +1641,9 @@ mod tests {
 
     #[test]
     fn tm_hand_edited_duplicates_record_updates_last() {
-        // Simulate a hand-edited TM file with duplicate found entries.
-        // record() should update the last one (via index), and
-        // should_suppress() should read the canonical one.
+        // Simulate a hand-edited TM file with duplicate found entries. record()
+        // should update the last one (via index), and should_suppress() should
+        // read the canonical one.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".zhtw-tm.json");
 
