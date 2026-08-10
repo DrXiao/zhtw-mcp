@@ -270,6 +270,15 @@ impl Server {
         };
         let _span = tracing::info_span!("mcp_request", method = "initialize").entered();
 
+        // Note: This warning is deliberately emitted to stderr only (and not forwarded to the client).
+        if params.protocol_version != MCP_PROTOCOL_VERSION {
+            tracing::warn!(
+                client_version = %params.protocol_version,
+                server_version = %MCP_PROTOCOL_VERSION,
+                "MCP protocol version mismatch"
+            );
+        }
+
         // Store parsed client capabilities for later use (e.g. sampling).
         self.client_capabilities = ClientCapabilities::from(&params.capabilities);
         self.client_name = params.client_info.map(|ci| ci.name);
@@ -3462,8 +3471,7 @@ mod tests {
 
     #[test]
     fn initialize_protocol_version_mismatch() {
-        // Assuming the mismatch version is 2024-01-01.
-        let (server, _dir, resp) = make_initialized_server_with_version("2024-01-01");
+        let (server, _dir, resp) = make_initialized_server_with_version("2025-06-18");
         assert!(
             resp.error.is_none(),
             "initialize should succeed on version mismatch"
