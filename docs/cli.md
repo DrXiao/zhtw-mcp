@@ -38,6 +38,37 @@ zhtw-mcp lint file.md --explain
 
 Each issue includes a cultural/linguistic annotation and its English anchor term.
 
+## Inline suppression
+
+A pragma is `zhtw:` plus a keyword, placed behind whatever comment opener the file already uses: `<!--` (Markdown, HTML), `//` (C-family), or `#` (YAML, TOML, Python, shell, locale files). Every keyword works behind every opener.
+
+Two limits on `#`: it is ignored under `--content-type markdown`, where `#` starts a heading rather than a comment, and it must begin its own token, so `key: value# zhtw:ignore` is data rather than a pragma.
+
+| Keyword | Effect |
+|---|---|
+| `zhtw:ignore`, `zhtw:ignore-line` | suppress the line the pragma sits on |
+| `zhtw:ignore-next-line`, `zhtw:ignore-next` | suppress the following line |
+| `zhtw:ignore-block` ... `zhtw:end-ignore` | suppress everything between the two markers |
+
+Every keyword has a `disable` spelling (`zhtw:disable-next-line`, `zhtw:disable-block`), and `zhtw:enable` is accepted as a block end, for users coming from linters that pair disable with enable. A bare `zhtw:disable` suppresses one line rather than opening a block; use `zhtw:disable-block` to fence off a region.
+
+```yaml
+title: 用戶手冊  # zhtw:ignore
+
+# zhtw:disable-block
+mainland_samples:
+  - 用戶
+  - 數據庫
+# zhtw:enable
+```
+
+```markdown
+<!-- zhtw:ignore-next-line -->
+這行不會被檢查。
+```
+
+An unclosed block runs to the end of the file. An unrecognized keyword suppresses nothing, so a typo fails loudly (the issue still fires) rather than silently muting a region.
+
 ## Scan caching
 
 In lint-only mode (no `--fix`), the CLI automatically caches scan results keyed by file content hash (BLAKE3) and scan parameters. Unchanged files are skipped on subsequent runs. The cache lives at the platform default cache directory (`~/.cache/zhtw-mcp/` on Linux, `~/Library/Caches/zhtw-mcp/` on macOS) with 24-hour TTL and a 2000-entry cap. Caching is disabled when `--fix`, `--verify`, or stdin mode is active.
@@ -114,7 +145,11 @@ zhtw-mcp convert file.md --content-type markdown
 
 This is a two-stage pipeline: first a built-in character/phrase converter (SC→TC), then iterative vocabulary normalization via the standard scanner.
 
-When the `translate` feature is enabled, the `lint` subcommand supports `--verify` to confirm ambiguous substitutions against English anchor terms. The `convert` subcommand does not accept `--verify`; it runs the full calibration step unconditionally when the feature is active.
+### `--verify` sends text off the machine
+
+When the `translate` feature is enabled (it is, by default), `lint` and `convert` both accept `--verify` to confirm ambiguous substitutions against English anchor terms. This is the only part of either subcommand that touches the network: it sends the sentence around each unresolved issue, up to 4 KB per run, to `translate.googleapis.com`. Nothing else in the tool leaves the machine.
+
+It is off unless you pass the flag. Build with `--no-default-features` (plus the features you want) to remove the capability entirely; `--verify` then fails with an explanatory error rather than silently doing nothing.
 
 ## Editor integration setup
 

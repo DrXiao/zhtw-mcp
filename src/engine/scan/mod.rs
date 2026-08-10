@@ -49,9 +49,7 @@ use crate::rules::ruleset::{
 use self::ellipsis::scan_ellipsis;
 use self::quotes::{fix_quote_pairing, validate_quote_hierarchy};
 
-// ---------------------------------------------------------------------------
 // Scratch space — reusable buffers for per-scan mutable state
-// ---------------------------------------------------------------------------
 
 /// Pre-allocated buffers for per-scan mutable state.
 ///
@@ -181,6 +179,21 @@ impl ContentType {
             ContentType::Yaml => "yaml",
         }
     }
+
+    /// Whether `#` introduces a comment in this format, which decides
+    /// where an inline suppression pragma may sit.
+    ///
+    /// False for both Markdown types, where `#` starts a heading, so a
+    /// heading that documents a pragma does not become one.  That costs
+    /// `MarkdownScanCode` nothing even though it scans inside fences: the
+    /// suppression pass reads raw lines, so `<!-- zhtw:ignore -->` works
+    /// anywhere in the file, fenced code included.
+    ///
+    /// True for the code-bearing types: YAML, and the plain text that
+    /// TOML, Python, shell, and locale files resolve to.
+    pub fn hash_comments(self) -> bool {
+        !matches!(self, ContentType::Markdown | ContentType::MarkdownScanCode)
+    }
 }
 
 // Constants
@@ -228,9 +241,10 @@ fn translationese_phase_family(issue: &Issue) -> Option<(&'static str, u8)> {
         return None;
     }
     let ctx = issue.context.as_deref()?;
-    // Order matters: check the boundary-aware (b) variant first so a
-    // context that contains both substrings (e.g. "ZY1b" trivially
-    // contains "ZY1") classifies as the higher-rank variant.
+
+    // Order matters: check the boundary-aware (b) variant first so a context
+    // that contains both substrings (e.g. "ZY1b" trivially contains "ZY1")
+    // classifies as the higher-rank variant.
     if ctx.contains("ZY1b") {
         Some(("ZY1", 1))
     } else if ctx.contains("ZY1a") {
@@ -261,9 +275,11 @@ pub(crate) enum PositionalClue {
     After(String),
     /// TERM must be immediately adjacent to the match (no gap, either side).
     Adjacent(String),
-    /// TERM must NOT appear within POSITIONAL_WINDOW_CHARS chars AFTER the match.
+    /// TERM must NOT appear within POSITIONAL_WINDOW_CHARS chars AFTER the
+    /// match.
     NotBefore(String),
-    /// TERM must NOT appear within POSITIONAL_WINDOW_CHARS chars BEFORE the match.
+    /// TERM must NOT appear within POSITIONAL_WINDOW_CHARS chars BEFORE the
+    /// match.
     NotAfter(String),
 }
 
@@ -552,8 +568,9 @@ fn remap_issues_to_original(issues: &mut [Issue], original: &str, norm: &Normali
             issue.found = found.to_string();
         }
     }
-    // NFC offset mapping is monotonically non-decreasing, so issues that
-    // were sorted by NFC offset remain sorted by original offset.  Use the
+
+    // NFC offset mapping is monotonically non-decreasing, so issues that were
+    // sorted by NFC offset remain sorted by original offset. Use the
     // linear-pass fill to avoid O(log n) binary search per issue.
     let line_index = LineIndex::new(original);
     line_index.fill_line_col_sorted(issues, ColumnEncoding::Utf16);
@@ -568,8 +585,8 @@ fn remap_issues_to_original(issues: &mut [Issue], original: &str, norm: &Normali
 /// the intended suggestion (delete the filler phrase), so it is preserved
 /// as-is instead of being filtered away.
 pub(crate) fn effective_suggestions(rule: &SpellingRule) -> Vec<String> {
-    // AiFiller deletion: to == [""] means 'delete this phrase'.
-    // Preserve the empty-string suggestion so the fixer can apply it.
+    // AiFiller deletion: to == [""] means 'delete this phrase'. Preserve the
+    // empty-string suggestion so the fixer can apply it.
     if rule.is_deletion_rule() {
         return rule.to.clone();
     }
@@ -615,9 +632,13 @@ pub(crate) fn is_cjk_ideograph(ch: char) -> bool {
 pub(crate) fn is_cjk_context(ch: char) -> bool {
     is_cjk_ideograph(ch)
         || matches!(ch,
-            // CJK Symbols and Punctuation (U+3001..U+303F, skip U+3000 = ideographic space)
+
+            // CJK Symbols and Punctuation (U+3001..U+303F, skip U+3000 =
+            // ideographic space)
             '\u{3001}'..='\u{303F}' |
-            // Fullwidth Forms — fullwidth punctuation and letters (U+FF01..U+FF60)
+
+            // Fullwidth Forms — fullwidth punctuation and letters
+            // (U+FF01..U+FF60)
             '\u{FF01}'..='\u{FF60}' |
             // Halfwidth CJK punctuation (U+FF61..U+FF65)
             '\u{FF61}'..='\u{FF65}' |
@@ -634,7 +655,8 @@ fn adjacent_cjk(text: &str, byte_pos: usize, before: bool) -> bool {
     adjacent_cjk_inner(text, byte_pos, before, usize::MAX)
 }
 
-/// Check whether the immediately adjacent character (no whitespace skip) is CJK.
+/// Check whether the immediately adjacent character (no whitespace skip) is
+/// CJK.
 fn immediate_cjk(text: &str, byte_pos: usize, before: bool) -> bool {
     adjacent_cjk_inner(text, byte_pos, before, 0)
 }
@@ -679,7 +701,8 @@ fn adjacent_cjk_inner(text: &str, byte_pos: usize, before: bool, max_ws: usize) 
     }
 }
 
-/// Construct a punctuation Issue at the given byte offset with explicit severity.
+/// Construct a punctuation Issue at the given byte offset with explicit
+/// severity.
 fn punct_issue_sev(
     offset: usize,
     found: &str,
@@ -735,7 +758,7 @@ pub fn build_exclusions_for_content_type_with_options(
         ContentType::Yaml => excluded.extend(build_yaml_excluded_ranges(text)),
         ContentType::Plain => {}
     }
-    excluded.extend(build_suppression_ranges(text));
+    excluded.extend(build_suppression_ranges(text, content_type.hash_comments()));
     merge_ranges_pub(excluded)
 }
 
@@ -777,7 +800,8 @@ impl Scanner {
         self.segmenter.build_boundary_bitmap(text)
     }
 
-    /// Run only the spelling scan stage, returning issue count (for benchmarking).
+    /// Run only the spelling scan stage, returning issue count (for
+    /// benchmarking).
     /// Includes: clue pre-scan, boundary bitmap, eval.
     /// Does NOT include sort/overlap/inflation/line-col.
     pub fn bench_spelling_only_raw(
@@ -894,9 +918,9 @@ impl Scanner {
         .entered();
         let case_rules: Vec<CaseRule> = case_rules.into_iter().filter(|r| !r.disabled).collect();
 
-        // Build segmenter from the FULL rule set (before profile filtering)
-        // so word-boundary vocabulary is not lost when variant/ai_filler rules
-        // are excluded from the AC automaton.
+        // Build segmenter from the FULL rule set (before profile filtering) so
+        // word-boundary vocabulary is not lost when variant/ai_filler rules are
+        // excluded from the AC automaton.
         let segmenter = Segmenter::from_rules(&spelling_rules);
 
         let spelling_db = match rule_ir::compile_spelling_rules_filtered(spelling_rules, filter) {
@@ -1108,7 +1132,7 @@ impl Scanner {
         }
 
         // Heading severity boost for Markdown content: issues inside headings
-        // get +1 severity because heading text is high-visibility.  Gated by
+        // get +1 severity because heading text is high-visibility. Gated by
         // ProfileConfig::heading_severity_boost (default true).
         if cfg.heading_severity_boost
             && matches!(
@@ -1122,8 +1146,8 @@ impl Scanner {
                 && boost_heading_severity(&mut output.issues, &heading_ranges)
             {
                 // Mutating severity can break the (offset asc, severity desc)
-                // sort contract for issues sharing the same offset.  Re-sort
-                // to preserve the documented deterministic output order.
+                // sort contract for issues sharing the same offset. Re-sort to
+                // preserve the documented deterministic output order.
                 output.issues.sort_by(|a, b| {
                     a.offset
                         .cmp(&b.offset)
@@ -1202,7 +1226,8 @@ impl Scanner {
         cfg: ProfileConfig,
         scratch: &mut ScratchSpace,
     ) -> ScanOutput {
-        // Verify scan-time config doesn't re-enable rule types excluded at build time.
+        // Verify scan-time config doesn't re-enable rule types excluded at
+        // build time.
         debug_assert!(
             !(self.build_filter.exclude_variant && cfg.variant_normalization),
             "scan config enables variant_normalization but scanner was built without variant rules"
@@ -1218,10 +1243,10 @@ impl Scanner {
 
         scratch.clear();
 
-        // Compute rules_checked: count spelling rules active under this
-        // profile (case/punctuation are procedural, not discrete rules).
-        // Single pass over spelling_rules — subtract any rule whose type is
-        // gated off by the current config.
+        // Compute rules_checked: count spelling rules active under this profile
+        // (case/punctuation are procedural, not discrete rules). Single pass
+        // over spelling_rules — subtract any rule whose type is gated off by
+        // the current config.
         let rules_checked = if cfg.spelling {
             self.spelling_db
                 .spelling_rules
@@ -1252,8 +1277,8 @@ impl Scanner {
             };
         }
 
-        // Fused single-pass: detect SC/TC type, build LineIndex, and
-        // optionally build BoundaryBitmap -- shares one char_indices() iteration.
+        // Fused single-pass: detect SC/TC type, build LineIndex, and optionally
+        // build BoundaryBitmap -- shares one char_indices() iteration.
         let build_bitmap = cfg.spelling && text.len() > 4096;
         let (zh_type, line_index, boundary_bitmap) = detect_type_lineindex_and_bitmap(
             text,
@@ -1309,9 +1334,9 @@ impl Scanner {
         // Spaced-acronym rejoining (C P U → CPU).
         acronym::scan_spaced_acronyms(text, excluded, issues);
 
-        // All scanners (AC, punctuation, spacing, ellipsis, quotes) emit
-        // issues in offset order.  Skip the O(n log n) sort when already sorted
-        // (common case), falling back to sort only if the invariant breaks.
+        // All scanners (AC, punctuation, spacing, ellipsis, quotes) emit issues
+        // in offset order. Skip the O(n log n) sort when already sorted (common
+        // case), falling back to sort only if the invariant breaks.
         let already_sorted = issues.windows(2).all(|w| {
             w[0].offset < w[1].offset || (w[0].offset == w[1].offset && w[0].length >= w[1].length)
         });
@@ -1329,12 +1354,12 @@ impl Scanner {
         );
 
         // Inflate deferred spelling issues: fill in suggestions, context,
-        // english, context_clues from the compiled DB.  Only survivors
-        // of overlap resolution get the full clone cost.  Must run before
-        // fix_quote_pairing which overwrites suggestions on CN quote issues.
-        // In offset_only mode, skip context/english/context_clues (not serialized).
-        // Count distinct spelling rules before inflate (which clears
-        // spelling_rule_idx via take()).
+        // english, context_clues from the compiled DB. Only survivors of
+        // overlap resolution get the full clone cost. Must run before
+        // fix_quote_pairing which overwrites suggestions on CN quote issues. In
+        // offset_only mode, skip context/english/context_clues (not
+        // serialized). Count distinct spelling rules before inflate (which
+        // clears spelling_rule_idx via take()).
         let rules_matched = {
             let mut seen = std::collections::HashSet::new();
             for issue in issues.iter() {
@@ -1352,28 +1377,28 @@ impl Scanner {
         }
 
         // Grammar checks run AFTER overlap resolution so broad grammar spans
-        // (e.g. 是不是…嗎) do not suppress narrower spelling/case issues
-        // that happen to fall inside the grammar match range.
+        // (e.g. 是不是…嗎) do not suppress narrower spelling/case issues that
+        // happen to fall inside the grammar match range.
         if cfg.grammar_checks {
             grammar::scan_grammar(text, excluded, issues);
         }
 
-        // AI writing detection grammar checks: semantic safety words,
-        // copula avoidance, passive voice overuse.  Separate from base grammar
-        // checks — gated by ai_semantic_safety profile flag.
+        // AI writing detection grammar checks: semantic safety words, copula
+        // avoidance, passive voice overuse. Separate from base grammar checks —
+        // gated by ai_semantic_safety profile flag.
         if cfg.ai_semantic_safety {
             grammar::scan_ai_grammar(text, excluded, issues);
         }
 
-        // Structural AI pattern detection: binary contrast density,
-        // paragraph endings, dash overuse, formulaic headings, list density.
+        // Structural AI pattern detection: binary contrast density, paragraph
+        // endings, dash overuse, formulaic headings, list density.
         if cfg.ai_structural_patterns {
             grammar::scan_ai_structural(text, excluded, issues, cfg.ai_threshold_multiplier);
         }
 
         // Density-based AI phrase detection: post-scan frequency pass counts
         // tracked phrases across the full document and flags when density
-        // exceeds per-phrase thresholds.  Distinct from per-occurrence filler
+        // exceeds per-phrase thresholds. Distinct from per-occurrence filler
         // detection — catches the statistical signature of AI writing.
         if cfg.ai_density_detection {
             grammar::scan_ai_density(text, excluded, issues, cfg.ai_threshold_multiplier);
@@ -1388,8 +1413,8 @@ impl Scanner {
             None
         };
 
-        // Structural AI pattern detectors (S1-S8, V2 density).
-        // Requires sentence/paragraph boundary index.
+        // Structural AI pattern detectors (S1-S8, V2 density). Requires
+        // sentence/paragraph boundary index.
         if cfg.ai_structural_patterns {
             if let Some(ref idx) = boundary_index {
                 grammar::scan_ai_structural_phase2(text, excluded, issues, idx);
@@ -1401,10 +1426,10 @@ impl Scanner {
         if cfg.translationese_detection {
             if let Some(ref idx) = boundary_index {
                 grammar::scan_translationese_syntactic(text, excluded, issues, idx);
-                // Boundary-aware translationese detectors
-                // (ZY1b/ZY2b/ZY3b/ZY5).  `cfg.translationese_domain`
-                // selects the per-domain threshold table that drives
-                // firing behavior at scan time.
+
+                // Boundary-aware translationese detectors (ZY1b/ZY2b/ZY3b/ZY5).
+                // `cfg.translationese_domain` selects the per-domain threshold
+                // table that drives firing behavior at scan time.
                 grammar::scan_translationese_indexed(
                     text,
                     excluded,
@@ -1413,20 +1438,21 @@ impl Scanner {
                     cfg.translationese_domain,
                 );
             }
-            // Substring-only translationese detectors (ZY1a/ZY2a/ZY3a/
-            // ZY4a) — no boundary index required.
+
+            // Substring-only translationese detectors (ZY1a/ZY2a/ZY3a/ ZY4a) —
+            // no boundary index required.
             grammar::scan_translationese_lexical(text, excluded, issues);
             dedup_translationese_phase_duplicates(issues);
         }
 
-        // Fix CN quotation mark pairing with depth-based nesting:
-        // well-formed quotes use character-based depth tracking; misordered
-        // or all-same-char quotes fall back to positional alternation.
-        // Paragraph breaks reset nesting depth.
+        // Fix CN quotation mark pairing with depth-based nesting: well-formed
+        // quotes use character-based depth tracking; misordered or
+        // all-same-char quotes fall back to positional alternation. Paragraph
+        // breaks reset nesting depth.
         fix_quote_pairing(text, issues);
 
-        // Validate structural nesting of existing TW bracket quotes:
-        // checks for mismatched, interleaved, and unclosed quotes per paragraph.
+        // Validate structural nesting of existing TW bracket quotes: checks for
+        // mismatched, interleaved, and unclosed quotes per paragraph.
         validate_quote_hierarchy(text, excluded, issues);
 
         // Compute AI signature score when any AI detection flag is active.
@@ -1561,6 +1587,7 @@ fn compute_oral_density(text: &str) -> Option<f32> {
     if cjk_count < 20 {
         return None;
     }
+
     // Collect byte ranges of all marker hits, then union them to avoid
     // double-counting overlaps (e.g. "就是" inside "就是說").
     let mut spans: Vec<(usize, usize)> = Vec::new();
@@ -2090,7 +2117,8 @@ mod tests {
 
     #[test]
     fn charwise_full_ruleset_builds() {
-        // Verify the embedded ruleset (776+ patterns) builds charwise successfully.
+        // Verify the embedded ruleset (776+ patterns) builds charwise
+        // successfully.
         let ruleset = crate::rules::loader::load_embedded_ruleset().unwrap();
         let scanner = Scanner::new(ruleset.spelling_rules, ruleset.case_rules);
         assert!(
@@ -2123,7 +2151,7 @@ mod tests {
         assert_eq!(issues[0].editorial_confidence, None);
     }
 
-    // --- positional_clues tests ---
+    // positional_clues tests
 
     #[test]
     fn positional_before_fires_when_term_follows() {
@@ -2222,7 +2250,8 @@ mod tests {
             "should not fire with gap between match and term: {issues:?}"
         );
 
-        // 函式 immediately before 調用 — should also fire (adjacent = either side).
+        // 函式 immediately before 調用 — should also fire (adjacent = either
+        // side).
         let issues = scanner.scan("函式調用方式").issues;
         assert_eq!(
             issues.len(),
@@ -2476,8 +2505,8 @@ mod tests {
         }];
         let scanner = Scanner::new(rules, vec![]);
 
-        // 函式 is inside a code span — positional window should stop
-        // at the excluded range boundary, so the clue is invisible.
+        // 函式 is inside a code span — positional window should stop at the
+        // excluded range boundary, so the clue is invisible.
         let md_text = "調用`函式`來處理";
         let issues = scanner
             .scan_for_content_type(md_text, ContentType::Markdown, Profile::Base)
@@ -2633,7 +2662,7 @@ mod tests {
     }
 
     // Remaining tests are included from the original scan.rs via include.
-    // Rather than duplicating 2000+ lines inline, the tests are appended
-    // by extracting from the original monolithic file.
+    // Rather than duplicating 2000+ lines inline, the tests are appended by
+    // extracting from the original monolithic file.
     include!("tests_generated.rs");
 }

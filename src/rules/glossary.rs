@@ -1,12 +1,11 @@
 // Project-level glossary (35.9) — `banned`, `preferred`, `proper_nouns`.
 //
 // Layered above the embedded ruleset and pack store but below banned-term
-// enforcement and translation memory.  Precedence per TODO 35.9:
-// glossary `banned` > TM > glossary `preferred` > domain pack > embedded
-// ruleset.
+// enforcement and translation memory. Precedence per TODO 35.9: glossary
+// `banned` > TM > glossary `preferred` > domain pack > embedded ruleset.
 //
-// `banned`     — terms that must always fire, regardless of context_clues.
-// `preferred`  — TW forms used by 35.1 to choose the canonical suggestion.
+// `banned` — terms that must always fire, regardless of context_clues.
+// `preferred` — TW forms used by 35.1 to choose the canonical suggestion.
 // `proper_nouns` — never flag (added to the suppression list).
 
 use crate::engine::excluded::{is_excluded, ByteRange};
@@ -36,6 +35,40 @@ pub fn is_glossary_banned(issue: &Issue) -> bool {
     issue.glossary_banned
 }
 
+/// [apply_glossary] plus the two steps every caller needs around it:
+/// build the exclusion ranges for the content type, and restore line and
+/// column coordinates that synthetic banned-term issues lack.
+///
+/// The CLI and the MCP tool both do exactly this, so it lives here rather
+/// than twice in the two callers.
+pub fn apply_glossary_with_coordinates(
+    text: &str,
+    content_type: crate::engine::scan::ContentType,
+    cfg: &crate::rules::ruleset::ProfileConfig,
+    issues: Vec<Issue>,
+    glossary: &ProjectGlossary,
+) -> Vec<Issue> {
+    if glossary.is_empty() {
+        return issues;
+    }
+    let md_opts = crate::engine::markdown::MdScanOptions::new(
+        matches!(
+            content_type,
+            crate::engine::scan::ContentType::MarkdownScanCode
+        ),
+        cfg.exempt_blockquotes,
+    );
+    let excluded = crate::engine::scan::build_exclusions_for_content_type_with_options(
+        text,
+        content_type,
+        md_opts,
+    );
+    let mut issues = apply_glossary(text, &excluded, issues, glossary);
+    let line_index = crate::engine::lineindex::LineIndex::new(text);
+    line_index.fill_line_col_sorted(&mut issues, crate::engine::lineindex::ColumnEncoding::Utf16);
+    issues
+}
+
 /// Apply glossary precedence to a freshly-scanned issue list.
 ///
 /// 1. Suppress any issue whose `found` text exactly matches a proper noun
@@ -50,7 +83,8 @@ pub fn is_glossary_banned(issue: &Issue) -> bool {
 ///
 /// Returns the modified issue list, sorted by offset.  Synthetic
 /// banned-term issues carry `line: 0, col: 0` — callers must run
-/// [LineIndex::fill_line_col_sorted] before reporting.
+/// [LineIndex::fill_line_col_sorted] before reporting, or use
+/// [apply_glossary_with_coordinates], which does it for you.
 pub fn apply_glossary(
     text: &str,
     excluded: &[ByteRange],
@@ -66,7 +100,7 @@ pub fn apply_glossary(
         issues.retain(|i| !glossary.proper_nouns.iter().any(|pn| pn == &i.found));
     }
 
-    // -- (2) Banned-term injection.  For each occurrence:
+    // -- (2) Banned-term injection. For each occurrence:
     //   - If an existing issue covers it, upgrade that issue in place
     //     (severity → Error, internal glossary-banned flag).
     //     Upgrading instead of injecting prevents duplicate output AND
@@ -81,10 +115,11 @@ pub fn apply_glossary(
         let mut start = 0;
         while let Some(rel) = text[start..].find(banned.as_str()) {
             let abs = start + rel;
-            // Skip matches that fall inside an exclusion zone (code
-            // fences, URLs, file paths, frontmatter, suppression
-            // markers).  Without this guard, banned terms would fire
-            // inside blocks the rest of the pipeline carefully respects.
+
+            // Skip matches that fall inside an exclusion zone (code fences,
+            // URLs, file paths, frontmatter, suppression markers). Without this
+            // guard, banned terms would fire inside blocks the rest of the
+            // pipeline carefully respects.
             if is_excluded(abs, abs + pattern_len, excluded) {
                 start = abs + pattern_len;
                 continue;
@@ -172,8 +207,8 @@ mod tests {
     #[test]
     fn banned_term_upgrades_existing_same_span_issue() {
         // Covering issue keeps its human-facing context but gets
-        // Severity::Error plus the internal glossary-banned marker so
-        // TM cannot downgrade the only report.
+        // Severity::Error plus the internal glossary-banned marker so TM cannot
+        // downgrade the only report.
         let glossary = ProjectGlossary {
             banned: vec!["線程".into()],
             ..ProjectGlossary::default()
@@ -190,9 +225,9 @@ mod tests {
 
     #[test]
     fn banned_term_upgrades_larger_covering_issue() {
-        // Banned 用戶 inside an existing 用戶介面 issue: the compound
-        // issue is the user-visible alert, but it must carry
-        // glossary-banned provenance so TM does not downgrade it.
+        // Banned 用戶 inside an existing 用戶介面 issue: the compound issue is
+        // the user-visible alert, but it must carry glossary-banned provenance
+        // so TM does not downgrade it.
         let glossary = ProjectGlossary {
             banned: vec!["用戶".into()],
             ..ProjectGlossary::default()

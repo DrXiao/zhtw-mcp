@@ -7,17 +7,15 @@
 //   2. Profile-based priors: preferred-term tables per profile.
 //   3. Fixed collocation mapping: compound technical terms resolve deterministically.
 //
-// Issues scoring above the decided threshold are resolved locally.
-// Issues scoring below the ambiguous threshold are suppressed (false positive).
-// Issues in the gray zone proceed to Tier 3 (LLM).
+// Issues scoring above the decided threshold are resolved locally. Issues
+// scoring below the ambiguous threshold are suppressed (false positive). Issues
+// in the gray zone proceed to Tier 3 (LLM).
 
 use std::sync::Arc;
 
 use crate::rules::ruleset::{Issue, IssueType, Profile, Severity, Tier2Outcome};
 
-// ---------------------------------------------------------------------------
 // AnchorKind — classifies calibration outcomes as hard or soft
-// ---------------------------------------------------------------------------
 
 /// Whether a calibration anchor terminates resolution (Hard) or merely
 /// contributes evidence to Tier 2 scoring (Soft).
@@ -35,10 +33,12 @@ pub enum AnchorKind {
 
 /// Classify an issue's anchor_match into AnchorKind.
 ///
-/// - `anchor_match == Some(true)` with single suggestion → Hard (unambiguous confirmation).
-/// - `anchor_match == Some(true)` with multiple suggestions → Soft (confirmed domain but
-///   still ambiguous which suggestion to pick).
-/// - `anchor_match == Some(false)` → not an anchor at all (potential false positive).
+/// - `anchor_match == Some(true)` with single suggestion → Hard
+///   (unambiguous confirmation).
+/// - `anchor_match == Some(true)` with multiple suggestions → Soft
+///   (confirmed domain but still ambiguous which suggestion to pick).
+/// - `anchor_match == Some(false)` → not an anchor at all (potential
+///   false positive).
 /// - `anchor_match == None` → no signal.
 pub fn classify_anchor(issue: &Issue) -> Option<AnchorKind> {
     match issue.anchor_match {
@@ -48,9 +48,7 @@ pub fn classify_anchor(issue: &Issue) -> Option<AnchorKind> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // AmbiguityScore — the Tier 2 output
-// ---------------------------------------------------------------------------
 
 /// How an issue was resolved (or left unresolved) by Tier 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,10 +69,29 @@ pub enum Resolution {
     Suppressed,
 }
 
+impl Resolution {
+    /// Text for the `tier2:` annotation attached to the issue.
+    ///
+    /// Exhaustive on purpose: a new variant must fail to compile here
+    /// rather than reach a wildcard arm and panic at runtime.
+    fn label(self, score: f32) -> String {
+        match self {
+            Resolution::HardAnchor => "hard anchor".to_string(),
+            Resolution::ContextClue => format!("context clue (score={score:.2})"),
+            Resolution::ProfilePrior => format!("profile prior (score={score:.2})"),
+            Resolution::Collocation => format!("collocation (score={score:.2})"),
+            Resolution::Combined => format!("combined (score={score:.2})"),
+            Resolution::GrayZone => format!("gray zone (score={score:.2})"),
+            Resolution::Suppressed => format!("suppressed (score={score:.2})"),
+        }
+    }
+}
+
 /// Tier 2 disambiguation result for a single issue.
 #[derive(Debug, Clone)]
 pub struct AmbiguityScore {
-    /// Composite score in [0.0, 1.0].  Higher = more confident the issue is real.
+    /// Composite score in [0.0, 1.0]. Higher = more confident the issue is
+    /// real.
     pub score: f32,
     /// If resolved locally, the chosen replacement term.
     pub resolved: Option<String>,
@@ -82,9 +99,7 @@ pub struct AmbiguityScore {
     pub resolution: Resolution,
 }
 
-// ---------------------------------------------------------------------------
 // Collocation table — compound terms that resolve deterministically
-// ---------------------------------------------------------------------------
 
 /// A fixed collocation entry: when `trigger` appears within ±window of an
 /// ambiguous `from` term, resolve to `resolved_to`.
@@ -414,9 +429,7 @@ const COLLOCATIONS: &[Collocation] = &[
     },
 ];
 
-// ---------------------------------------------------------------------------
 // Profile preferred-term priors
-// ---------------------------------------------------------------------------
 
 /// Profile-based preferred-term entry.
 struct PreferredTerm {
@@ -534,9 +547,7 @@ fn preferred_terms_for_profile(profile: Profile) -> &'static [PreferredTerm] {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Tier 2 scorer
-// ---------------------------------------------------------------------------
 
 /// Default thresholds for Tier 2 scoring.
 /// Issues with score >= DECIDED are resolved locally.
@@ -623,8 +634,8 @@ pub fn score_issue(issue: &Issue, context_window: &str, cfg: &DisambigConfig) ->
         },
     };
 
-    // Combine signals.  Clue score is the primary signal; prior and anchor
-    // are additive evidence.
+    // Combine signals. Clue score is the primary signal; prior and anchor are
+    // additive evidence.
     let raw = clue_score + prior_score + anchor_bonus;
     let score = raw.clamp(0.0, 1.0);
 
@@ -719,15 +730,16 @@ fn compute_profile_prior(issue: &Issue, profile: Profile) -> (f32, Option<&'stat
     (0.0, None)
 }
 
-/// Pick the resolved term.  Prefers collocation > profile prior > first suggestion.
+/// Pick the resolved term. Prefers collocation > profile prior > first
+/// suggestion.
 fn pick_resolved_term(
     issue: &Issue,
     prior_term: Option<&str>,
     clue_score: f32,
     prior_score: f32,
 ) -> Option<String> {
-    // If profile prior is the dominant signal, use its preferred term
-    // (but only if it is actually in the suggestion list).
+    // If profile prior is the dominant signal, use its preferred term (but only
+    // if it is actually in the suggestion list).
     if prior_score > clue_score {
         if let Some(pt) = prior_term {
             if issue.suggestions.iter().any(|s| s == pt) {
@@ -740,9 +752,7 @@ fn pick_resolved_term(
     issue.suggestions.first().cloned()
 }
 
-// ---------------------------------------------------------------------------
 // Batch Tier 2 processing
-// ---------------------------------------------------------------------------
 
 /// Result of running Tier 2 on a batch of issues.
 #[derive(Debug, Default)]
@@ -755,7 +765,8 @@ pub struct DisambigStats {
     pub suppressed: usize,
     /// Issues in gray zone (forwarded to Tier 3).
     pub gray_zone: usize,
-    /// Issues not eligible for disambiguation (no english/clues, deterministic types).
+    /// Issues not eligible for disambiguation (no english/clues, deterministic
+    /// types).
     pub not_eligible: usize,
 }
 
@@ -818,16 +829,7 @@ pub fn disambiguate_batch(issues: &mut [Issue], text: &str, cfg: &DisambigConfig
                 if let Some(ref term) = result.resolved {
                     promote_suggestion(issue, term);
                 }
-                let label = match result.resolution {
-                    Resolution::HardAnchor => "hard anchor".to_string(),
-                    Resolution::ContextClue => format!("context clue (score={:.2})", result.score),
-                    Resolution::ProfilePrior => {
-                        format!("profile prior (score={:.2})", result.score)
-                    }
-                    Resolution::Collocation => format!("collocation (score={:.2})", result.score),
-                    Resolution::Combined => format!("combined (score={:.2})", result.score),
-                    _ => unreachable!(),
-                };
+                let label = result.resolution.label(result.score);
                 annotate_issue(issue, &format!("tier2: {label}"));
             }
             Resolution::Suppressed => {
@@ -836,7 +838,7 @@ pub fn disambiguate_batch(issues: &mut [Issue], text: &str, cfg: &DisambigConfig
                 issue.severity = Severity::Info;
                 annotate_issue(
                     issue,
-                    &format!("tier2: suppressed (score={:.2})", result.score),
+                    &format!("tier2: {}", result.resolution.label(result.score)),
                 );
             }
             Resolution::GrayZone => {
@@ -918,9 +920,7 @@ fn annotate_issue(issue: &mut Issue, annotation: &str) {
     issue.context = Some(Arc::from(new_ctx));
 }
 
-// ---------------------------------------------------------------------------
 // Semantic chunking for Tier 3 context windows (51.7)
-// ---------------------------------------------------------------------------
 
 /// Maximum chunk size in characters for Tier 3 LLM context.
 const MAX_CHUNK_CHARS: usize = 500;
@@ -941,8 +941,8 @@ pub fn extract_semantic_chunk(text: &str, offset: usize, length: usize) -> &str 
     let end_offset = offset.saturating_add(length).min(text.len());
     let end_offset = text.ceil_char_boundary(end_offset);
 
-    // Find the paragraph/section containing the offset.
-    // First, find backward boundary.
+    // Find the paragraph/section containing the offset. First, find backward
+    // boundary.
     let chunk_start = find_chunk_start(text, offset);
     // Then, find forward boundary.
     let chunk_end = find_chunk_end(text, end_offset);
@@ -955,7 +955,7 @@ pub fn extract_semantic_chunk(text: &str, offset: usize, length: usize) -> &str 
     }
 
     // Chunk too large — narrow to ±230 chars around the offset, but respect
-    // char boundaries and try to land on a sentence boundary.  The 20-char
+    // char boundaries and try to land on a sentence boundary. The 20-char
     // sentence boundary search margin means effective max is ~500.
     let half_budget = (MAX_CHUNK_CHARS - 40) / 2;
 
@@ -994,9 +994,9 @@ pub fn extract_semantic_chunk(text: &str, offset: usize, length: usize) -> &str 
         }
     }
 
-    // Hard post-trim: enforce the MAX_CHUNK_CHARS contract.  The sentence
-    // boundary search margin can push the chunk slightly over budget; trim
-    // from the end while preserving the issue span and char boundaries.
+    // Hard post-trim: enforce the MAX_CHUNK_CHARS contract. The sentence
+    // boundary search margin can push the chunk slightly over budget; trim from
+    // the end while preserving the issue span and char boundaries.
     let result = &text[narrow_start..narrow_end];
     if result.chars().count() > MAX_CHUNK_CHARS {
         let mut trimmed_end = narrow_start;
@@ -1036,19 +1036,22 @@ fn find_chunk_start(text: &str, offset: usize) -> usize {
         if pos >= 2 && bytes[pos - 1] == b'\n' && bytes[pos - 2] == b'\n' {
             return pos;
         }
-        // Single newline — check if the line starting at pos is a heading or list item.
+
+        // Single newline — check if the line starting at pos is a heading or
+        // list item.
         if bytes[pos - 1] == b'\n' && is_heading_or_list_start(text, pos) {
             return pos;
         }
         pos -= 1;
     }
 
-    // No boundary found within limit — use the limit position, adjusted
-    // to a char boundary.
+    // No boundary found within limit — use the limit position, adjusted to a
+    // char boundary.
     text.floor_char_boundary(limit)
 }
 
-/// Find the end of the semantic chunk containing the byte range ending at `end_offset`.
+/// Find the end of the semantic chunk containing the byte range ending at
+/// `end_offset`.
 fn find_chunk_end(text: &str, end_offset: usize) -> usize {
     if end_offset >= text.len() {
         return text.len();
@@ -1109,9 +1112,7 @@ fn is_heading_or_list_start(text: &str, pos: usize) -> bool {
     false
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1197,16 +1198,17 @@ mod tests {
     fn no_clues_no_anchor_suppressed() {
         let issue = make_issue("令牌", vec!["權杖", "代幣"], Some("token"));
         let cfg = DisambigConfig::default();
-        // No collocations, no clues, no anchor, no profile prior for Base
-        // → score = 0.0 < ambiguous_threshold → suppressed.
+
+        // No collocations, no clues, no anchor, no profile prior for Base →
+        // score = 0.0 < ambiguous_threshold → suppressed.
         let result = score_issue(&issue, "使用令牌", &cfg);
         assert_eq!(result.resolution, Resolution::Suppressed);
     }
 
     #[test]
     fn weak_signal_enters_gray_zone() {
-        // Strict profile has a prior for 令牌 (weight=0.3) which puts
-        // score right at the ambiguous threshold boundary → gray zone.
+        // Strict profile has a prior for 令牌 (weight=0.3) which puts score
+        // right at the ambiguous threshold boundary → gray zone.
         let issue = make_issue("令牌", vec!["權杖", "代幣"], Some("token"));
         let cfg = DisambigConfig {
             profile: Profile::Strict,
@@ -1222,8 +1224,9 @@ mod tests {
         issue.anchor_match = Some(false); // calibration rejected
         let cfg = DisambigConfig::default();
         let result = score_issue(&issue, "令牌數量", &cfg);
-        // anchor_match=false gives -0.2, no clues = 0, no prior for base.
-        // Score = max(0, -0.2) = 0.0 < 0.3 → suppressed.
+
+        // anchor_match=false gives -0.2, no clues = 0, no prior for base. Score
+        // = max(0, -0.2) = 0.0 < 0.3 → suppressed.
         assert_eq!(result.resolution, Resolution::Suppressed);
     }
 
@@ -1276,7 +1279,8 @@ mod tests {
 
         assert_eq!(stats.hard_anchor, 1); // 軟件
         assert_eq!(stats.not_eligible, 1); // punctuation
-                                           // 令牌: no collocations, no clues, no Base prior → suppressed
+                                           // 令牌: no collocations, no clues,
+                                           // no Base prior → suppressed
         assert_eq!(stats.suppressed, 1);
     }
 

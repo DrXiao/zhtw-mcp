@@ -5,6 +5,9 @@ all: $(S2T_DATA)
 	cargo build --release
 
 # gen-s2t-tables.py handles downloading from GitHub + code generation.
+# Depending on the script alone is sufficient because the OpenCC commit is
+# pinned inside it: changing which dictionaries we build from means editing
+# this prerequisite.
 $(S2T_DATA): scripts/gen-s2t-tables.py
 	python3 scripts/gen-s2t-tables.py
 	rustfmt $@
@@ -18,7 +21,7 @@ distclean: clean
 
 check: $(S2T_DATA)
 	cargo test
-	cargo clippy -- -D warnings
+	cargo clippy --all-targets -- -D warnings
 	cargo fmt --check
 	python3 scripts/check-ruleset.py --lint
 

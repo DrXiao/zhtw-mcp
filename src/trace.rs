@@ -30,7 +30,12 @@ pub fn init(default_level: &str) {
 }
 
 pub fn set_mcp_log_sender(tx: Option<mpsc::Sender<McpLogMessage>>) {
-    *MCP_LOG_TX.get_or_init(|| Mutex::new(None)).lock().unwrap() = tx;
+    // A poisoned lock means a log-forwarding thread panicked while holding it.
+    // `McpLogLayer::on_event` already degrades to "no forwarding" in that case,
+    // so panicking here would take the server down over a logging side channel.
+    // Recover the guard and carry on.
+    let slot = MCP_LOG_TX.get_or_init(|| Mutex::new(None));
+    *slot.lock().unwrap_or_else(|e| e.into_inner()) = tx;
 }
 
 struct McpLogLayer;

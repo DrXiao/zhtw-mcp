@@ -8,7 +8,7 @@ The scanner detects Traditional vs. Simplified Chinese by counting exclusive cha
 
 1. NFC normalization with byte-offset mapping
 2. Content-type dispatch: Markdown (pulldown-cmark), YAML (key token exclusion), plain text (regex exclusion). `MarkdownScanCode` variant also lints inside fenced code blocks.
-3. Inline suppression markers (`<!-- zhtw:ignore-next-line -->`, `<!-- zhtw:ignore-block/end-ignore -->`)
+3. Inline suppression markers (`zhtw:ignore`, `zhtw:ignore-next-line`, `zhtw:ignore-block`/`zhtw:end-ignore`), recognized behind any of the `<!--`, `//`, and `#` comment openers; see `docs/cli.md`
 4. Spelling pass: dual Aho-Corasick automata (leftmost-longest for spelling, case-insensitive for case rules); context-clue AC pre-scan for rules with `context_clues` or `negative_context_clues`
 5. Punctuation pass: full-width conversion, CN curly quotes, enumeration comma, quote hierarchy, CJK spacing
 6. Variant pass: character variant normalization with exception phrase checking
