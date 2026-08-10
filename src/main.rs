@@ -316,7 +316,9 @@ fn main() -> Result<()> {
                         }
                         #[cfg(not(feature = "translate"))]
                         "--verify" => {
-                            anyhow::bail!("--verify requires the 'translate' feature (rebuild without --no-default-features)");
+                            anyhow::bail!(
+                                "--verify requires the 'translate' feature; rebuild with --features translate"
+                            );
                         }
                         "--telemetry" => {
                             telemetry = true;
@@ -362,7 +364,9 @@ fn main() -> Result<()> {
                         }
                         #[cfg(not(feature = "translate"))]
                         "--verify" => {
-                            anyhow::bail!("--verify requires the 'translate' feature (rebuild without --no-default-features)");
+                            anyhow::bail!(
+                                "--verify requires the 'translate' feature; rebuild with --features translate"
+                            );
                         }
                         "--" => {
                             convert_files.push("--".into());
@@ -1408,13 +1412,7 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     // captures only &-refs to immutable state plus the Mutex-wrapped cache,
     // making it Fn + Send + Sync.
     let fix_mode_str = format!("{:?}", params.fix_mode);
-    let scan_file = |file_arg: &str| -> Result<(
-        String,
-        bool,
-        usize,
-        zhtw_mcp::engine::scan::ScanOutput,
-        zhtw_mcp::engine::scan::ContentType,
-    )> {
+    let scan_file = |file_arg: &str| -> ScanResult {
         let content_type = match params.content_type_override {
             Some("markdown") => zhtw_mcp::engine::scan::ContentType::Markdown,
             Some("markdown-scan-code") => zhtw_mcp::engine::scan::ContentType::MarkdownScanCode,
@@ -1542,23 +1540,9 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             };
 
             // Drop text eagerly when not needed for fix/write-back/verify to
-            // avoid accumulating all files' text in parallel scans. Project
-            // glossary banned-term scanning and the 35.1 consistency report
-            // both scan the original buffer.
-            let need_text = input_was_sc
-                || params.fix_mode != zhtw_mcp::fixer::FixMode::None
-                || !params.glossary.is_empty()
-                || params.consistency
-                || {
-                    #[cfg(feature = "translate")]
-                    {
-                        params.verify
-                    }
-                    #[cfg(not(feature = "translate"))]
-                    {
-                        false
-                    }
-                };
+            // avoid accumulating all files' text in parallel scans. SC input
+            // additionally needs it for the S2T write-back.
+            let need_text = input_was_sc || need_text_post_scan;
             if !need_text {
                 text = String::new();
             }
@@ -1591,10 +1575,6 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     // Parallel scan when multiple files and no stdin pipe. Rayon parallelism
     // gives N/cores speedup on multi-file lint.
     let has_stdin = resolved.iter().any(|f| f == "--");
-
-    // Type alias keeps clippy::type_complexity happy and gives the tuple slot
-    // ordering a single source of truth: (raw text, was-SC input flag, char
-    // count, scan output, content type).
     let scan_results: Vec<ScanResult> = if resolved.len() > 1 && !has_stdin {
         use rayon::prelude::*;
         resolved.par_iter().map(|f| scan_file(f)).collect()
@@ -1770,10 +1750,6 @@ fn process_scanned_file(
     let _disambig_stats =
         zhtw_mcp::engine::disambig::disambiguate_batch(&mut issues, &text, &disambig_cfg);
 
-    let scan = |input: &str| -> zhtw_mcp::engine::scan::ScanOutput {
-        scanner.scan_for_content_type_with_config(input, content_type, cfg)
-    };
-
     // Apply fixes if requested. Filter out TM-suppressed issues so the fixer
     // does not auto-correct terms the user deliberately rejected.
     let fix_result = if params.fix_mode != zhtw_mcp::fixer::FixMode::None {
@@ -1801,10 +1777,17 @@ fn process_scanned_file(
     // conversion was applied or ruleset fixes were made.
     let fix_applied = fix_result.as_ref().map_or(0, |f| f.applied);
     let has_text_changes = input_was_sc || fix_applied > 0;
+
+    // The buffer every later phase reads: the fixer's output when it ran, the
+    // original otherwise.
+    let current_text = fix_result
+        .as_ref()
+        .map_or(text.as_str(), |f| f.text.as_str());
+
+    // A dry run computes the fixes but emits nothing, so reporting has to stay
+    // on the text the user still has.
+    let wrote_changes = has_text_changes && !params.dry_run;
     if has_text_changes {
-        let output_text = fix_result
-            .as_ref()
-            .map_or(text.as_str(), |f| f.text.as_str());
         let s2t_label = if input_was_sc && fix_applied == 0 {
             " (S2T only)"
         } else {
@@ -1817,7 +1800,7 @@ fn process_scanned_file(
             );
         } else if file_arg == "--" {
             // stdin: emit fixed text to stdout.
-            print!("{}", output_text);
+            print!("{}", current_text);
         } else {
             // Atomic write: tempfile + rename in the same directory. Worth the
             // rename semantics here, unlike the baseline: this is the user's
@@ -1827,7 +1810,7 @@ fn process_scanned_file(
             let parent = file_path.parent().unwrap_or(Path::new("."));
             let mut tmp = tempfile::NamedTempFile::new_in(parent)
                 .with_context(|| format!("create tempfile in {}", parent.display()))?;
-            std::io::Write::write_all(&mut tmp, output_text.as_bytes())
+            std::io::Write::write_all(&mut tmp, current_text.as_bytes())
                 .with_context(|| format!("write tempfile for {file_arg}"))?;
 
             // A temp file is created 0600. Carry over the mode of the file
@@ -1854,11 +1837,9 @@ fn process_scanned_file(
 
     // Count remaining issues after fix/S2T (rescan converted text). Single
     // rescan serves both issue reporting and AI signature refresh.
-    let report_issues = if has_text_changes && !params.dry_run {
-        let rescan_text = fix_result
-            .as_ref()
-            .map_or(text.as_str(), |f| f.text.as_str());
-        let rescan_output = scan(rescan_text);
+    let report_issues = if wrote_changes {
+        let rescan_output =
+            scanner.scan_for_content_type_with_config(current_text, content_type, cfg);
         // Refresh AI signature from the fixed text (avoids a second scan).
         let ai_active = cfg.ai_filler_detection
             || cfg.ai_semantic_safety
@@ -1877,7 +1858,7 @@ fn process_scanned_file(
             zhtw_mcp::fixer::suppress_convergent_issues(&mut rescan, &fix.applied_fixes);
         }
         zhtw_mcp::rules::glossary::apply_glossary_with_coordinates(
-            rescan_text,
+            current_text,
             content_type,
             &cfg,
             rescan,
@@ -1890,12 +1871,10 @@ fn process_scanned_file(
     // --verify: calibrate issues via Google Translate.
     #[cfg(feature = "translate")]
     let report_issues = if params.verify {
-        let calibrate_text = if has_text_changes && !params.dry_run {
-            fix_result
-                .as_ref()
-                .map_or(text.as_str(), |f| f.text.as_str())
+        let calibrate_text = if wrote_changes {
+            current_text
         } else {
-            &text
+            text.as_str()
         };
         let mut issues_mut = report_issues;
         let result = zhtw_mcp::engine::translate::calibrate_issues(calibrate_text, &mut issues_mut);
@@ -1908,37 +1887,12 @@ fn process_scanned_file(
         report_issues
     };
 
-    // Apply TM suppressions: downgrade rejected terms to Info severity. Only
-    // lexical/contextual issue types; orthographic types are immune.
-    // Glossary-banned issues (35.9 precedence: banned > TM) are also immune —
-    // the project explicitly asked for these to always fire.
-    let mut tm_suppressed: usize = 0;
-    let report_issues = if let Some(ref tm) = tm_store {
-        let mut issues = report_issues;
-        for issue in &mut issues {
-            match issue.rule_type {
-                zhtw_mcp::rules::ruleset::IssueType::Punctuation
-                | zhtw_mcp::rules::ruleset::IssueType::Case
-                | zhtw_mcp::rules::ruleset::IssueType::Variant
-                | zhtw_mcp::rules::ruleset::IssueType::Grammar
-                | zhtw_mcp::rules::ruleset::IssueType::AiStyle => continue,
-                _ => {}
-            }
-            let is_glossary_banned = zhtw_mcp::rules::glossary::is_glossary_banned(issue);
-            if is_glossary_banned {
-                continue;
-            }
-            if tm.should_suppress(&issue.found)
-                && issue.severity != zhtw_mcp::rules::ruleset::Severity::Info
-            {
-                issue.severity = zhtw_mcp::rules::ruleset::Severity::Info;
-                tm_suppressed += 1;
-            }
-        }
-        issues
-    } else {
-        report_issues
-    };
+    // Apply TM suppressions. Shared with the MCP tool so the two front ends
+    // cannot drift on which issue types the TM is allowed to touch.
+    let mut report_issues = report_issues;
+    let tm_suppressed = tm_store
+        .as_ref()
+        .map_or(0, |tm| tm.suppress_issues(&mut report_issues));
 
     // --update-baseline: add all issues to the baseline.
     if params.update_baseline {
@@ -1989,7 +1943,7 @@ fn process_scanned_file(
 
     // Use new_issues for reporting (baseline issues filtered out).
     let report_issues = new_issues;
-    let report_text_char_count = if has_text_changes && !params.dry_run {
+    let report_text_char_count = if wrote_changes {
         fix_result
             .as_ref()
             .map_or(text_char_count, |f| f.text.chars().count())
@@ -2008,10 +1962,8 @@ fn process_scanned_file(
         fixes_skipped: fix_result.as_ref().map(|f| f.skipped),
         ai_signature: ai_signature.as_ref(),
         translationese_signature: translationese_signature.as_ref(),
-        consistency_text: if has_text_changes && !params.dry_run {
-            fix_result
-                .as_ref()
-                .map_or(text.as_str(), |f| f.text.as_str())
+        consistency_text: if wrote_changes {
+            current_text
         } else {
             text.as_str()
         },

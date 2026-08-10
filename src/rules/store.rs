@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use fs2::FileExt;
 
-use super::ruleset::{CaseRule, SpellingRule};
+use super::ruleset::{CaseRule, Issue, IssueType, Severity, SpellingRule};
 
 /// Schema version. Bump whenever the JSON override format or startup
 /// contract changes.
@@ -615,6 +615,41 @@ impl TranslationMemoryStore {
             let e = &self.memory.entries[idx];
             e.user_chose == e.found
         })
+    }
+
+    /// Downgrade every issue the user previously rejected to Info, and
+    /// return how many were downgraded.
+    ///
+    /// Lives here rather than in either front end because the CLI and the
+    /// MCP tool both need it and a drift between them is a silent policy
+    /// difference, not a visible bug.
+    ///
+    /// Orthographic issue types are immune: the TM records a vocabulary
+    /// decision, and keeping a term is not consent to the wrong quotation
+    /// marks around it.  Glossary-banned terms are immune too, because the
+    /// documented precedence is banned > TM; the provenance tag is set by
+    /// `apply_glossary`, either by injecting a synthetic Error or by
+    /// upgrading a covering issue.
+    pub fn suppress_issues(&self, issues: &mut [Issue]) -> usize {
+        let mut count = 0;
+        for issue in issues {
+            let immune = matches!(
+                issue.rule_type,
+                IssueType::Punctuation
+                    | IssueType::Case
+                    | IssueType::Variant
+                    | IssueType::Grammar
+                    | IssueType::AiStyle
+            ) || crate::rules::glossary::is_glossary_banned(issue);
+            if immune {
+                continue;
+            }
+            if self.should_suppress(&issue.found) && issue.severity != Severity::Info {
+                issue.severity = Severity::Info;
+                count += 1;
+            }
+        }
+        count
     }
 
     /// List all TM entries.

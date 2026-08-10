@@ -544,28 +544,21 @@ impl Server {
         )
         .entered();
 
-        if include_telemetry && output_mode == OutputMode::Tabular {
+        // Tabular output carries none of these payloads, so asking for one
+        // alongside it is a contradiction rather than a silent drop. The first
+        // flag in this order is the one reported.
+        let tabular_conflict = [
+            ("include_telemetry", include_telemetry),
+            ("include_stats", include_stats),
+            ("detect_style", detect_style),
+        ]
+        .into_iter()
+        .find(|&(_, requested)| requested)
+        .filter(|_| output_mode == OutputMode::Tabular);
+        if let Some((name, _)) = tabular_conflict {
             return Err(param_error(
                 &id,
-                "include_telemetry",
-                "true",
-                &["false", "or use output=full|compact|summary"],
-            ));
-        }
-
-        if include_stats && output_mode == OutputMode::Tabular {
-            return Err(param_error(
-                &id,
-                "include_stats",
-                "true",
-                &["false", "or use output=full|compact|summary"],
-            ));
-        }
-
-        if detect_style && output_mode == OutputMode::Tabular {
-            return Err(param_error(
-                &id,
-                "detect_style",
+                name,
                 "true",
                 &["false", "or use output=full|compact|summary"],
             ));
@@ -940,40 +933,13 @@ impl Server {
         }
     }
 
-    /// Apply translation memory: suppress lexical/contextual issues that the
-    /// user previously rejected (kept the flagged term). Orthographic issue
-    /// types (Punctuation, Case, Variant, Grammar, AiStyle) are immune.
-    /// Returns the number of issues suppressed.
+    /// Apply translation memory, if one is configured.  See
+    /// [`TranslationMemoryStore::suppress_issues`](crate::rules::store::TranslationMemoryStore::suppress_issues)
+    /// for which issue types it may touch; the CLI shares that policy.
     fn apply_tm(&self, issues: &mut [Issue]) -> usize {
-        let Some(tm) = &self.tm_store else {
-            return 0;
-        };
-        let mut count = 0;
-        for issue in issues {
-            match issue.rule_type {
-                IssueType::Punctuation
-                | IssueType::Case
-                | IssueType::Variant
-                | IssueType::Grammar
-                | IssueType::AiStyle => continue,
-                _ => {}
-            }
-
-            // Glossary-banned terms are project-wide truth (banned > TM per the
-            // documented precedence). The provenance tag is set by
-            // `apply_glossary` either by injecting a synthetic Error or by
-            // upgrading a covering issue; either way TM must not downgrade
-            // these.
-            let is_glossary_banned = crate::rules::glossary::is_glossary_banned(issue);
-            if is_glossary_banned {
-                continue;
-            }
-            if tm.should_suppress(&issue.found) && issue.severity != Severity::Info {
-                issue.severity = Severity::Info;
-                count += 1;
-            }
-        }
-        count
+        self.tm_store
+            .as_ref()
+            .map_or(0, |tm| tm.suppress_issues(issues))
     }
 
     // -- Resource and prompt handlers -----------------------------------------
