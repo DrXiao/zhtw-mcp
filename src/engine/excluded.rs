@@ -21,19 +21,21 @@ pub struct ByteRange {
 // Compiled regexes (compiled once, reused forever)
 
 // [^\s「」『』《》]+ matches any non-whitespace character that is not one of
-// the six CJK quote/bracket marks used by validate_quote_hierarchy.
-// This correctly handles IRIs (URLs with unencoded CJK path segments, common
-// for zh.wikipedia.org) while preventing the pattern from swallowing adjacent
+// the six CJK quote/bracket marks used by validate_quote_hierarchy. This
+// correctly handles IRIs (URLs with unencoded CJK path segments, common for
+// zh.wikipedia.org) while preventing the pattern from swallowing adjacent
 // Chinese quotation marks that follow a URL (e.g. [title](url)」prose).
-static RE_URL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[a-zA-Z0-9+.\-]*://[^\s「」『』《》]+").unwrap());
+static RE_URL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[a-zA-Z0-9+.\-]*://[^\s「」『』《》]+").expect("static URL regex")
+});
 
 // Same stop-set as RE_URL: halt before CJK quote/bracket characters so that
 // 《/path/to/file》 does not swallow the closing 》 into the excluded range.
 static RE_PATH: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?:\.\.?/|/)[^\s「」『』《》]+").unwrap());
+    LazyLock::new(|| Regex::new(r"(?:\.\.?/|/)[^\s「」『』《》]+").expect("static path regex"));
 
-static RE_MENTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"@[a-zA-Z0-9_]+").unwrap());
+static RE_MENTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"@[a-zA-Z0-9_]+").expect("static mention regex"));
 
 // Public API
 
@@ -86,8 +88,9 @@ pub fn is_excluded(start: usize, end: usize, ranges: &[ByteRange]) -> bool {
 /// end of the string). Used by the path backtrack logic to skip paths that
 /// are continuations of a URL.
 fn is_url_suffix(text: &str) -> bool {
-    static RE_URL_SUFFIX: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"[a-zA-Z0-9+.\-]*://[^\s「」『』《》]+$").unwrap());
+    static RE_URL_SUFFIX: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"[a-zA-Z0-9+.\-]*://[^\s「」『』《》]+$").expect("static trailing-URL regex")
+    });
     RE_URL_SUFFIX.is_match(text)
 }
 
@@ -164,14 +167,12 @@ pub fn merge_ranges_pub(mut ranges: Vec<ByteRange>) -> Vec<ByteRange> {
 
     ranges.sort_by_key(|r| r.start);
 
-    let mut merged: Vec<ByteRange> = vec![ranges[0]];
+    let mut merged: Vec<ByteRange> = Vec::with_capacity(ranges.len());
 
-    for &r in &ranges[1..] {
-        let last = merged.last_mut().unwrap();
-        if r.start <= last.end {
-            last.end = last.end.max(r.end);
-        } else {
-            merged.push(r);
+    for r in ranges {
+        match merged.last_mut() {
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => merged.push(r),
         }
     }
 

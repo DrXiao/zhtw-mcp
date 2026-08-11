@@ -259,11 +259,10 @@ fn validate_a_not_a_ma(
         rest
     };
 
-    // Check if 嗎 appears at the end of the sentence (possibly
-    // preceded by whitespace only).
-    let trimmed = sentence_slice.trim_end();
-    if trimmed.ends_with('嗎') {
-        let ma_offset = pattern_end + sentence_slice.rfind('嗎').unwrap();
+    // Check if 嗎 appears at the end of the sentence (possibly preceded by
+    // whitespace only).
+    if let Some(head) = sentence_slice.trim_end().strip_suffix('嗎') {
+        let ma_offset = pattern_end + head.len();
         let ma_end = ma_offset + '嗎'.len_utf8();
         if !is_excluded(ma_offset, ma_end, excluded) {
             // Report the whole span from A-not-A to 嗎 as the found text.
@@ -346,10 +345,9 @@ fn validate_bare_shi_adjective(
 
     // Check if preceded by a pronoun.
     let before = &text[..abs_pos];
-    let preceded_by_pronoun = PRONOUNS.iter().any(|p| before.ends_with(p));
-    if !preceded_by_pronoun {
+    let Some(pronoun) = PRONOUNS.iter().find(|p| before.ends_with(*p)) else {
         return;
-    }
+    };
 
     // Check if followed by a degree adverb (which makes it grammatical).
     let after = &text[shi_end..];
@@ -394,8 +392,7 @@ fn validate_bare_shi_adjective(
             }
         }
 
-        // Find the pronoun that precedes 是 to include in the found span.
-        let pronoun = PRONOUNS.iter().find(|p| before.ends_with(*p)).unwrap();
+        // The pronoun that precedes 是 is part of the found span.
         let pronoun_start = abs_pos - pronoun.len();
         let found = &text[pronoun_start..adj_end];
         let suggestion = format!("{}很{}", pronoun, adj);
@@ -734,14 +731,14 @@ pub(crate) fn scan_a_not_a_ma(text: &str, excluded: &[ByteRange], issues: &mut V
                 rest
             };
 
-            // Check if 嗎 appears at the end of the sentence (possibly
-            // preceded by whitespace only).
-            let trimmed = sentence_slice.trim_end();
-            if trimmed.ends_with('嗎') {
-                let ma_offset = pattern_end + sentence_slice.rfind('嗎').unwrap();
+            // Check if 嗎 appears at the end of the sentence (possibly preceded
+            // by whitespace only).
+            if let Some(head) = sentence_slice.trim_end().strip_suffix('嗎') {
+                let ma_offset = pattern_end + head.len();
                 let ma_end = ma_offset + '嗎'.len_utf8();
                 if !is_excluded(ma_offset, ma_end, excluded) {
-                    // Report the whole span from A-not-A to 嗎 as the found text.
+                    // Report the whole span from A-not-A to 嗎 as the found
+                    // text.
                     let found = &text[abs_pos..ma_end];
                     issues.push(grammar_issue(
                         abs_pos,

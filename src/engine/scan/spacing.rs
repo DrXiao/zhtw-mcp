@@ -58,7 +58,7 @@ fn is_fullwidth_digit(ch: char) -> bool {
 fn fullwidth_to_halfwidth_digit(ch: char) -> char {
     debug_assert!(is_fullwidth_digit(ch));
     // Safe: fullwidth digits U+FF10..U+FF19 map to U+0030..U+0039.
-    char::from_u32(ch as u32 - 0xFF10 + '0' as u32).unwrap()
+    char::from_u32(ch as u32 - 0xFF10 + '0' as u32).expect("U+FF10..U+FF19 maps into ASCII 0-9")
 }
 
 impl super::Scanner {

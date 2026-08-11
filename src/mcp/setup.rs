@@ -288,7 +288,7 @@ pub fn continuedev_config() -> String {
         }],
         "customInstructions": "When writing Traditional Chinese (Taiwan) text, use Taiwan MoE standards. Use the zhtw MCP tool to lint and fix text. Key terms: 軟體 (not 軟件), 資訊 (not 信息), 預設 (not 默認). Use full-width punctuation in CJK prose."
     }))
-    .unwrap()
+    .expect("Value serialization is infallible")
 }
 
 /// Generate a generic platform-agnostic instruction file.
