@@ -1,9 +1,9 @@
 // Excluded range builder.
 //
-// Builds byte ranges that should be excluded from spell-checking: URLs,
-// file paths, and @mentions. Code block/inline code exclusion is handled
-// by pulldown-cmark (see markdown.rs) for both plain-text and Markdown
-// input, replacing the former regex-based backtick patterns.
+// Builds byte ranges that should be excluded from spell-checking: URLs, file
+// paths, and @mentions. Code block/inline code exclusion is handled by
+// pulldown-cmark (see markdown.rs) for both plain-text and Markdown input,
+// replacing the former regex-based backtick patterns.
 
 use std::sync::LazyLock;
 
@@ -21,19 +21,21 @@ pub struct ByteRange {
 // Compiled regexes (compiled once, reused forever)
 
 // [^\s「」『』《》]+ matches any non-whitespace character that is not one of
-// the six CJK quote/bracket marks used by validate_quote_hierarchy.
-// This correctly handles IRIs (URLs with unencoded CJK path segments, common
-// for zh.wikipedia.org) while preventing the pattern from swallowing adjacent
+// the six CJK quote/bracket marks used by validate_quote_hierarchy. This
+// correctly handles IRIs (URLs with unencoded CJK path segments, common for
+// zh.wikipedia.org) while preventing the pattern from swallowing adjacent
 // Chinese quotation marks that follow a URL (e.g. [title](url)」prose).
-static RE_URL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[a-zA-Z0-9+.\-]*://[^\s「」『』《》]+").unwrap());
+static RE_URL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[a-zA-Z0-9+.\-]*://[^\s「」『』《》]+").expect("static URL regex")
+});
 
 // Same stop-set as RE_URL: halt before CJK quote/bracket characters so that
 // 《/path/to/file》 does not swallow the closing 》 into the excluded range.
 static RE_PATH: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?:\.\.?/|/)[^\s「」『』《》]+").unwrap());
+    LazyLock::new(|| Regex::new(r"(?:\.\.?/|/)[^\s「」『』《》]+").expect("static path regex"));
 
-static RE_MENTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"@[a-zA-Z0-9_]+").unwrap());
+static RE_MENTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"@[a-zA-Z0-9_]+").expect("static mention regex"));
 
 // Public API
 
@@ -47,7 +49,7 @@ static RE_MENTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"@[a-zA-Z0-9_]
 pub fn build_excluded_ranges(content: &str) -> Vec<ByteRange> {
     let mut ranges: Vec<ByteRange> = Vec::new();
 
-    // 1. URLs (no overlap check).  RE_URL uses [^\s「」『』《》]+ so it covers
+    // 1. URLs (no overlap check). RE_URL uses [^\s「」『』《》]+ so it covers
     //    IRIs (unencoded CJK path segments) while stopping before quote marks.
     add_matched_ranges(content, &RE_URL, &mut ranges, false);
 
@@ -86,8 +88,9 @@ pub fn is_excluded(start: usize, end: usize, ranges: &[ByteRange]) -> bool {
 /// end of the string). Used by the path backtrack logic to skip paths that
 /// are continuations of a URL.
 fn is_url_suffix(text: &str) -> bool {
-    static RE_URL_SUFFIX: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"[a-zA-Z0-9+.\-]*://[^\s「」『』《》]+$").unwrap());
+    static RE_URL_SUFFIX: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"[a-zA-Z0-9+.\-]*://[^\s「」『』《》]+$").expect("static trailing-URL regex")
+    });
     RE_URL_SUFFIX.is_match(text)
 }
 
@@ -129,8 +132,8 @@ fn add_path_ranges(content: &str, ranges: &mut Vec<ByteRange>) {
         let start = m.start();
         let end = m.end();
 
-        // Backtrack check: is this path part of a URL?
-        // Only skip paths that are continuations of a URL.
+        // Backtrack check: is this path part of a URL? Only skip paths that are
+        // continuations of a URL.
         let before_start = content.floor_char_boundary(start.saturating_sub(BACKTRACK));
         let before = &content[before_start..start];
         if is_url_suffix(before) {
@@ -164,14 +167,12 @@ pub fn merge_ranges_pub(mut ranges: Vec<ByteRange>) -> Vec<ByteRange> {
 
     ranges.sort_by_key(|r| r.start);
 
-    let mut merged: Vec<ByteRange> = vec![ranges[0]];
+    let mut merged: Vec<ByteRange> = Vec::with_capacity(ranges.len());
 
-    for &r in &ranges[1..] {
-        let last = merged.last_mut().unwrap();
-        if r.start <= last.end {
-            last.end = last.end.max(r.end);
-        } else {
-            merged.push(r);
+    for r in ranges {
+        match merged.last_mut() {
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => merged.push(r),
         }
     }
 
@@ -325,8 +326,8 @@ mod tests {
 
     #[test]
     fn is_excluded_binary_search() {
-        // Build 12 non-overlapping ranges so we exercise the binary-search
-        // path (threshold is >10).
+        // Build 12 non-overlapping ranges so we exercise the binary-search path
+        // (threshold is >10).
         let ranges: Vec<ByteRange> = (0..12)
             .map(|i| ByteRange {
                 start: i * 10,
@@ -365,8 +366,8 @@ mod tests {
         assert!(!is_excluded(100, 101, &[]));
     }
 
-    // build_excluded_ranges does NOT cover backticks
-    // (code block exclusion is handled by pulldown-cmark in markdown.rs)
+    // build_excluded_ranges does NOT cover backticks (code block exclusion is
+    // handled by pulldown-cmark in markdown.rs)
 
     #[test]
     fn backticks_not_excluded_by_content_ranges() {

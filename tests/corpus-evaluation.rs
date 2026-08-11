@@ -64,8 +64,17 @@ struct FixCounts {
 
 #[derive(Debug, Default)]
 struct NativeCounts {
+    /// Repeat-weighted document counts.  These describe the byte volume the
+    /// scanner saw, which is what `min_bytes` is about.
     flagged_docs: usize,
     total_docs: usize,
+    /// Distinct fixture counts, ignoring `repeat`. Gated alongside the
+    /// repeat-weighted pair above:
+    /// a case authored with `repeat: 50` must not weigh fifty times more than
+    /// one authored with `repeat: 1`, or a real regression on a single sentence
+    /// disappears into the denominator.
+    flagged_cases: usize,
+    total_cases: usize,
     total_fp_issues: usize,
 }
 
@@ -193,8 +202,14 @@ fn fix_success_rate(counts: &FixCounts) -> f64 {
     pct(counts.exact_docs, counts.total_docs)
 }
 
+/// Repeat-weighted rate. Gated alongside the per-fixture rate.
 fn native_fp_rate(counts: &NativeCounts) -> f64 {
     pct(counts.flagged_docs, counts.total_docs)
+}
+
+/// Per-fixture rate.  This is the gated number.
+fn native_case_fp_rate(counts: &NativeCounts) -> f64 {
+    pct(counts.flagged_cases, counts.total_cases)
 }
 
 fn evaluate_positive_corpus(
@@ -275,9 +290,11 @@ fn evaluate_native_corpus(
 
         total_bytes += case.input.len() * case.repeat;
         native.total_docs += case.repeat;
+        native.total_cases += 1;
         native.total_fp_issues += issues.len() * case.repeat;
         if !issues.is_empty() {
             native.flagged_docs += case.repeat;
+            native.flagged_cases += 1;
         }
         fix.total_docs += case.repeat;
         if fixed.text == case.expected_fixed {
@@ -305,9 +322,12 @@ fn print_positive_report(spec: &CorpusSpec, score: &ScoreCounts, fix: &FixCounts
 
 fn print_native_report(spec: &CorpusSpec, native: &NativeCounts, fix: &FixCounts, bytes: usize) {
     println!(
-        "{:<24} bytes={:>6}  false_positive_rate={:>5.1}%  flagged_docs={}/{}  fp_issues={}  safe_fix={:>5.1}%  {}",
+        "{:<24} bytes={:>6}  fp_rate(cases)={:>5.1}% ({}/{})  fp_rate(weighted)={:>5.1}% ({}/{})  fp_issues={}  safe_fix={:>5.1}%  {}",
         spec.id,
         bytes,
+        native_case_fp_rate(native),
+        native.flagged_cases,
+        native.total_cases,
         native_fp_rate(native),
         native.flagged_docs,
         native.total_docs,
@@ -387,10 +407,26 @@ fn corpus_evaluation_suite() {
         "aggregate precision gate failed: {:.1}%",
         precision(&aggregate)
     );
+
+    // Both rates are gated, because each is blind to what the other catches.
+    // The weighted rate misses a regression that lands on a rarely repeated
+    // fixture: a batch of rules once introduced nine reproducible
+    // false-positive classes and moved it by zero. The per-fixture rate misses
+    // a regression concentrated in a heavily repeated one: a single repeat-50
+    // fixture is 7% of the byte volume but under 3% of the fixtures.
+    assert!(
+        native_case_fp_rate(&native_counts) <= 5.0,
+        "native zh-TW false-positive gate failed: {:.1}% of fixtures ({}/{})",
+        native_case_fp_rate(&native_counts),
+        native_counts.flagged_cases,
+        native_counts.total_cases
+    );
     assert!(
         native_fp_rate(&native_counts) <= 5.0,
-        "native zh-TW false-positive gate failed: {:.1}%",
-        native_fp_rate(&native_counts)
+        "native zh-TW false-positive gate failed: {:.1}% by repeat weight ({}/{})",
+        native_fp_rate(&native_counts),
+        native_counts.flagged_docs,
+        native_counts.total_docs
     );
     assert!(
         fix_success_rate(&ai_fix) >= 85.0,

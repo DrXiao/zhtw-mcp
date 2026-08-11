@@ -1,7 +1,7 @@
 // Grammar scanner: pattern-based grammatical checks for zh-TW text.
 //
-// Detects interlingual transfer errors (English grammar calques in Chinese)
-// and structural redundancies without requiring POS tagging.
+// Detects interlingual transfer errors (English grammar calques in Chinese) and
+// structural redundancies without requiring POS tagging.
 //
 // Phase 2a: interlingual transfer detection
 //   - 和-connecting-clauses (和 between verb phrases instead of nouns)
@@ -11,10 +11,10 @@
 // Phase 2b: A-not-A + 嗎 clash detection
 //   - A-not-A question structure with redundant sentence-final 嗎
 //
-// Architecture: a single Aho-Corasick automaton pre-scans the document once
-// for all grammar trigger patterns, then dispatches each hit to per-type
-// validators.  This replaces the O(P*N) per-scanner str::find() loops with
-// O(N + H) where H = number of AC hits.
+// Architecture: a single Aho-Corasick automaton pre-scans the document once for
+// all grammar trigger patterns, then dispatches each hit to per-type
+// validators. This replaces the O(P*N) per-scanner str::find() loops with O(N +
+// H) where H = number of AC hits.
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 
@@ -30,8 +30,8 @@ const PRONOUNS: &[&str] = &[
     "我", "你", "他", "她", "它", "我們", "你們", "他們", "她們", "這", "那", "這個", "那個",
 ];
 
-// Adjectives commonly misused with bare 是 (English calque).
-// Kept small and high-confidence to minimize false positives.
+// Adjectives commonly misused with bare 是 (English calque). Kept small and
+// high-confidence to minimize false positives.
 const BARE_SHI_ADJECTIVES: &[&str] = &[
     "漂亮", "高興", "開心", "難過", "傷心", "生氣", "快樂", "緊張", "害怕", "著急", "無聊", "好看",
     "難看", "厲害", "聰明", "笨", "冷", "熱", "忙", "累", "餓", "渴", "胖", "瘦", "大", "小", "多",
@@ -84,8 +84,8 @@ const A_NOT_A_PATTERNS: &[&str] = &[
     "走不走",
 ];
 
-// Transitive verb + spurious preposition pairs (English calque).
-// (verb, spurious_preposition, context_description)
+// Transitive verb + spurious preposition pairs (English calque). (verb,
+// spurious_preposition, context_description)
 const TRANSITIVE_VERB_PREPOSITION_PAIRS: &[(&str, &str, &str)] = &[
     ("強調", "在", "transitive verb with redundant preposition"),
     ("討論", "關於", "transitive verb with redundant preposition"),
@@ -96,8 +96,8 @@ const TRANSITIVE_VERB_PREPOSITION_PAIRS: &[(&str, &str, &str)] = &[
     ("分析", "關於", "transitive verb with redundant preposition"),
 ];
 
-// Bureaucratic verbal prefixes (English 'conduct/carry out' calque).
-// "進行討論" → "討論", "加以分析" → "分析", "予以處理" → "處理"
+// Bureaucratic verbal prefixes (English 'conduct/carry out' calque). "進行討論"
+// → "討論", "加以分析" → "分析", "予以處理" → "處理"
 const BUREAUCRATIC_PREFIXES: &[&str] = &["進行", "加以", "予以"];
 
 // Verbs commonly nominalized after bureaucratic prefixes.
@@ -107,8 +107,8 @@ const NOMINALIZED_VERBS: &[&str] = &[
     "監控", "維護",
 ];
 
-// Verbose action prefixes + abstract objects.
-// "做出決定" → "決定", "作出回應" → "回應"
+// Verbose action prefixes + abstract objects. "做出決定" → "決定", "作出回應" →
+// "回應"
 const VERBOSE_ACTION_PREFIXES: &[&str] = &["做出", "作出"];
 
 const VERBOSE_ACTION_OBJECTS: &[&str] = &[
@@ -116,8 +116,8 @@ const VERBOSE_ACTION_OBJECTS: &[&str] = &[
     "回答", "犧牲", "努力",
 ];
 
-// Attribution verbs for double-attribution detection.
-// "根據研究顯示" is redundant — use "根據研究" or "研究顯示".
+// Attribution verbs for double-attribution detection. "根據研究顯示" is
+// redundant — use "根據研究" or "研究顯示".
 const ATTRIBUTION_VERBS: &[&str] = &["顯示", "指出", "表明", "表示", "說明"];
 
 // Sentence-ending delimiters for boundary detection.
@@ -148,9 +148,7 @@ fn grammar_issue(
     .with_context(context)
 }
 
-// ========================================================================
 // Grammar AC prefilter: single-pass pattern dispatch
-// ========================================================================
 
 /// Grammar check types that the AC prefilter dispatches to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,7 +164,8 @@ enum GrammarCheckType {
 }
 
 /// Build the grammar pattern table and AC automaton.
-/// Returns (automaton, pattern_metadata) where pattern_metadata[i] = (check_type, pattern_table_index).
+/// Returns (automaton, pattern_metadata) where pattern_metadata[i] =
+/// (check_type, pattern_table_index).
 ///
 /// The pattern_table_index points back into the original constant arrays so
 /// validators can retrieve per-pattern data (e.g. which verb+prep pair).
@@ -230,9 +229,7 @@ fn grammar_ac() -> &'static (AhoCorasick, Vec<(GrammarCheckType, usize)>) {
     GRAMMAR_AC.get_or_init(build_grammar_ac)
 }
 
-// ========================================================================
 // Per-type validators: called with the AC hit position
-// ========================================================================
 
 /// Validate an A-not-A + 嗎 hit.
 fn validate_a_not_a_ma(
@@ -259,11 +256,10 @@ fn validate_a_not_a_ma(
         rest
     };
 
-    // Check if 嗎 appears at the end of the sentence (possibly
-    // preceded by whitespace only).
-    let trimmed = sentence_slice.trim_end();
-    if trimmed.ends_with('嗎') {
-        let ma_offset = pattern_end + sentence_slice.rfind('嗎').unwrap();
+    // Check if 嗎 appears at the end of the sentence (possibly preceded by
+    // whitespace only).
+    if let Some(head) = sentence_slice.trim_end().strip_suffix('嗎') {
+        let ma_offset = pattern_end + head.len();
         let ma_end = ma_offset + '嗎'.len_utf8();
         if !is_excluded(ma_offset, ma_end, excluded) {
             // Report the whole span from A-not-A to 嗎 as the found text.
@@ -346,10 +342,9 @@ fn validate_bare_shi_adjective(
 
     // Check if preceded by a pronoun.
     let before = &text[..abs_pos];
-    let preceded_by_pronoun = PRONOUNS.iter().any(|p| before.ends_with(p));
-    if !preceded_by_pronoun {
+    let Some(pronoun) = PRONOUNS.iter().find(|p| before.ends_with(*p)) else {
         return;
-    }
+    };
 
     // Check if followed by a degree adverb (which makes it grammatical).
     let after = &text[shi_end..];
@@ -369,9 +364,9 @@ fn validate_bare_shi_adjective(
             return;
         }
 
-        // Guard: if the adjective is immediately followed by a CJK
-        // character that acts as a noun head, it's a modifier in a noun
-        // phrase (e.g. 好消息, 大問題), not a bare adjective predicate.
+        // Guard: if the adjective is immediately followed by a CJK character
+        // that acts as a noun head, it's a modifier in a noun phrase (e.g.
+        // 好消息, 大問題), not a bare adjective predicate.
         let after_adj = &text[adj_end..];
         if let Some(ch) = after_adj.chars().next() {
             if is_cjk_ideograph(ch)
@@ -394,8 +389,7 @@ fn validate_bare_shi_adjective(
             }
         }
 
-        // Find the pronoun that precedes 是 to include in the found span.
-        let pronoun = PRONOUNS.iter().find(|p| before.ends_with(*p)).unwrap();
+        // The pronoun that precedes 是 is part of the found span.
         let pronoun_start = abs_pos - pronoun.len();
         let found = &text[pronoun_start..adj_end];
         let suggestion = format!("{}很{}", pronoun, adj);
@@ -734,14 +728,14 @@ pub(crate) fn scan_a_not_a_ma(text: &str, excluded: &[ByteRange], issues: &mut V
                 rest
             };
 
-            // Check if 嗎 appears at the end of the sentence (possibly
-            // preceded by whitespace only).
-            let trimmed = sentence_slice.trim_end();
-            if trimmed.ends_with('嗎') {
-                let ma_offset = pattern_end + sentence_slice.rfind('嗎').unwrap();
+            // Check if 嗎 appears at the end of the sentence (possibly preceded
+            // by whitespace only).
+            if let Some(head) = sentence_slice.trim_end().strip_suffix('嗎') {
+                let ma_offset = pattern_end + head.len();
                 let ma_end = ma_offset + '嗎'.len_utf8();
                 if !is_excluded(ma_offset, ma_end, excluded) {
-                    // Report the whole span from A-not-A to 嗎 as the found text.
+                    // Report the whole span from A-not-A to 嗎 as the found
+                    // text.
                     let found = &text[abs_pos..ma_end];
                     issues.push(grammar_issue(
                         abs_pos,
@@ -777,8 +771,8 @@ pub(crate) fn scan_he_connecting_clauses(
             continue;
         }
 
-        // Check if the character immediately before 和 is a verb suffix.
-        // This is a heuristic: CJK char ending in common verb suffixes
+        // Check if the character immediately before 和 is a verb suffix. This
+        // is a heuristic: CJK char ending in common verb suffixes
         // (了/過/著/來/去/完/好/到) strongly suggests a verb phrase.
         let before_he = &text[..abs_pos];
         let prev_char = before_he.chars().next_back();
@@ -789,13 +783,13 @@ pub(crate) fn scan_he_connecting_clauses(
         }
 
         // Also check the character after 和 -- if followed by another verb
-        // phrase indicator (pronoun starting a new clause), this is likely
-        // a clause-connecting 和.
+        // phrase indicator (pronoun starting a new clause), this is likely a
+        // clause-connecting 和.
         let after_he = &text[he_end..];
 
-        // Quick check: next CJK character should not be a noun-like context.
-        // If the next char is also a verb suffix or a pronoun starts the
-        // next segment, flag it.
+        // Quick check: next CJK character should not be a noun-like context. If
+        // the next char is also a verb suffix or a pronoun starts the next
+        // segment, flag it.
         let next_is_pronoun = PRONOUNS.iter().any(|p| after_he.starts_with(p));
 
         if !next_is_pronoun {
@@ -957,8 +951,8 @@ pub(crate) fn scan_redundant_preposition(
     }
 }
 
-// Detect bureaucratic nominalization: 進行/加以/予以 + verb.
-// These are calques of English "conduct/carry out + noun" and are verbose.
+// Detect bureaucratic nominalization: 進行/加以/予以 + verb. These are calques
+// of English "conduct/carry out + noun" and are verbose.
 #[cfg(test)]
 pub(crate) fn scan_bureaucratic_nominalization(
     text: &str,
@@ -981,9 +975,9 @@ pub(crate) fn scan_bureaucratic_nominalization(
             let window_end = text.floor_char_boundary(text.len().min(prefix_end + 2 * 4 + 6 * 4));
             let after = &text[prefix_end..window_end];
 
-            // Pick the verb whose match is earliest by text position, not
-            // list order — avoids silently matching the wrong verb when two
-            // verbs from the list both appear in the window.
+            // Pick the verb whose match is earliest by text position, not list
+            // order — avoids silently matching the wrong verb when two verbs
+            // from the list both appear in the window.
             let matched = NOMINALIZED_VERBS
                 .iter()
                 .filter_map(|verb| {
@@ -1019,8 +1013,8 @@ pub(crate) fn scan_bureaucratic_nominalization(
     }
 }
 
-// Detect verbose action prefix: 做出/作出 + abstract noun.
-// "做出決定" → "決定", "作出回應" → "回應"
+// Detect verbose action prefix: 做出/作出 + abstract noun. "做出決定" → "決定",
+// "作出回應" → "回應"
 #[cfg(test)]
 pub(crate) fn scan_verbose_action(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue>) {
     for prefix in VERBOSE_ACTION_PREFIXES {
@@ -1081,10 +1075,10 @@ const DUI_JINXING_VERBS: &[&str] = &[
 ];
 
 // Detect 對X進行Y pattern: fronted-object bureaucratic padding.
-// "對資料進行分析" → "分析資料", "對系統進行測試" → "測試系統"
-// This is distinct from scan_bureaucratic_nominalization which catches
-// standalone "進行分析" — here the explicit 對X object is present, giving
-// a better suggestion that preserves the object.
+// "對資料進行分析" → "分析資料", "對系統進行測試" → "測試系統" This is distinct
+// from scan_bureaucratic_nominalization which catches standalone "進行分析" —
+// here the explicit 對X object is present, giving a better suggestion that
+// preserves the object.
 #[cfg(test)]
 pub(crate) fn scan_dui_jinxing(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue>) {
     let marker = "對";
@@ -1116,12 +1110,15 @@ pub(crate) fn scan_dui_jinxing(text: &str, excluded: &[ByteRange], issues: &mut 
                 continue;
             }
         }
-        // Check following char: 對於 is a compound preposition, not this pattern.
+
+        // Check following char: 對於 is a compound preposition, not this
+        // pattern.
         if text[marker_end..].starts_with('於') {
             continue;
         }
 
-        // Look for 進行 within a reasonable window (up to 8 CJK chars ≈ 24 bytes).
+        // Look for 進行 within a reasonable window (up to 8 CJK chars ≈ 24
+        // bytes).
         let window_end = text.floor_char_boundary(text.len().min(marker_end + 8 * 4));
         let after_dui = &text[marker_end..window_end];
 
@@ -1228,10 +1225,11 @@ pub(crate) fn scan_double_attribution(text: &str, excluded: &[ByteRange], issues
                 if source.trim().is_empty() {
                     continue;
                 }
+
                 // Skip when the matched verb is actually a prefix of a longer
-                // compound noun (e.g. 說明書, 表示式, 顯示器). Key the
-                // suffix check to the specific verb to avoid false negatives
-                // like 表示會 (will indicate) or 顯示圖 (show diagram).
+                // compound noun (e.g. 說明書, 表示式, 顯示器). Key the suffix
+                // check to the specific verb to avoid false negatives like
+                // 表示會 (will indicate) or 顯示圖 (show diagram).
                 let after_verb = &text[verb_end..];
                 let is_compound = match *verb {
                     "說明" => after_verb.starts_with('書') || after_verb.starts_with('文'),
@@ -1242,6 +1240,7 @@ pub(crate) fn scan_double_attribution(text: &str, excluded: &[ByteRange], issues
                 if is_compound {
                     continue;
                 }
+
                 // Skip when a markdown link bracket sits between 根據 and the
                 // verb — the verb is inside link text, not an attribution verb.
                 if source.contains('[') || source.contains(']') {
@@ -1262,9 +1261,7 @@ pub(crate) fn scan_double_attribution(text: &str, excluded: &[ByteRange], issues
     }
 }
 
-// ========================================================================
 // AI writing detection: grammar-level patterns
-// ========================================================================
 
 // Helper to create an AI-style issue (IssueType::AiStyle instead of Grammar).
 fn ai_style_issue(
@@ -1305,8 +1302,8 @@ const YIWEIZHE_EXPLANATION_CLUES: &[&str] =
 // Detect overuse of 意味著 where native zh-TW would use context-appropriate
 // alternatives: 表示 (definition), 代表 (consequence), 也就是說 (explanation).
 // Emits a single disambiguated suggestion per occurrence (required by fixer.rs
-// which skips issues with >1 suggestion for non-orthographic types).
-// When disambiguation confidence is low, emits advisory-only (no suggestions).
+// which skips issues with >1 suggestion for non-orthographic types). When
+// disambiguation confidence is low, emits advisory-only (no suggestions).
 pub(crate) fn scan_ai_semantic_safety(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue>) {
     let target = "意味著";
     let target_len = target.len();
@@ -1321,10 +1318,10 @@ pub(crate) fn scan_ai_semantic_safety(text: &str, excluded: &[ByteRange], issues
             continue;
         }
 
-        // Look at surrounding sentence for context clues to disambiguate.
-        // Use sentence boundaries (not clause boundaries) so that clues in
-        // an adjacent clause within the same sentence are still visible
-        // (e.g. '換言之，這意味著' — '換言之' is in the prior clause).
+        // Look at surrounding sentence for context clues to disambiguate. Use
+        // sentence boundaries (not clause boundaries) so that clues in an
+        // adjacent clause within the same sentence are still visible (e.g.
+        // '換言之，這意味著' — '換言之' is in the prior clause).
         let sentence_start = text[..abs_pos]
             .char_indices()
             .rev()
@@ -1354,7 +1351,8 @@ pub(crate) fn scan_ai_semantic_safety(text: &str, excluded: &[ByteRange], issues
         {
             "也就是說"
         } else {
-            // Low confidence: no clear context → advisory only (empty suggestion).
+            // Low confidence: no clear context → advisory only (empty
+            // suggestion).
             ""
         };
 
@@ -1369,8 +1367,8 @@ pub(crate) fn scan_ai_semantic_safety(text: &str, excluded: &[ByteRange], issues
     }
 }
 
-// Copula-avoidance patterns: AI replaces simple 是/有 with inflated alternatives.
-// (inflated_form, simple_copula)
+// Copula-avoidance patterns: AI replaces simple 是/有 with inflated
+// alternatives. (inflated_form, simple_copula)
 const COPULA_AVOIDANCE_PATTERNS: &[(&str, &str)] = &[
     ("作為", "是"),
     ("標誌著", "是"),
@@ -1379,10 +1377,10 @@ const COPULA_AVOIDANCE_PATTERNS: &[(&str, &str)] = &[
     ("設有", "有"),
 ];
 
-// Characters that, when adjacent to a copula pattern, indicate a compound
-// word rather than an inflated copula.  Matching these suppresses the issue.
-// 作為: preceded by 所 (有所作為) or 大 (大作為).
-// 擁有: followed by 權/者/感/量 (擁有權, 擁有者, 擁有感, 擁有量).
+// Characters that, when adjacent to a copula pattern, indicate a compound word
+// rather than an inflated copula. Matching these suppresses the issue. 作為:
+// preceded by 所 (有所作為) or 大 (大作為). 擁有: followed by 權/者/感/量
+// (擁有權, 擁有者, 擁有感, 擁有量).
 fn is_copula_compound(text: &str, abs_pos: usize, end: usize, inflated: &str) -> bool {
     if inflated == "作為" {
         // Check preceding char.
@@ -1411,7 +1409,8 @@ fn is_copula_compound(text: &str, abs_pos: usize, end: usize, inflated: &str) ->
     false
 }
 
-// Context clues for technical prose (where copula avoidance is most suspicious).
+// Context clues for technical prose (where copula avoidance is most
+// suspicious).
 const COPULA_TECH_CONTEXT: &[&str] = &[
     "系統",
     "程式",
@@ -1450,8 +1449,8 @@ pub(crate) fn scan_ai_copula_avoidance(
                 continue;
             }
 
-            // Only flag in technical prose context to avoid false positives
-            // on literary/formal writing where these forms are natural.
+            // Only flag in technical prose context to avoid false positives on
+            // literary/formal writing where these forms are natural.
             let window_start = abs_pos.saturating_sub(80);
             let window_end = text.len().min(end + 80);
             let window =
@@ -1462,9 +1461,9 @@ pub(crate) fn scan_ai_copula_avoidance(
                 continue;
             }
 
-            // Advisory only — no token-level suggestion.  Direct replacement
+            // Advisory only — no token-level suggestion. Direct replacement
             // (e.g. 作為→是) produces broken sentences because the surrounding
-            // syntax must change too.  The user must restructure manually.
+            // syntax must change too. The user must restructure manually.
             let ctx = format!(
                 "AI copula avoidance: consider restructuring with '{simple}' \
                  instead of '{inflated}'"
@@ -1474,11 +1473,11 @@ pub(crate) fn scan_ai_copula_avoidance(
     }
 }
 
-// Passive 被-constructions that have obvious active rewrites.
-// (被-pattern, active_rewrite)
-// Only patterns where dropping 被 is universally safe (adverb + verb).
-// Excluded: 被認為是/被稱為 (flips meaning with animate subject),
-// 被設計為/被用來/被用於 (changes construction when subject is affected entity).
+// Passive 被-constructions that have obvious active rewrites. (被-pattern,
+// active_rewrite) Only patterns where dropping 被 is universally safe (adverb +
+// verb). Excluded: 被認為是/被稱為 (flips meaning with animate subject),
+// 被設計為/被用來/被用於 (changes construction when subject is affected
+// entity).
 const PASSIVE_REWRITE_PATTERNS: &[(&str, &str)] = &[
     ("被廣泛使用", "廣泛使用"),
     ("被廣泛採用", "廣泛採用"),
@@ -1512,8 +1511,8 @@ pub(crate) fn scan_ai_passive(text: &str, excluded: &[ByteRange], issues: &mut V
     }
 }
 
-// Didactic sentence patterns: AI-typical moralizing constructions
-// that are nearly 100% AI-generated in technical articles.
+// Didactic sentence patterns: AI-typical moralizing constructions that are
+// nearly 100% AI-generated in technical articles.
 // Pattern: 的(故事|案例|經驗|教訓|歷史)(告訴|提醒|啟示)(我們|後人|世人)
 pub(crate) fn scan_ai_didactic(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue>) {
     // Use a simple multi-step search: find each 告訴我們/提醒我們/啟示我們
@@ -1575,8 +1574,8 @@ pub(crate) fn scan_ai_didactic(text: &str, excluded: &[ByteRange], issues: &mut 
     }
 }
 
-// Vague exaggeration patterns: AI-typical claims like "領先時代 N 年"
-// without technical substance.
+// Vague exaggeration patterns: AI-typical claims like "領先時代 N 年" without
+// technical substance.
 // Pattern: (領先|超前|超越)(時代|業界|同期)...N年
 pub(crate) fn scan_ai_vague_exaggeration(
     text: &str,
@@ -1599,7 +1598,8 @@ pub(crate) fn scan_ai_vague_exaggeration(
                 continue;
             }
 
-            // Look forward up to 30 chars for object + optional gap + digits + 年
+            // Look forward up to 30 chars for object + optional gap + digits +
+            // 年
             let lookahead_end = text.len().min(verb_end + 60);
             let lookahead_end = text.ceil_char_boundary(lookahead_end);
             let lookahead = &text[verb_end..lookahead_end];
@@ -1637,9 +1637,9 @@ pub(crate) fn scan_ai_vague_exaggeration(
     }
 }
 
-// Density thresholds for AI phrase detection.
-// Each entry: (phrase, threshold per 1000 chars, max_acceptable count suggestion).
-// Calibrated from x86.md field review data.
+// Density thresholds for AI phrase detection. Each entry: (phrase, threshold
+// per 1000 chars, max_acceptable count suggestion). Calibrated from x86.md
+// field review data.
 const DENSITY_TRACKED_PHRASES: &[(&str, f32, u32)] = &[
     ("更重要的是", 0.5, 5),
     ("值得注意的是", 0.3, 3),
@@ -1653,11 +1653,11 @@ const DENSITY_TRACKED_PHRASES: &[(&str, f32, u32)] = &[
     ("在這個過程中", 0.3, 3),
 ];
 
-// Post-scan density pass: count tracked phrases across the full document.
-// When density (count / text_len_chars * 1000) exceeds the per-phrase threshold,
-// emit a single summary AiStyle issue at the first occurrence with density stats.
-// Does NOT duplicate per-occurrence ai_filler detection — this catches the
-// statistical signature that only becomes visible at document level.
+// Post-scan density pass: count tracked phrases across the full document. When
+// density (count / text_len_chars * 1000) exceeds the per-phrase threshold,
+// emit a single summary AiStyle issue at the first occurrence with density
+// stats. Does NOT duplicate per-occurrence ai_filler detection — this catches
+// the statistical signature that only becomes visible at document level.
 pub(crate) fn scan_ai_density(
     text: &str,
     excluded: &[ByteRange],
@@ -1665,6 +1665,7 @@ pub(crate) fn scan_ai_density(
     threshold_multiplier: f32,
 ) {
     let char_count = text.chars().count();
+
     // Skip density analysis on short texts (< 500 chars) — not enough
     // statistical signal to distinguish AI from human.
     if char_count < 500 {
@@ -1709,16 +1710,17 @@ pub(crate) fn scan_ai_density(
     }
 }
 
-// --- Structural AI pattern detectors ---
+// Structural AI pattern detectors
 
-/// Returns true if the byte range [start, end) is entirely within an exclusion zone.
+/// Returns true if the byte range [start, end) is entirely within an exclusion
+/// zone.
 fn is_para_excluded(start: usize, end: usize, excluded: &[ByteRange]) -> bool {
     excluded.iter().any(|r| r.start <= start && end <= r.end)
 }
 
-// Binary contrast density: AI overuses paired transition patterns.
-// Counts intra-sentence double turns, progressive, and concessive patterns.
-// Threshold: >5 per 1000 chars is AI-typical (human baseline: 2-3).
+// Binary contrast density: AI overuses paired transition patterns. Counts
+// intra-sentence double turns, progressive, and concessive patterns. Threshold:
+// >5 per 1000 chars is AI-typical (human baseline: 2-3).
 pub(crate) fn scan_ai_binary_contrast(
     text: &str,
     excluded: &[ByteRange],
@@ -1799,8 +1801,8 @@ pub(crate) fn scan_ai_binary_contrast(
     }
 }
 
-// Paragraph-ending formulaic declarations.
-// AI closes paragraphs with stock phrases like:
+// Paragraph-ending formulaic declarations. AI closes paragraphs with stock
+// phrases like:
 //   這...證明/揭示...
 //   這...成為...的基礎/基石/起點
 //   正是這...讓...
@@ -1882,8 +1884,8 @@ pub(crate) fn scan_ai_paragraph_endings(
     }
 }
 
-// Dash overuse: flag when many paragraphs contain ≥3 em-dashes.
-// AI writing overuses parenthetical dashes for elaboration.
+// Dash overuse: flag when many paragraphs contain ≥3 em-dashes. AI writing
+// overuses parenthetical dashes for elaboration.
 pub(crate) fn scan_ai_dash_overuse(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue>) {
     let paragraphs: Vec<&str> = text
         .split("\n\n")
@@ -1925,9 +1927,9 @@ pub(crate) fn scan_ai_dash_overuse(text: &str, excluded: &[ByteRange], issues: &
     }
 }
 
-// Formulaic section headings: AI generates stereotyped heading patterns.
-// These are only meaningful in Markdown/structured text where headings
-// are explicit. Detects patterns in lines starting with # or ##.
+// Formulaic section headings: AI generates stereotyped heading patterns. These
+// are only meaningful in Markdown/structured text where headings are explicit.
+// Detects patterns in lines starting with # or ##.
 const FORMULAIC_HEADINGS: &[&str] = &[
     "挑戰與未來展望",
     "結論與展望",
@@ -1985,8 +1987,8 @@ pub(crate) fn scan_ai_formulaic_headings(
 }
 
 // Enumerated list density: count list-containing paragraphs relative to total.
-// AI writing overuses bullet/numbered lists for organization.
-// Flag when list-paragraph ratio exceeds 40%.
+// AI writing overuses bullet/numbered lists for organization. Flag when
+// list-paragraph ratio exceeds 40%.
 pub(crate) fn scan_ai_list_density(
     text: &str,
     excluded: &[ByteRange],
@@ -2043,8 +2045,9 @@ pub(crate) fn scan_ai_list_density(
     }
 }
 
-// Zero-width codepoints injected by LLM tokenizers (BPE/WordPiece).
-// Any occurrence mid-text is a tokenizer artifact; suggest empty string for auto-removal.
+// Zero-width codepoints injected by LLM tokenizers (BPE/WordPiece). Any
+// occurrence mid-text is a tokenizer artifact; suggest empty string for
+// auto-removal.
 const ZERO_WIDTH_CODEPOINTS: &[(char, &str)] = &[
     ('\u{200B}', "U+200B zero-width space"),
     ('\u{200C}', "U+200C zero-width non-joiner"),
@@ -2081,12 +2084,10 @@ fn scan_ai_zero_width(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue
     }
 }
 
-// ========================================================================
 // Structural AI detectors (require BoundaryIndex)
-// ========================================================================
 
-// S1: tricolon detection — three 、-separated spans with identical char
-// length or identical sentence-final particles.
+// S1: tricolon detection — three 、-separated spans with identical char length
+// or identical sentence-final particles.
 fn scan_ai_tricolon(
     text: &str,
     excluded: &[ByteRange],
@@ -2095,12 +2096,14 @@ fn scan_ai_tricolon(
 ) {
     for sent in &idx.sentences {
         let s = &text[sent.byte_start..sent.byte_end];
+
         // Strip sentence-final punctuation so the trailing span's char count
         // matches its peers (團結、奮鬥、創新。 should be three 2-char spans).
         let stripped_end = s
             .trim_end_matches(['。', '！', '？', '；', '.', '!', '?'])
             .len();
         let s = &s[..stripped_end];
+
         // Build (byte_start, byte_end, char_count) for each 、-separated span.
         // Tracking offsets explicitly avoids the s.find(span) hazard where
         // repeated spans (e.g. 乙、甲、甲) collapse to the first occurrence.
@@ -2321,8 +2324,9 @@ fn scan_ai_mechanical_bullets(
 
     for (line_offset, line) in line_iter(text) {
         let trimmed = line.trim_start();
+
         // Numbered list items: one or more ASCII digits followed by '.' or ')'
-        // and whitespace.  Matches 1., 10., 123), etc.
+        // and whitespace. Matches 1., 10., 123), etc.
         let numbered_marker_len = numbered_list_marker_len(trimmed);
         let is_list_item =
             trimmed.starts_with("- ") || trimmed.starts_with("* ") || numbered_marker_len.is_some();
@@ -2399,7 +2403,9 @@ fn emit_ai_mechanical_bullet_issue(
     } else {
         return;
     };
-    // List markers (- * digit) are ASCII, so first_item_offset + 1 is a char boundary.
+
+    // List markers (- * digit) are ASCII, so first_item_offset + 1 is a char
+    // boundary.
     let marker = &text[first_item_offset..first_item_offset + 1];
     issues.push(
         Issue::new(
@@ -2562,8 +2568,9 @@ fn scan_ai_repeated_parallel_slogan(
             if let Some((_, first_offset, first_para, emitted)) =
                 seen.iter_mut().find(|(prior, _, _, _)| prior == s)
             {
-                // Only a slogan repeated across paragraphs is "金句疊句"; the same
-                // parallel sentence repeated within one paragraph is ordinary 排比.
+                // Only a slogan repeated across paragraphs is "金句疊句"; the
+                // same parallel sentence repeated within one paragraph is
+                // ordinary 排比.
                 if *first_para != para_idx && !*emitted {
                     let offset = *first_offset;
                     let len = char_bounded_end(&text[offset..], 0, 8);
@@ -2684,7 +2691,8 @@ fn scan_ai_emdash_overuse(
     }
 }
 
-// S7: formulaic 'despite' — 儘管.*挑戰 + forward-looking verb within one sentence.
+// S7: formulaic 'despite' — 儘管.*挑戰 + forward-looking verb within one
+// sentence.
 fn scan_ai_formulaic_despite(
     text: &str,
     excluded: &[ByteRange],
@@ -2703,7 +2711,8 @@ fn scan_ai_formulaic_despite(
                 // Char-counted gap (≤40 chars) — encoding-independent.
                 let gap_chars = s[after_despite_start..challenge].chars().count();
                 if gap_chars <= 40 {
-                    // Check for forward-looking verb in the rest of the sentence.
+                    // Check for forward-looking verb in the rest of the
+                    // sentence.
                     let rest = &s[challenge + "挑戰".len()..];
                     for verb in FORWARD_VERBS {
                         if rest.contains(verb) {
@@ -2775,7 +2784,8 @@ fn scan_ai_false_ranges(
     }
 }
 
-// V2: hedging density — promote Info to Warning when ≥3 hedging hits per 200 chars.
+// V2: hedging density — promote Info to Warning when ≥3 hedging hits per 200
+// chars.
 fn scan_ai_hedging_density(
     text: &str,
     excluded: &[ByteRange],
@@ -2797,7 +2807,8 @@ fn scan_ai_hedging_density(
         // Threshold: ≥3 per 200 chars.
         let threshold = ((char_count as f32 / 200.0) * 3.0).ceil() as usize;
         if count >= 3 && count >= threshold {
-            // Promote existing hedging Info issues in this paragraph to Warning.
+            // Promote existing hedging Info issues in this paragraph to
+            // Warning.
             for issue in issues.iter_mut() {
                 if issue.offset >= para.byte_start
                     && issue.offset < para.byte_end
@@ -2818,9 +2829,7 @@ fn scan_ai_hedging_density(
     }
 }
 
-// ========================================================================
 // Syntactic translationese detectors (require BoundaryIndex)
-// ========================================================================
 
 // G1: passive voice density — count 被 per paragraph, flag at >2 per 100 chars.
 fn scan_trans_passive_density(
@@ -2829,7 +2838,8 @@ fn scan_trans_passive_density(
     issues: &mut Vec<Issue>,
     idx: &crate::engine::sentence::BoundaryIndex,
 ) {
-    // Technical whitelist: these passive forms are standard in zh-TW technical prose.
+    // Technical whitelist: these passive forms are standard in zh-TW technical
+    // prose.
     const WHITELIST: &[&str] = &[
         "被定義為",
         "被廣泛採用",
@@ -2838,6 +2848,7 @@ fn scan_trans_passive_density(
         "被觀察到",
         "被記錄為",
     ];
+
     // Note: per-occurrence flagging of specific calques (被廣泛認為, 被視為,
     // 被稱為, etc.) is handled by the spelling ruleset, not duplicated here.
     // This detector contributes only the density-based signal.
@@ -2957,7 +2968,8 @@ fn scan_trans_displaced_conditional(
             if let Some(pos) = s[midpoint..].find(cond) {
                 let abs = sent.byte_start + midpoint + pos;
                 if !is_excluded(abs, abs + cond.len(), excluded) {
-                    // Check for 的話 after the conditional (extra calque signal).
+                    // Check for 的話 after the conditional (extra calque
+                    // signal).
                     let after = &s[midpoint + pos + cond.len()..];
                     let has_dehua = after.contains("的話");
                     let ctx = if has_dehua {
@@ -3134,6 +3146,7 @@ fn scan_trans_excessive_de_chain(
 ) {
     for sent in &idx.sentences {
         let s = &text[sent.byte_start..sent.byte_end];
+
         // Walk clause boundaries with explicit byte offsets so repeated
         // identical clauses do not collapse to the first occurrence.
         let mut clause_start = 0usize;
@@ -3242,42 +3255,40 @@ fn scan_trans_adverbial_particle_redundant(
     }
 }
 
-// =======================================================================
 // EN→ZH calque detectors — substring-only lexical pass
-// =======================================================================
 //
-// These four detectors capture EN→ZH translation tells from a six-red-
-// flag review checklist, complementing (not duplicating) the existing
-// dewesternise-checklist coverage in `scan_translationese_syntactic`.
-// All four are substring-only — no boundary index required — so they
-// run as soon as `translationese_detection` is enabled.
+// These four detectors capture EN→ZH translation tells from a six-red- flag
+// review checklist, complementing (not duplicating) the existing
+// dewesternise-checklist coverage in `scan_translationese_syntactic`. All four
+// are substring-only — no boundary index required — so they run as soon as
+// `translationese_detection` is enabled.
 //
 //   ZY1a — 之一 superlative calque (Red Flag 4)
 //   ZY2a — bounded EN connective calques (Red Flag 2)
 //   ZY3a — finite nominalization shapes (Red Flag 6)
 //   ZY4a — false-friend lexical pairs with same-span guard
 //
-// Boundary-aware variants (paragraph density, sentence-bounded EN
-// connectives, extended nominalization chain, long pre-modifier
-// 定語堆疊) live below in the `scan_translationese_indexed` block —
-// they run alongside the syntactic detectors and reuse the same
-// `BoundaryIndex`.
+// Boundary-aware variants (paragraph density, sentence-bounded EN connectives,
+// extended nominalization chain, long pre-modifier 定語堆疊) live below in the
+// `scan_translationese_indexed` block — they run alongside the syntactic
+// detectors and reuse the same `BoundaryIndex`.
 
-// ZY1a: 之一 superlative calque.  Match `最[^之]{1,20}之一` and
-// `極為[^之]{1,20}之一` — bounded character class, no `.*?`.  Mirrors
-// "one of the most..." directly with high TP rate vs raw 之一 density.
+// ZY1a: 之一 superlative calque. Match `最[^之]{1,20}之一` and
+// `極為[^之]{1,20}之一` — bounded character class, no `.*?`. Mirrors "one of
+// the most..." directly with high TP rate vs raw 之一 density.
 //
-// Native-Mandarin guard: when the noun head immediately preceding 之一 is
-// a person-class profession noun (`畫家`, `學者`, `作家`, `工程師`,
-// `運動員`, etc.), `最…之一` is biographical idiom
-// (`當代最傑出的畫家之一`), not translation tell.  Suppress in that case.
+// Native-Mandarin guard: when the noun head immediately preceding 之一 is a
+// person-class profession noun (`畫家`, `學者`, `作家`, `工程師`, `運動員`,
+// etc.), `最…之一` is biographical idiom (`當代最傑出的畫家之一`), not
+// translation tell. Suppress in that case.
 fn scan_zy1a_superlative_yi_zhi(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue>) {
     const SUPERLATIVES: &[&str] = &["最", "極為"];
     const CLOSER: &str = "之一";
     const MAX_CHARS_BETWEEN: usize = 20;
-    // Person-class profession/person-role noun tails.  Match full tails
-    // rather than a single final character so ordinary nouns such as
-    // `國家` are not misclassified as biographical idiom.
+
+    // Person-class profession/person-role noun tails. Match full tails rather
+    // than a single final character so ordinary nouns such as `國家` are not
+    // misclassified as biographical idiom.
     const PERSON_NOUN_TAILS: &[&str] = &[
         "畫家",
         "學者",
@@ -3306,8 +3317,8 @@ fn scan_zy1a_superlative_yi_zhi(text: &str, excluded: &[ByteRange], issues: &mut
             let window_end = char_bounded_end(text, after_open, MAX_CHARS_BETWEEN);
             let window = &text[after_open..window_end];
 
-            // Disqualify when no 之一 in window, when 之 splits the gap
-            // (would change semantics), or when the gap is empty.
+            // Disqualify when no 之一 in window, when 之 splits the gap (would
+            // change semantics), or when the gap is empty.
             let Some(cpos) = window.find(CLOSER) else {
                 search_from = after_open;
                 continue;
@@ -3319,8 +3330,9 @@ fn scan_zy1a_superlative_yi_zhi(text: &str, excluded: &[ByteRange], issues: &mut
             }
 
             let abs_close_end = after_open + cpos + CLOSER.len();
-            // Native-Mandarin biographical guard: profession-suffix noun
-            // head makes 最…之一 idiomatic, so suppress.
+
+            // Native-Mandarin biographical guard: profession-suffix noun head
+            // makes 最…之一 idiomatic, so suppress.
             let is_biographical = PERSON_NOUN_TAILS.iter().any(|tail| gap.ends_with(tail));
             if !is_biographical && !is_excluded(abs_open, abs_close_end, excluded) {
                 issues.push(
@@ -3356,20 +3368,21 @@ fn find_within_chars(
     text[start_byte..end].find(needle).map(|p| start_byte + p)
 }
 
-// ZY2a: bounded EN connective calques — 因為…所以 / 雖然…但是 /
-// 當…的時候 / 如果…那麼.  Hard-bounded distance (no `.*?`).
+// ZY2a: bounded EN connective calques — 因為…所以 / 雖然…但是 / 當…的時候 /
+// 如果…那麼. Hard-bounded distance (no `.*?`).
 fn scan_zy2a_connective_calques(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue>) {
-    // (opener, closer, max_chars_between, label).
-    // Distance budget per opener: 40 chars for 因/雖/如, 30 chars for 當.
+    // (opener, closer, max_chars_between, label). Distance budget per opener:
+    // 40 chars for 因/雖/如, 30 chars for 當.
     const PATTERNS: &[(&str, &str, usize, &str)] = &[
         ("因為", "所以", 40, "因為…所以"),
         ("雖然", "但是", 40, "雖然…但是"),
         ("當", "的時候", 30, "當…的時候"),
         ("如果", "那麼", 40, "如果…那麼"),
     ];
-    // Register markers signalling formal-letter or contract templates where
-    // the paired connective is template-mandatory.  Skip when these appear
-    // in the document head (first 100 chars, char-boundary safe).
+
+    // Register markers signalling formal-letter or contract templates where the
+    // paired connective is template-mandatory. Skip when these appear in the
+    // document head (first 100 chars, char-boundary safe).
     const FORMAL_MARKERS: &[&str] = &["敬啟者", "謹此", "茲就", "謹啟", "合約", "契約"];
     let head_end = char_bounded_end(text, 0, 100);
     let in_formal_register = FORMAL_MARKERS.iter().any(|m| text[..head_end].contains(m));
@@ -3382,9 +3395,10 @@ fn scan_zy2a_connective_calques(text: &str, excluded: &[ByteRange], issues: &mut
         while let Some(pos) = text[search_from..].find(opener) {
             let abs_open = search_from + pos;
             let after_open = abs_open + opener.len();
-            // 當 is a single character with many non-connective uses
-            // (當下, 當時, 當作, 當地, 當局, 當事人, 當中, 當然, 當面 etc.).
-            // Skip when next char is a common 當-prefix forming a different word.
+
+            // 當 is a single character with many non-connective uses (當下,
+            // 當時, 當作, 當地, 當局, 當事人, 當中, 當然, 當面 etc.). Skip when
+            // next char is a common 當-prefix forming a different word.
             if opener == "當" {
                 let rest = &text[after_open..];
                 const SKIP_NEXT: &[char] = &[
@@ -3426,17 +3440,16 @@ fn scan_zy2a_connective_calques(text: &str, excluded: &[ByteRange], issues: &mut
 
 // ZY3a: finite nominalization patterns (Red Flag 6 surface forms).
 //
-// Two pair-forms drawn directly from the source's nominalization
-// "BAD" examples:
+// Two pair-forms drawn directly from the source's nominalization "BAD"
+// examples:
 //   - X的實施Y的提升       (pair 1: implementation→improvement)
 //   - 對X的分析Y的發現     (pair 2: analysis→discovery)
 //
-// Plus a finite list of single nominalized verb-noun heads.  Pair forms
-// fire with higher confidence (Severity::Info still — REPORT-ONLY).  Single
-// forms fire when they appear with another nominalization in the same
-// sentence-clause (`，`/`。`-bounded), which suppresses standalone noun
-// uses (`策略的實施` mentioned once is fine; chained nominalization is the
-// translationese tell).
+// Plus a finite list of single nominalized verb-noun heads. Pair forms fire
+// with higher confidence (Severity::Info still — REPORT-ONLY). Single forms
+// fire when they appear with another nominalization in the same sentence-clause
+// (`，`/`。`-bounded), which suppresses standalone noun uses (`策略的實施`
+// mentioned once is fine; chained nominalization is the translationese tell).
 fn scan_zy3a_finite_nominalization(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue>) {
     const NOMINAL_HEADS: &[&str] = &[
         "的實施",
@@ -3454,11 +3467,11 @@ fn scan_zy3a_finite_nominalization(text: &str, excluded: &[ByteRange], issues: &
     const ANALYSIS_PAIR_LEFT: &[&str] = &["的分析", "的講解", "的理解", "的認識"];
     const ANALYSIS_PAIR_RIGHT: &[&str] = &["的發現", "的理解", "的認識"];
 
-    // Walk the text by character, locate each clause (bounded by
-    // `，` / `,` / `。` / `；` / `\n` / start / end), and emit only when
-    // the clause contains one of the documented pair-forms or a true
-    // back-to-back nominalization chain (`...的講解的理解`).  Merely
-    // hosting two nominal heads in the same clause is not enough.
+    // Walk the text by character, locate each clause (bounded by `，` / `,` /
+    // `。` / `；` / `\n` / start / end), and emit only when the clause contains
+    // one of the documented pair-forms or a true back-to-back nominalization
+    // chain (`...的講解的理解`). Merely hosting two nominal heads in the same
+    // clause is not enough.
     let mut clause_start = 0;
     for (i, ch) in text.char_indices() {
         if is_clause_boundary_char(ch) {
@@ -3525,6 +3538,7 @@ fn emit_zy3a_clause(
             from = abs_p + head.len();
         }
     }
+
     // Need ≥2 nominal heads in the same clause to qualify for further
     // structural checks.
     if hits.len() < 2 {
@@ -3603,11 +3617,11 @@ fn contains_zy3a_coordination(gap: &str) -> bool {
         .any(|tok| gap.contains(tok))
 }
 
-// ZY4a: false-friend lexical pairs.  Fire only when the same comma-bounded
-// span contains another translation-context cue (another false-friend hit
-// OR a romanized parenthetical gloss `(English)` immediately after the
-// term).  This local guard suppresses standalone uses of these words —
-// `實際上` alone is fine; `實際上, 嚴肅地說...` is the cluster tell.
+// ZY4a: false-friend lexical pairs. Fire only when the same comma-bounded span
+// contains another translation-context cue (another false-friend hit OR a
+// romanized parenthetical gloss `(English)` immediately after the term). This
+// local guard suppresses standalone uses of these words — `實際上` alone is
+// fine; `實際上, 嚴肅地說...` is the cluster tell.
 fn scan_zy4a_false_friends(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue>) {
     // (term, suggested_rephrasing, label).  Auto-fix safe: false.
     const PAIRS: &[(&str, &str, &str)] = &[
@@ -3622,9 +3636,9 @@ fn scan_zy4a_false_friends(text: &str, excluded: &[ByteRange], issues: &mut Vec<
     ];
 
     // Step 1: collect all hits with byte positions and (clause_start,
-    // clause_end) bounds.  A clause is bounded by `，`/`,`/`。`/`；`/`\n`/
-    // start/end of text.  Hits inside an exclusion zone (code, URL, etc.)
-    // are skipped at collection time so they cannot supply spurious
+    // clause_end) bounds. A clause is bounded by `，`/`,`/`。`/`；`/`\n`/
+    // start/end of text. Hits inside an exclusion zone (code, URL, etc.) are
+    // skipped at collection time so they cannot supply spurious
     // companion-evidence to neighboring non-excluded hits.
     struct Hit {
         abs_start: usize,
@@ -3656,8 +3670,8 @@ fn scan_zy4a_false_friends(text: &str, excluded: &[ByteRange], issues: &mut Vec<
         }
     }
 
-    // Step 2: a hit qualifies when its clause contains another false-friend
-    // hit OR the term is followed by a romanized parenthetical gloss (e.g.
+    // Step 2: a hit qualifies when its clause contains another false-friend hit
+    // OR the term is followed by a romanized parenthetical gloss (e.g.
     // `actually`, `basically`) that itself is not inside an exclusion zone.
     for h in &hits {
         let companion = hits.iter().any(|other| {
@@ -3669,12 +3683,13 @@ fn scan_zy4a_false_friends(text: &str, excluded: &[ByteRange], issues: &mut Vec<
         if !(companion || parenthetical_gloss) {
             continue;
         }
+
         // Advisory only (PAIRS is "Auto-fix safe: false"): the suggestions are
-        // context-dependent alternatives, several slash-separated (簡直/真就是),
-        // NOT drop-in replacements. The fixer applies any single non-orthographic
-        // suggestion verbatim (fixer.rs), so emitting one here would inject the
-        // literal alternatives. Keep suggestions empty; surface the rephrasing in
-        // context so lint output still shows it.
+        // context-dependent alternatives, several slash-separated
+        // (簡直/真就是), NOT drop-in replacements. The fixer applies any single
+        // non-orthographic suggestion verbatim (fixer.rs), so emitting one here
+        // would inject the literal alternatives. Keep suggestions empty;
+        // surface the rephrasing in context so lint output still shows it.
         issues.push(
             Issue::new(
                 h.abs_start,
@@ -3692,17 +3707,18 @@ fn scan_zy4a_false_friends(text: &str, excluded: &[ByteRange], issues: &mut Vec<
     }
 }
 
-// Locate the comma-bounded clause containing `pos` (byte offset).
-// Boundaries: `，` / `,` / `。` / `；` / `\n` / start/end.
-// Caller must pass a valid char boundary; debug builds assert this so a
-// future caller passing an interior byte trips an explicit failure.
+// Locate the comma-bounded clause containing `pos` (byte offset). Boundaries:
+// `，` / `,` / `。` / `；` / `\n` / start/end. Caller must pass a valid char
+// boundary; debug builds assert this so a future caller passing an interior
+// byte trips an explicit failure.
 fn clause_bounds(text: &str, pos: usize) -> (usize, usize) {
     debug_assert!(
         pos == text.len() || text.is_char_boundary(pos),
         "clause_bounds requires a char-boundary byte offset"
     );
-    // Backward scan: the most recent boundary before `pos` (exclusive).
-    // The clause begins after that boundary char, or 0 if none.
+
+    // Backward scan: the most recent boundary before `pos` (exclusive). The
+    // clause begins after that boundary char, or 0 if none.
     let start = text[..pos]
         .char_indices()
         .rfind(|&(_, c)| is_clause_boundary_char(c))
@@ -3717,9 +3733,9 @@ fn clause_bounds(text: &str, pos: usize) -> (usize, usize) {
     (start, end)
 }
 
-// Detect a romanized parenthetical gloss `(...)` immediately after a hit.
-// Skips up to 2 whitespace bytes between the hit and `(`.  The contents
-// must contain at least one ASCII letter (`a-zA-Z`) to qualify as English.
+// Detect a romanized parenthetical gloss `(...)` immediately after a hit. Skips
+// up to 2 whitespace bytes between the hit and `(`. The contents must contain
+// at least one ASCII letter (`a-zA-Z`) to qualify as English.
 // Returns false when the gloss span overlaps an exclusion zone (code, URL,
 // inline literal) — those parens are not translation evidence.
 fn has_ascii_parenthetical_after(text: &str, after_byte: usize, excluded: &[ByteRange]) -> bool {
@@ -3743,8 +3759,8 @@ fn has_ascii_parenthetical_after(text: &str, after_byte: usize, excluded: &[Byte
     bytes[i + 1..close].iter().any(|&b| b.is_ascii_alphabetic())
 }
 
-// V13: tense marker overuse — multiple 曾/已/過/了 in one sentence when
-// an explicit date is present.
+// V13: tense marker overuse — multiple 曾/已/過/了 in one sentence when an
+// explicit date is present.
 fn scan_trans_tense_marker(
     text: &str,
     excluded: &[ByteRange],
@@ -3787,9 +3803,7 @@ fn scan_trans_tense_marker(
     }
 }
 
-// =======================================================================
 // Boundary-aware translationese detectors
-// =======================================================================
 //
 //   ZY1b — 之一 paragraph density (register-thresholded)
 //   ZY2b — sentence-bounded EN connective calques (with structural-fix
@@ -3798,25 +3812,24 @@ fn scan_trans_tense_marker(
 //          (register-thresholded)
 //   ZY5  — long pre-modifier 定語堆疊 (register-thresholded)
 //
-// Threshold values (per-domain) flow from
-// `TranslationeseDomain::thresholds()` so `--translationese-domain`
-// register switches actually change firing behavior at scan time.
+// Threshold values (per-domain) flow from `TranslationeseDomain::thresholds()`
+// so `--translationese-domain` register switches actually change firing
+// behavior at scan time.
 
-// Curated abstract-head whitelist for ZY3b extended chain detection.
-// Drawn from the source's nominalization examples + targeted corpus
-// mining.  Each head is a nominalized verb form that translates EN
-// "the X of Y".  Kept finite and explicit (no POS dependency).
+// Curated abstract-head whitelist for ZY3b extended chain detection. Drawn from
+// the source's nominalization examples + targeted corpus mining. Each head is a
+// nominalized verb form that translates EN "the X of Y". Kept finite and
+// explicit (no POS dependency).
 const ZY3B_ABSTRACT_HEADS: &[&str] = &[
     "實施", "分析", "講解", "理解", "認識", "發現", "提升", "下降", "改善", "評估", "探索", "建構",
     "推動", "落實", "形成", "確立", "發展", "建立", "促進", "強化", "深化", "整合", "統合", "落地",
     "規劃", "執行",
 ];
 
-// ZY1b: 之一 paragraph density.  Per-paragraph count of `之一`,
-// thresholded against `DomainThresholds::zy1b_per_200`.  Catches the
-// translation register where every other sentence ends `…之一。` — a
-// strong tell for "one of the most..." over-use that no individual
-// occurrence betrays.
+// ZY1b: 之一 paragraph density. Per-paragraph count of `之一`, thresholded
+// against `DomainThresholds::zy1b_per_200`. Catches the translation register
+// where every other sentence ends `…之一。` — a strong tell for "one of the
+// most..." over-use that no individual occurrence betrays.
 fn scan_zy1b_yi_zhi_density(
     text: &str,
     excluded: &[ByteRange],
@@ -3836,10 +3849,11 @@ fn scan_zy1b_yi_zhi_density(
         if char_count < MIN_CHARS {
             continue;
         }
+
         // Count non-excluded 之一 occurrences AND remember the first
-        // non-excluded byte offset for anchoring the issue.  Anchoring on
-        // a raw `find()` would drop the diagnostic when an excluded span
-        // contains the first 之一 even if the paragraph qualifies.
+        // non-excluded byte offset for anchoring the issue. Anchoring on a raw
+        // `find()` would drop the diagnostic when an excluded span contains the
+        // first 之一 even if the paragraph qualifies.
         let mut count = 0usize;
         let mut first_non_excluded: Option<usize> = None;
         let mut search_from = 0usize;
@@ -3879,18 +3893,18 @@ fn scan_zy1b_yi_zhi_density(
     }
 }
 
-// ZY2b: sentence-bounded EN connective calques.  Same patterns as ZY2a
-// but verifies opener+closer sit in the same sentence — emits a
-// structural-fix suggestion that ZY2a cannot ("drop 因為, keep 所以").
+// ZY2b: sentence-bounded EN connective calques. Same patterns as ZY2a but
+// verifies opener+closer sit in the same sentence — emits a structural-fix
+// suggestion that ZY2a cannot ("drop 因為, keep 所以").
 fn scan_zy2b_sentence_bounded_connectives(
     text: &str,
     excluded: &[ByteRange],
     issues: &mut Vec<Issue>,
     idx: &crate::engine::sentence::BoundaryIndex,
 ) {
-    // (opener, closer, max_chars_between, drop_form, label).
-    // Keep the same distance caps as ZY2a so the sentence-bounded variant
-    // does not reintroduce long-distance false positives.
+    // (opener, closer, max_chars_between, drop_form, label). Keep the same
+    // distance caps as ZY2a so the sentence-bounded variant does not
+    // reintroduce long-distance false positives.
     const PATTERNS: &[(&str, &str, usize, &str, &str)] = &[
         ("因為", "所以", 40, "因為", "因為…所以"),
         ("雖然", "但是", 40, "雖然", "雖然…但是"),
@@ -3906,8 +3920,8 @@ fn scan_zy2b_sentence_bounded_connectives(
         let s = &text[sent.byte_start..sent.byte_end];
         for &(opener, closer, max_between, drop_form, label) in PATTERNS {
             // Iterate every opener occurrence inside the sentence: a guarded
-            // 當-prefix hit (e.g. 當地) early in the sentence must not block
-            // a real 當…的時候 connective later in the same sentence.
+            // 當-prefix hit (e.g. 當地) early in the sentence must not block a
+            // real 當…的時候 connective later in the same sentence.
             let mut search_from = 0usize;
             while let Some(rel_pos) = s[search_from..].find(opener) {
                 let open_pos = search_from + rel_pos;
@@ -3929,10 +3943,12 @@ fn scan_zy2b_sentence_bounded_connectives(
                 let close_abs_end = sent.byte_start + close_rel + closer.len();
                 let abs_open = sent.byte_start + open_pos;
                 if !is_excluded(abs_open, close_abs_end, excluded) {
-                    // The suggestion must be a valid REPLACEMENT (the fixer applies suggestions[0]),
-                    // not a human-readable instruction. drop_form is always the opener or the closer
-                    // of the matched span, so the fix is the span with that one end removed
-                    // ("keep the other end"). The explanation lives in the context, not the suggestion.
+                    // The suggestion must be a valid REPLACEMENT (the fixer
+                    // applies suggestions[0]), not a human-readable
+                    // instruction. drop_form is always the opener or the closer
+                    // of the matched span, so the fix is the span with that one
+                    // end removed ("keep the other end"). The explanation lives
+                    // in the context, not the suggestion.
                     let matched = &text[abs_open..close_abs_end];
                     let fixed = if drop_form == opener {
                         matched.strip_prefix(drop_form).unwrap_or(matched)
@@ -3953,19 +3969,20 @@ fn scan_zy2b_sentence_bounded_connectives(
                         )),
                     );
                 }
-                // Advance past the matched closer so we don't re-fire on its tail.
+
+                // Advance past the matched closer so we don't re-fire on its
+                // tail.
                 search_from = close_abs_end - sent.byte_start;
             }
         }
     }
 }
 
-// ZY3b: extended nominalization chain — ≥N consecutive
-// `<head>的<head>的<head>` shapes within one sentence, where every head
-// matches `ZY3B_ABSTRACT_HEADS`.  N comes from the per-domain
-// `zy3b_chain_min` threshold.  Different from ZY3a (which counts any
-// of nine specific verb-noun heads in a clause); ZY3b requires the
-// recursive shape with ≥N levels.
+// ZY3b: extended nominalization chain — ≥N consecutive `<head>的<head>的<head>`
+// shapes within one sentence, where every head matches `ZY3B_ABSTRACT_HEADS`. N
+// comes from the per-domain `zy3b_chain_min` threshold. Different from ZY3a
+// (which counts any of nine specific verb-noun heads in a clause); ZY3b
+// requires the recursive shape with ≥N levels.
 fn scan_zy3b_nominalization_chain(
     text: &str,
     excluded: &[ByteRange],
@@ -3977,8 +3994,10 @@ fn scan_zy3b_nominalization_chain(
 
     for sent in &idx.sentences {
         let s = &text[sent.byte_start..sent.byte_end];
-        // Walk every position; at each, see how many `<head>的<head>(的<head>)*`
-        // levels chain forward, where every head matches the whitelist.
+
+        // Walk every position; at each, see how many
+        // `<head>的<head>(的<head>)*` levels chain forward, where every head
+        // matches the whitelist.
         let mut search_from = 0usize;
         while let Some((head_rel, head)) = find_first_abstract_head_at_or_after(s, search_from) {
             let (chain_depth, chain_end) = walk_zy3b_chain(s, head_rel);
@@ -4010,10 +4029,9 @@ fn scan_zy3b_nominalization_chain(
     }
 }
 
-// Longest ZY3b head matching at the start of `s` (or `None`).  Shared
-// between the chain walker and the leftmost-longest finder so both
-// agree on which head wins when a future ZY3B_ABSTRACT_HEADS entry has
-// another head as a prefix.
+// Longest ZY3b head matching at the start of `s` (or `None`). Shared between
+// the chain walker and the leftmost-longest finder so both agree on which head
+// wins when a future ZY3B_ABSTRACT_HEADS entry has another head as a prefix.
 fn longest_zy3b_head_at(s: &str) -> Option<&'static str> {
     ZY3B_ABSTRACT_HEADS
         .iter()
@@ -4022,11 +4040,12 @@ fn longest_zy3b_head_at(s: &str) -> Option<&'static str> {
         .copied()
 }
 
-// Locate the first abstract-head occurrence at or after `from` within
-// `s`.  Returns (head_byte_start, head) of the longest matching head at
-// the earliest position.  Performs a leftmost-longest match by trying
-// each head and picking the earliest start, with `longest_zy3b_head_at`
-// breaking ties (cheap given the finite head list, ~25 entries).
+// Locate the first abstract-head occurrence at or after `from` within `s`.
+//
+// Returns (head_byte_start, head) of the longest matching head at the earliest
+// position. Performs a leftmost-longest match by trying each head and picking
+// the earliest start, with `longest_zy3b_head_at` breaking ties (cheap given
+// the finite head list, ~25 entries).
 fn find_first_abstract_head_at_or_after(s: &str, from: usize) -> Option<(usize, &'static str)> {
     let abs_pos = ZY3B_ABSTRACT_HEADS
         .iter()
@@ -4037,9 +4056,9 @@ fn find_first_abstract_head_at_or_after(s: &str, from: usize) -> Option<(usize, 
 
 // Walk the chain starting at byte offset `start` (which must point at an
 // abstract head): returns (depth, end_byte) where depth counts how many
-// `<head>的<head>` levels chain forward (≥1) and end_byte is the byte
-// offset just past the last head.  Stops at the first 的 not followed by
-// another whitelisted head.
+// `<head>的<head>` levels chain forward (≥1) and end_byte is the byte offset
+// just past the last head. Stops at the first 的 not followed by another
+// whitelisted head.
 fn walk_zy3b_chain(s: &str, start: usize) -> (usize, usize) {
     let mut depth = 0usize;
     let mut cursor = start;
@@ -4049,11 +4068,11 @@ fn walk_zy3b_chain(s: &str, start: usize) -> (usize, usize) {
         };
         depth += 1;
         cursor += head.len();
-        // Only consume the trailing `的` if another whitelisted head
-        // follows it.  Otherwise the chain ends at the head we just
-        // matched — anchoring the issue span past an orphan `的` would
-        // mis-highlight the diagnostic and break the "end_byte = just
-        // past the last head" invariant.
+
+        // Only consume the trailing `的` if another whitelisted head follows
+        // it. Otherwise the chain ends at the head we just matched — anchoring
+        // the issue span past an orphan `的` would mis-highlight the diagnostic
+        // and break the "end_byte = just past the last head" invariant.
         if !s[cursor..].starts_with('的') {
             return (depth, cursor);
         }
@@ -4065,11 +4084,10 @@ fn walk_zy3b_chain(s: &str, start: usize) -> (usize, usize) {
     }
 }
 
-// ZY5: long pre-modifier 定語堆疊 (Red Flag 3).
-// Parser-free heuristic: within one sentence, find each maximal span
-// bounded by `，、。；：` (no internal commas) that ends in `的<noun>`.
-// Flag when char-length ≥`zy5_min_chars` AND the span contains
-// ≥`zy5_min_de_count` 的 occurrences.
+// ZY5: long pre-modifier 定語堆疊 (Red Flag 3). Parser-free heuristic: within
+// one sentence, find each maximal span bounded by `，、。；：` (no internal
+// commas) that ends in `的<noun>`. Flag when char-length ≥`zy5_min_chars` AND
+// the span contains ≥`zy5_min_de_count` 的 occurrences.
 fn scan_zy5_long_premodifier(
     text: &str,
     excluded: &[ByteRange],
@@ -4108,6 +4126,68 @@ fn scan_zy5_long_premodifier(
         emit(span_start, s.len());
     }
 }
+
+/// True if `s` contains an adverb or auxiliary that opens a predicate.
+///
+/// The multi-character markers are unambiguous. A single-character one counts
+/// unless it is part of a listed word, because these characters are also
+/// ordinary morphemes: 成就 and 人才 end with one, 就地 and 便利 start with
+/// one.
+///
+/// The list is curated and will never be complete, and that is the deliberate
+/// choice. A missing entry costs one suppression that should have fired, which
+/// is a quiet miss on an advisory rule. The alternative, testing the character
+/// after the marker against a set of predicate openers, fails the other way:
+/// these markers precede ordinary verbs and manner adverbs far more often than
+/// function words (就開始, 就變成, 就徹底, 卻依然, 才慢慢), so any closed set
+/// misses most of them and the false positive this guard exists to stop comes
+/// straight back. For a linter the quiet miss is the right failure.
+fn opens_a_predicate(s: &str) -> bool {
+    // Every listed word is two characters with the marker as its head or its
+    // tail, so the mask is two lookups: the pair starting at the marker, and
+    // the pair ending with it.
+    const CHAR_LEN: usize = '就'.len_utf8();
+    const WORD_LEN: usize = 2 * CHAR_LEN;
+    let is_word = |window: Option<&str>| window.is_some_and(|w| MARKER_WORDS.contains(&w));
+
+    PREDICATE_MARKERS.iter().any(|marker| {
+        s.match_indices(marker).any(|(at, _)| {
+            let tail = s.get(at..at + WORD_LEN);
+            let head = at
+                .checked_sub(CHAR_LEN)
+                .and_then(|p| s.get(p..p + WORD_LEN));
+            !is_word(head) && !is_word(tail)
+        })
+    })
+}
+
+// Ordinary words containing a single-char marker, in either position. Not
+// exhaustive and cannot be: these are productive morphemes. Adding a missing
+// entry costs one suppression, so the list grows on evidence.
+const MARKER_WORDS: &[&str] = &[
+    // 就. Absent on purpose: 就地, 就此, 就算, 就近 are adverbs or a
+    // conjunction, so they do open a predicate (城市就此吞噬他的生活).
+    "成就", "造就", "遷就", "將就", "俯就", "屈就", "就業", "就讀", "就職", "就緒", "就醫", "就學",
+    "就寢", "就任", "就座", "就位", "就診",
+    // 才. Absent on purpose: 才能 reads as 才 + 能 ("only then can") far more
+    // often than as the noun. Across 12 MB of zh-TW prose every occurrence
+    // inside a ZY5-shaped span was adverbial, so masking it would trade ten
+    // false positives for no real detection.
+    "人才", "天才", "剛才", "奴才", "庸才", "英才", "秀才", "方才", "幹才", "口才", "求才", "成才",
+    "怪才", "奇才", "專才", "才華", "才幹", "才智", "才氣", "才藝", // 便
+    "方便", "順便", "簡便", "隨便", "即便", "輕便", "大便", "小便", "糞便", "不便", "以便", "便利",
+    "便當", "便宜", "便條", "便捷", "便民", "便箋",
+    // 卻.  Absent on purpose: 除卻 and 省卻 are verbs.
+    "忘卻", "退卻", "冷卻", "推卻", "了卻", "拋卻", "卻步", // 也
+    "也許",
+];
+
+/// Adverbs and auxiliaries that open a predicate.  See `opens_a_predicate`.
+/// 要 and 能 are excluded because they would match inside 需要 and 才能, which
+/// appear in genuine pre-modifier chains.
+const PREDICATE_MARKERS: &[&str] = &[
+    "也", "就", "才", "卻", "便", "可以", "應該", "必須", "已經", "正在",
+];
 
 #[allow(clippy::too_many_arguments)]
 fn emit_zy5_span_if_qualifies(
@@ -4173,6 +4253,7 @@ fn emit_zy5_span_if_qualifies(
 
         let mut de_count = 0usize;
         let mut candidate_from = 0usize;
+        let mut de_bounds: Option<(usize, usize)> = None;
         while let Some(inner_p) = candidate[candidate_from..].find('的') {
             let rel_inner = candidate_from + inner_p;
             let abs_inner = sent_offset + span_start + rel_inner;
@@ -4180,9 +4261,16 @@ fn emit_zy5_span_if_qualifies(
             if is_excluded(abs_inner, abs_inner + de_len, excluded) {
                 continue;
             }
+            let bounds = de_bounds.get_or_insert((rel_inner, rel_inner));
+            bounds.1 = rel_inner;
             de_count += 1;
         }
         if de_count < min_de {
+            continue;
+        }
+        // A predicate between the first and last 的 means separate phrases.
+        let between = de_bounds.and_then(|(first, last)| candidate.get(first + de_len..last));
+        if between.is_some_and(opens_a_predicate) {
             continue;
         }
 
@@ -4255,8 +4343,8 @@ fn line_iter(text: &str) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
-// Entry point: run all structural AI pattern checks.
-// Gated by ProfileConfig::ai_structural_patterns.
+// Entry point: run all structural AI pattern checks. Gated by
+// ProfileConfig::ai_structural_patterns.
 pub(crate) fn scan_ai_structural(
     text: &str,
     excluded: &[ByteRange],
@@ -4271,10 +4359,10 @@ pub(crate) fn scan_ai_structural(
     scan_ai_zero_width(text, excluded, issues);
 }
 
-// Structural AI pattern detectors that require sentence/paragraph
-// boundary index.  S1 tricolon, S2 negative parallel, S3 formulaic
-// section endings, S4 mechanical bullets, S5 excessive bold, S6 em-dash
-// overuse, S7 formulaic despite, S8 false ranges, V2 hedging density.
+// Structural AI pattern detectors that require sentence/paragraph boundary
+// index. S1 tricolon, S2 negative parallel, S3 formulaic section endings, S4
+// mechanical bullets, S5 excessive bold, S6 em-dash overuse, S7 formulaic
+// despite, S8 false ranges, V2 hedging density.
 pub(crate) fn scan_ai_structural_phase2(
     text: &str,
     excluded: &[ByteRange],
@@ -4294,8 +4382,8 @@ pub(crate) fn scan_ai_structural_phase2(
     scan_ai_repeated_parallel_slogan(text, excluded, issues, boundary_index);
 }
 
-// Lexical translationese detectors that need no sentence/paragraph index.
-// EN→ZH calque pass:
+// Lexical translationese detectors that need no sentence/paragraph index. EN→ZH
+// calque pass:
 //   ZY1a 之一 superlative calque, ZY2a EN connective bounded calques,
 //   ZY3a finite nominalization patterns, ZY4a false-friend lexical pairs.
 pub(crate) fn scan_translationese_lexical(
@@ -4309,11 +4397,10 @@ pub(crate) fn scan_translationese_lexical(
     scan_zy4a_false_friends(text, excluded, issues);
 }
 
-// Syntactic translationese detectors that require
-// sentence/paragraph boundary index.  G1 passive density,
-// G2 abstract subject, G3/G4 displaced conditionals, G8 pronoun overuse,
-// Y1 copula+classifier, Y2 的/地 confusion, S3 的的不休, V7 地 overuse,
-// V13 tense markers.
+// Syntactic translationese detectors that require sentence/paragraph boundary
+// index. G1 passive density, G2 abstract subject, G3/G4 displaced conditionals,
+// G8 pronoun overuse, Y1 copula+classifier, Y2 的/地 confusion, S3 的的不休, V7
+// 地 overuse, V13 tense markers.
 pub(crate) fn scan_translationese_syntactic(
     text: &str,
     excluded: &[ByteRange],
@@ -4331,7 +4418,7 @@ pub(crate) fn scan_translationese_syntactic(
     scan_trans_tense_marker(text, excluded, issues, boundary_index);
 }
 
-// Boundary-aware translationese dispatcher.  Runs detectors that need
+// Boundary-aware translationese dispatcher. Runs detectors that need
 // sentence/paragraph index AND a per-domain threshold table:
 //   ZY1b 之一 paragraph density,
 //   ZY2b sentence-bounded EN connectives,
@@ -4350,8 +4437,8 @@ pub(crate) fn scan_translationese_indexed(
     scan_zy5_long_premodifier(text, excluded, issues, boundary_index, domain);
 }
 
-// Entry point for AI writing detection grammar checks.
-// Gated by ProfileConfig::ai_semantic_safety — NOT called from scan_grammar.
+// Entry point for AI writing detection grammar checks. Gated by
+// ProfileConfig::ai_semantic_safety — NOT called from scan_grammar.
 pub(crate) fn scan_ai_grammar(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue>) {
     scan_ai_semantic_safety(text, excluded, issues);
     scan_ai_copula_avoidance(text, excluded, issues);
@@ -4362,9 +4449,9 @@ pub(crate) fn scan_ai_grammar(text: &str, excluded: &[ByteRange], issues: &mut V
 
 // Main entry point: run all grammar checks via AC prefilter.
 //
-// A single Aho-Corasick pass finds all trigger patterns, then dispatches
-// each hit to the appropriate validator.  This is O(N + H) instead of the
-// old O(P*N) where P = total patterns across 8 scanners.
+// A single Aho-Corasick pass finds all trigger patterns, then dispatches each
+// hit to the appropriate validator. This is O(N + H) instead of the old O(P*N)
+// where P = total patterns across 8 scanners.
 pub(crate) fn scan_grammar(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue>) {
     let (ac, metadata) = grammar_ac();
 
@@ -4434,16 +4521,14 @@ mod tests {
         issues
     }
 
-    // =======================================================================
-    // Boundary-aware detector panic-safety regression tests
-    // (from Codex/Gemini review)
-    // =======================================================================
+    // Boundary-aware detector panic-safety regression tests (from Codex/Gemini
+    // review)
 
     #[test]
     fn tricolon_with_repeated_spans_does_not_panic() {
         // Codex high #1: 乙、甲、甲、乙 used to confuse find()-based offset
-        // calculation when the same span repeats.  Should not panic and
-        // should detect the central tricolon (甲、甲).
+        // calculation when the same span repeats. Should not panic and should
+        // detect the central tricolon (甲、甲).
         let text = "乙、甲、甲、乙、丙。";
         let _ = scan_phase2(text);
     }
@@ -4457,8 +4542,8 @@ mod tests {
 
     #[test]
     fn passive_density_short_paragraph_does_not_panic() {
-        // Codex high #3 + #5: short ASCII-leading paragraphs used to panic
-        // when slicing first-N bytes.
+        // Codex high #3 + #5: short ASCII-leading paragraphs used to panic when
+        // slicing first-N bytes.
         let text = "A被B。\n\n中文段落以「被」字開頭，被廣泛認為是好的。";
         let _ = scan_phase2(text);
     }
@@ -4520,9 +4605,9 @@ mod tests {
 
     #[test]
     fn mechanical_bullets_detects_multi_digit_list() {
-        // cubic review: 10+ item list must still be detected.  All items use
-        // **bold** prefix — the detector should fire on the full set, not
-        // cut off at single-digit markers.
+        // cubic review: 10+ item list must still be detected. All items use
+        // **bold** prefix — the detector should fire on the full set, not cut
+        // off at single-digit markers.
         let mut text = String::new();
         for i in 1..=12 {
             text.push_str(&format!("{i}. **項目** 內容文字。\n"));
@@ -4552,9 +4637,7 @@ mod tests {
         );
     }
 
-    // =======================================================================
     // Phase 1: plumbing — IssueType::Grammar fundamentals
-    // =======================================================================
 
     #[test]
     fn grammar_issue_type_serde_round_trip() {
@@ -4614,9 +4697,7 @@ mod tests {
         assert!(scan(clean).is_empty());
     }
 
-    // =======================================================================
     // Phase 2b: A-not-A + 嗎 — all 14 patterns × with/without 嗎
-    // =======================================================================
 
     // -- with 嗎 (should flag) --
 
@@ -4833,9 +4914,7 @@ mod tests {
         assert_eq!(issues.len(), 1);
     }
 
-    // =======================================================================
     // Phase 2a: 和-connecting-clauses
-    // =======================================================================
 
     #[test]
     fn he_verb_suffix_le_with_pronoun() {
@@ -4910,9 +4989,7 @@ mod tests {
         assert_eq!(issues[0].suggestions[0], "，");
     }
 
-    // =======================================================================
     // Phase 2a: 是+adjective copula
-    // =======================================================================
 
     #[test]
     fn bare_shi_disyllabic_adj() {
@@ -5051,9 +5128,7 @@ mod tests {
         assert_eq!(issues.len(), 1);
     }
 
-    // =======================================================================
     // Phase 2a: redundant preposition
-    // =======================================================================
 
     #[test]
     fn redundant_prep_taolun_guanyu() {
@@ -5129,9 +5204,7 @@ mod tests {
         assert!(issues[0].found.contains("分析關於"));
     }
 
-    // =======================================================================
     // Extended A-not-A patterns (single-char verbs)
-    // =======================================================================
 
     #[test]
     fn a_not_a_zuo_bu_zuo_with_ma() {
@@ -5185,9 +5258,7 @@ mod tests {
         assert!(scan("你吃不吃？").is_empty());
     }
 
-    // =======================================================================
     // Bureaucratic nominalization (進行/加以/予以 + verb)
-    // =======================================================================
 
     #[test]
     fn bureaucratic_jinxing_taolun() {
@@ -5277,9 +5348,7 @@ mod tests {
         assert_eq!(issues.len(), 2);
     }
 
-    // =======================================================================
     // Verbose action prefix (做出/作出 + abstract noun)
-    // =======================================================================
 
     #[test]
     fn verbose_zuochu_jueding() {
@@ -5331,9 +5400,7 @@ mod tests {
         assert!(scan("他做出了很多決定").is_empty());
     }
 
-    // =======================================================================
     // Double attribution (根據...顯示/指出)
-    // =======================================================================
 
     #[test]
     fn double_attribution_genju_xianshi() {
@@ -5415,7 +5482,8 @@ mod tests {
 
     #[test]
     fn double_attribution_markdown_link_skipped() {
-        // 根據[link text with 說明](url) — verb inside markdown link, not attribution.
+        // 根據[link text with 說明](url) — verb inside markdown link, not
+        // attribution.
         assert!(scan("根據[維護者設計說明](https://example.com)，新版核心改動很大").is_empty());
     }
 
@@ -5443,9 +5511,7 @@ mod tests {
         assert!(scan("研究顯示成果很好").is_empty());
     }
 
-    // =======================================================================
     // Phase 2c: 對X進行Y — fronted-object bureaucratic padding
-    // =======================================================================
 
     #[test]
     fn dui_jinxing_basic() {
@@ -5560,8 +5626,8 @@ mod tests {
     fn dui_jinxing_does_not_clash_with_bureaucratic() {
         // Both scanners should fire independently:
         // - scan_bureaucratic_nominalization catches "進行分析" → "分析"
-        // - scan_dui_jinxing catches "對資料進行分析" → "分析資料"
-        // The broader one (dui_jinxing) covers the full span.
+        // - scan_dui_jinxing catches "對資料進行分析" → "分析資料" The broader
+        // one (dui_jinxing) covers the full span.
         let issues = scan("對資料進行分析");
         let dui = issues
             .iter()
@@ -5572,9 +5638,7 @@ mod tests {
         assert_eq!(bureau, 1, "bureaucratic should also fire");
     }
 
-    // =======================================================================
     // Exclusion zone handling
-    // =======================================================================
 
     #[test]
     fn excluded_range_suppresses_a_not_a() {
@@ -5623,9 +5687,7 @@ mod tests {
         assert_eq!(issues.len(), 1);
     }
 
-    // =======================================================================
     // Multiple issues in the same text
-    // =======================================================================
 
     #[test]
     fn multiple_grammar_issues_in_one_text() {
@@ -5644,9 +5706,7 @@ mod tests {
         assert_eq!(issues.len(), 2);
     }
 
-    // =======================================================================
     // False-positive guards — natural zh-TW text that should NOT trigger
-    // =======================================================================
 
     #[test]
     fn natural_question_with_ma_only() {
@@ -5716,9 +5776,7 @@ mod tests {
         assert!(scan("根據合約規定，雙方應遵守以下條款。").is_empty());
     }
 
-    // =======================================================================
     // AI writing detection
-    // =======================================================================
 
     fn scan_ai(text: &str) -> Vec<Issue> {
         let mut issues = Vec::new();
@@ -5942,8 +6000,8 @@ mod tests {
 
     #[test]
     fn ai_density_below_threshold_no_issue() {
-        // ~2600 chars of filler with 1 occurrence of tracked phrase.
-        // 1 / 2.6 ≈ 0.38/千字, below threshold 0.5 for '更重要的是'.
+        // ~2600 chars of filler with 1 occurrence of tracked phrase. 1 / 2.6 ≈
+        // 0.38/千字, below threshold 0.5 for '更重要的是'.
         let mut text = "這是一段正常的中文技術文章。".repeat(200);
         text.push_str("更重要的是，我們需要考慮效能。");
         assert!(text.chars().count() >= 2000);
@@ -6196,7 +6254,9 @@ mod tests {
     #[test]
     fn ai_zero_width_excluded() {
         let text = "正常\u{200B}文字";
-        // Exclude the zero-width space (byte offset 6 for 2 CJK chars = 6 bytes).
+
+        // Exclude the zero-width space (byte offset 6 for 2 CJK chars = 6
+        // bytes).
         let excluded = vec![ByteRange { start: 6, end: 9 }];
         let mut issues = Vec::new();
         scan_ai_structural(text, &excluded, &mut issues, 1.0);
@@ -6346,8 +6406,8 @@ mod tests {
 
     #[test]
     fn ai_same_paragraph_slogan_repetition_does_not_trigger() {
-        // Same parallel sentence repeated within one paragraph is ordinary 排比,
-        // not the cross-section 金句疊句 tic — must stay silent.
+        // Same parallel sentence repeated within one paragraph is ordinary
+        // 排比, not the cross-section 金句疊句 tic — must stay silent.
         let text = "制度不是牆，而是橋。制度不是牆，而是橋。我們要繼續努力。";
         let issues = scan_phase2(text);
         assert!(
@@ -6526,7 +6586,8 @@ mod tests {
     #[test]
     fn structural_detectors_skip_excluded_paragraphs() {
         // Build text with a list-heavy "paragraph" that is fully excluded.
-        // Without exclusion it would trigger list_density; with exclusion it should not.
+        // Without exclusion it would trigger list_density; with exclusion it
+        // should not.
         let mut text = String::new();
         let code_start = 0;
         // Fake code block paragraph with list items.
@@ -6555,12 +6616,11 @@ mod tests {
         );
     }
 
-    // =======================================================================
     // Differential testing: AC prefilter vs. legacy per-scanner path
-    // =======================================================================
 
     /// Compare AC-based scan_grammar output against legacy per-scanner output.
-    /// Issues may arrive in different order, so we sort by (offset, found) before comparing.
+    /// Issues may arrive in different order, so we sort by (offset, found)
+    /// before comparing.
     fn assert_ac_matches_legacy(text: &str) {
         let mut ac_issues = Vec::new();
         scan_grammar(text, &[], &mut ac_issues);
@@ -6656,13 +6716,12 @@ mod tests {
 
     #[test]
     fn differential_dui_jinxing_with_bureaucratic() {
-        // Text triggers both DuiJinxing (對...進行) and BureaucraticNominalization (進行...).
+        // Text triggers both DuiJinxing (對...進行) and
+        // BureaucraticNominalization (進行...).
         assert_ac_matches_legacy("對資料進行分析的報告");
     }
 
-    // =======================================================================
     // EN→ZH calque detectors — substring-only lexical pass.
-    // =======================================================================
 
     fn scan_lex(text: &str) -> Vec<Issue> {
         let mut issues = Vec::new();
@@ -6687,16 +6746,17 @@ mod tests {
 
     #[test]
     fn zy1a_fires_on_jiwei_variant() {
-        // calque_superlative_zy1_bad_002: 極為...之一 variant.  Use an event
-        // noun (成就) rather than a person noun so the biographical
-        // guard does not suppress this case.
+        // calque_superlative_zy1_bad_002: 極為...之一 variant. Use an event
+        // noun (成就) rather than a person noun so the biographical guard does
+        // not suppress this case.
         let text = "這是極為重要的科學成就之一。";
         assert!(has_context_with(&scan_lex(text), "ZY1a"));
     }
 
     #[test]
     fn zy1a_fires_on_long_modifier_within_window() {
-        // calque_superlative_zy1_bad_003: pattern survives an internal modifier.
+        // calque_superlative_zy1_bad_003: pattern survives an internal
+        // modifier.
         let text = "這是當代最具代表性的科學成就之一。";
         assert!(has_context_with(&scan_lex(text), "ZY1a"));
     }
@@ -6823,7 +6883,8 @@ mod tests {
 
     #[test]
     fn zy3a_passes_on_single_nominalization() {
-        // calque_nominalization_zy3_good_001: a single 的+nominalization is fine.
+        // calque_nominalization_zy3_good_001: a single 的+nominalization is
+        // fine.
         let text = "策略的實施很順利。";
         assert!(!has_context_with(&scan_lex(text), "ZY3a"));
     }
@@ -6881,9 +6942,9 @@ mod tests {
     #[test]
     fn zy4a_ignores_companion_inside_excluded_zone() {
         // Codex review: a false-friend hit inside an exclusion zone (e.g.
-        // inline code) must not supply companion-evidence to a non-excluded
-        // hit in the same clause.  Range [0, 10) covers `實際上` so the
-        // remaining `基本上` is alone outside the zone.
+        // inline code) must not supply companion-evidence to a non-excluded hit
+        // in the same clause. Range [0, 10) covers `實際上` so the remaining
+        // `基本上` is alone outside the zone.
         let text = "實際上基本上每個人都同意。";
         let mut issues = Vec::new();
         let excluded: &[ByteRange] = &[ByteRange {
@@ -6891,6 +6952,7 @@ mod tests {
             end: "實際上".len(),
         }];
         scan_translationese_lexical(text, excluded, &mut issues);
+
         // The remaining 基本上 should NOT fire because its only same-clause
         // companion (實際上) is now excluded.
         assert!(
@@ -6903,8 +6965,8 @@ mod tests {
 
     #[test]
     fn zy4a_parenthetical_gloss_inside_excluded_zone_does_not_qualify() {
-        // Codex review: parenthetical gloss inside an exclusion zone must
-        // not count as translation evidence.
+        // Codex review: parenthetical gloss inside an exclusion zone must not
+        // count as translation evidence.
         let text = "字面上 (literally) 我也同意。";
         // Mark the parenthetical gloss as excluded.
         let paren_start = text.find('(').unwrap();
@@ -6962,9 +7024,7 @@ mod tests {
         let _ = scan_lex(text);
     }
 
-    // =======================================================================
     // Boundary-aware translationese detectors.
-    // =======================================================================
 
     fn scan_indexed(
         text: &str,
@@ -7013,9 +7073,9 @@ mod tests {
 
     #[test]
     fn zy1b_register_switch_changes_firing() {
-        // 3 之一 in ~250-char paragraph → density ~2.4/200.  Above
-        // Literary threshold (1.0/200) but below Technical (3.0/200).
-        // Natural prose padding without further 之一 occurrences.
+        // 3 之一 in ~250-char paragraph → density ~2.4/200. Above Literary
+        // threshold (1.0/200) but below Technical (3.0/200). Natural prose
+        // padding without further 之一 occurrences.
         let body = "他是領域裡的創新者，這項研究是當代成就，他在學術圈\
                     地位崇高，這個團隊也是行業領頭羊。整體來說這篇論文\
                     是經典代表之一，這個觀點是少數派論述之一，未來研究\
@@ -7066,9 +7126,9 @@ mod tests {
 
     #[test]
     fn zy2b_finds_real_dang_after_skipped_dangdi() {
-        // Codex review: a guarded 當-prefix word (當地) early in a
-        // sentence must not block a real 當…的時候 connective later in
-        // the same sentence.  Both opener occurrences must be examined.
+        // Codex review: a guarded 當-prefix word (當地) early in a sentence
+        // must not block a real 當…的時候 connective later in the same
+        // sentence. Both opener occurrences must be examined.
         let text = "他在當地一直工作著，當我抵達總部的時候才終於和他見面。";
         let issues = scan_indexed(
             text,
@@ -7093,10 +7153,10 @@ mod tests {
 
     #[test]
     fn zy1b_anchor_skips_excluded_first_hit() {
-        // Codex review: ZY1b's anchor must point at the first
-        // NON-excluded 之一, not the first raw substring hit.  When an
-        // excluded zone covers the first hit but the paragraph still
-        // qualifies, the issue must still emit (anchored elsewhere).
+        // Codex review: ZY1b's anchor must point at the first NON-excluded
+        // 之一, not the first raw substring hit. When an excluded zone covers
+        // the first hit but the paragraph still qualifies, the issue must still
+        // emit (anchored elsewhere).
         let body = "他是領域裡的創新者之一，這項研究是當代成就，他在學術圈\
                     地位崇高，這個團隊也是行業領頭羊。整體來說這篇論文\
                     是經典代表之一，這個觀點是少數派論述之一，未來研究\
@@ -7173,20 +7233,20 @@ mod tests {
 
     #[test]
     fn zy3b_chain_does_not_consume_orphan_trailing_de() {
-        // Gemini + Codex review: walk_zy3b_chain must not include a
-        // trailing 的 in the emitted span when no whitelisted head
-        // follows.  Walker invariants (substring-relative byte offsets;
-        // each CJK char is 3 bytes):
+        // Gemini + Codex review: walk_zy3b_chain must not include a trailing 的
+        // in the emitted span when no whitelisted head follows. Walker
+        // invariants (substring-relative byte offsets; each CJK char is 3
+        // bytes):
         //   walk_zy3b_chain("改善的提升的非詞", 0) = (2, 15)
         //     — cursor lands just past 提升 (byte 15), not past the
         //     orphan 的 at byte 18.
         //   walk_zy3b_chain("改善的提升的發現的非詞", 0) = (3, 24)
         //     — cursor lands just past 發現 (byte 24), not past the
         //     orphan 的 at byte 27.
-        // We exercise the second case end-to-end by running the full
-        // detector and checking the emitted issue's `found` text does
-        // not end in 的.  The depth-2 case can't be checked end-to-end
-        // because it falls below the default chain_min=3 threshold.
+        // We exercise the second case end-to-end by running the full detector
+        // and checking the emitted issue's `found` text does not end in 的. The
+        // depth-2 case can't be checked end-to-end because it falls below the
+        // default chain_min=3 threshold.
         let text = "他完成改善的提升的發現的非詞工作。";
         let issues = scan_indexed(
             text,
@@ -7221,6 +7281,85 @@ mod tests {
             crate::engine::translationese_score::TranslationeseDomain::General,
         );
         assert!(fires(&issues, "ZY5"), "expected ZY5: {issues:?}");
+    }
+
+    fn scan_general(text: &str) -> Vec<Issue> {
+        scan_indexed(
+            text,
+            crate::engine::translationese_score::TranslationeseDomain::General,
+        )
+    }
+
+    #[test]
+    fn zy5_predicate_guard_covers_ordinary_verbs_and_adverbs() {
+        // These markers precede lexical verbs and manner adverbs far more often
+        // than function words, so the guard cannot key on what follows them.
+        for word in [
+            "就開始",
+            "就變成",
+            "就徹底",
+            "就永遠",
+            "就逐漸",
+            "就此",
+            "就算",
+            "卻依然",
+            "也很快",
+            "才慢慢",
+            "便迅速",
+            "就會",
+            "就要",
+            "就被",
+        ] {
+            let text = format!("那個看起來十分陌生的城市{word}吞噬他熟悉的日常生活。");
+            let issues = scan_general(&text);
+            assert!(
+                !fires(&issues, "ZY5"),
+                "unexpected ZY5 for {word}: {issues:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn zy5_passes_when_a_predicate_separates_the_de_phrases() {
+        // 16 chars, 2 的, comma-free, but 也能 opens a predicate between them,
+        // so 每週的檢討會議 and 真正的瓶頸 modify different heads. This was a
+        // live false positive in tests/corpus/native-zh-tw.json.
+        let text = "每週的檢討會議也能聚焦真正的瓶頸。";
+        let issues = scan_general(text);
+        assert!(!fires(&issues, "ZY5"), "unexpected ZY5: {issues:?}");
+    }
+
+    #[test]
+    fn marker_words_are_all_two_characters() {
+        // opens_a_predicate masks with two fixed-width window lookups, so a
+        // longer entry would be silently ignored rather than masking anything.
+        for word in MARKER_WORDS {
+            assert_eq!(
+                word.chars().count(),
+                2,
+                "{word} must be two characters for the window mask to see it"
+            );
+        }
+    }
+
+    #[test]
+    fn zy5_predicate_guard_ignores_markers_inside_words() {
+        // The marker may sit at either end of an ordinary word: 成就 and 人才
+        // end with one, 便利 and 就業 start with one. None of them opens a
+        // predicate, so all of these stay stacked pre-modifiers and must fire.
+        for text in [
+            "那是一個工匠面對自己的成就被命運直接抹除的瞬間。",
+            "這乃是一個從不細看自己所寫之物的人才會犯下的錯誤。",
+            "為了兼顧系統的便利性與穩定性的整體平衡設計。",
+            "這是一份針對長期投入的就業輔導方案累積的完整報告。",
+            "憑著他的才華洋溢加上長年累積的舞台經驗。",
+        ] {
+            let issues = scan_general(text);
+            assert!(
+                fires(&issues, "ZY5"),
+                "expected ZY5 for {text:?}: {issues:?}"
+            );
+        }
     }
 
     #[test]
@@ -7258,8 +7397,8 @@ mod tests {
 
     #[test]
     fn zy5_passes_in_technical_domain_at_borderline() {
-        // 18-char span — exactly at Technical threshold (zy5_min_chars=18)
-        // but only 17 chars after counting → doesn't qualify.
+        // 18-char span — exactly at Technical threshold (zy5_min_chars=18) but
+        // only 17 chars after counting → doesn't qualify.
         let text = "車站外面的雨裡等了三小時的男人。";
         let issues = scan_indexed(
             text,

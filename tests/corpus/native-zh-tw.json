@@ -130,6 +130,230 @@
       "input": "資料庫管理系統負責處理交易、索引建立和查詢最佳化等工作。",
       "expected_fixed": "資料庫管理系統負責處理交易、索引建立和查詢最佳化等工作。",
       "expected_issues": []
+    },
+    {
+      "id": "native_party_diff",
+      "repeat": 3,
+      "input": "統計顯示地方差異很大，估計借方差額後再沖銷。",
+      "expected_fixed": "統計顯示地方差異很大，估計借方差額後再沖銷。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_mean_worth",
+      "repeat": 3,
+      "input": "兩者均值得參考，樣本的平均值也符合預期。",
+      "expected_fixed": "兩者均值得參考，樣本的平均值也符合預期。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_mvt",
+      "repeat": 3,
+      "input": "取樣時的均值定理推導請見附錄。",
+      "expected_fixed": "取樣時的均值定理推導請見附錄。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_dept_limit",
+      "repeat": 3,
+      "input": "部門限期改善，專門限定會員使用。",
+      "expected_fixed": "部門限期改善，專門限定會員使用。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_report_doc",
+      "repeat": 3,
+      "input": "解析欄位時附上情報文件，傳輸協定的通報文號已建檔。",
+      "expected_fixed": "解析欄位時附上情報文件，傳輸協定的通報文號已建檔。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_habit",
+      "repeat": 3,
+      "input": "導航習慣導致他忽略警示訊息。",
+      "expected_fixed": "導航習慣導致他忽略警示訊息。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_forced_intro",
+      "repeat": 3,
+      "input": "武器庫存管理強制導入新流程，雷射加工要抑制導電性。",
+      "expected_fixed": "武器庫存管理強制導入新流程，雷射加工要抑制導電性。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_guidance_lead",
+      "repeat": 3,
+      "input": "飛彈部隊也推動輔導彈性學習，領導彈性調整值勤時間。",
+      "expected_fixed": "飛彈部隊也推動輔導彈性學習，領導彈性調整值勤時間。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_group_broadcast",
+      "repeat": 3,
+      "input": "網路節目組播出的時段已經公告。",
+      "expected_fixed": "網路節目組播出的時段已經公告。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_parcel",
+      "repeat": 3,
+      "input": "上傳封包前先丟包裹到郵局。",
+      "expected_fixed": "上傳封包前先丟包裹到郵局。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_sit_straight",
+      "repeat": 3,
+      "input": "請坐標準姿勢以免脊椎受傷。",
+      "expected_fixed": "請坐標準姿勢以免脊椎受傷。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_noise_ack",
+      "repeat": 3,
+      "input": "鼓噪聲響持續了整個下午。",
+      "expected_fixed": "鼓噪聲響持續了整個下午。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_remote_sensor",
+      "repeat": 3,
+      "input": "遙感應器材已經安裝完成，遙感探測是中央大學的研究領域。",
+      "expected_fixed": "遙感應器材已經安裝完成，遙感探測是中央大學的研究領域。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_mesh_layout",
+      "repeat": 3,
+      "input": "地圖模型的網格貼圖需要重新算圖，版面用三欄網格排版。",
+      "expected_fixed": "地圖模型的網格貼圖需要重新算圖，版面用三欄網格排版。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_bus_stop",
+      "repeat": 3,
+      "input": "視窗外就是公車停靠站，面板上顯示船隻停靠的港口。",
+      "expected_fixed": "視窗外就是公車停靠站，面板上顯示船隻停靠的港口。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_impedance",
+      "repeat": 3,
+      "input": "搜尋欄位旁的天線阻抗匹配要調整。",
+      "expected_fixed": "搜尋欄位旁的天線阻抗匹配要調整。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_map_number",
+      "repeat": 3,
+      "input": "地圖上的數字代表路線編號，高程欄位的數字要對齊。",
+      "expected_fixed": "地圖上的數字代表路線編號，高程欄位的數字要對齊。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_stop_near",
+      "repeat": 3,
+      "input": "游標不停靠近側邊面板時，工具列就會浮動出現。",
+      "expected_fixed": "游標不停靠近側邊面板時，工具列就會浮動出現。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_horse_breeding",
+      "repeat": 3,
+      "input": "牧場的馬匹配種紀錄要跟血統書逐筆比對。",
+      "expected_fixed": "牧場的馬匹配種紀錄要跟血統書逐筆比對。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_square_diff",
+      "repeat": 3,
+      "input": "國小數學先教平方差公式，統計課才會用到標準差。",
+      "expected_fixed": "國小數學先教平方差公式，統計課才會用到標準差。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_supervise_ammo",
+      "repeat": 3,
+      "input": "長官督導彈藥庫存，並檢查部隊武器保養狀況。",
+      "expected_fixed": "長官督導彈藥庫存，並檢查部隊武器保養狀況。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_site_format",
+      "repeat": 3,
+      "input": "報名表請照官網格式填寫，並附上住家經緯度座標。",
+      "expected_fixed": "報名表請照官網格式填寫，並附上住家經緯度座標。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_poster_copy",
+      "repeat": 3,
+      "input": "這張海報文案要重新排版，再上傳到伺服器。",
+      "expected_fixed": "這張海報文案要重新排版，再上傳到伺服器。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_group_broadcast_send",
+      "repeat": 3,
+      "input": "電視台把節目分組播送到不同頻道的網路串流平台。",
+      "expected_fixed": "電視台把節目分組播送到不同頻道的網路串流平台。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_cover_wharf",
+      "repeat": 3,
+      "input": "工人用帆布遮掩碼頭的貨櫃，網路攝影機拍不到。",
+      "expected_fixed": "工人用帆布遮掩碼頭的貨櫃，網路攝影機拍不到。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_ghosted",
+      "repeat": 3,
+      "input": "網路上流傳很多被丟包的影片，真的很誇張。",
+      "expected_fixed": "網路上流傳很多被丟包的影片，真的很誇張。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_ride_elevation",
+      "repeat": 3,
+      "input": "遊客乘坐標高三千公尺的纜車，輸入資料後送出。",
+      "expected_fixed": "遊客乘坐標高三千公尺的纜車，輸入資料後送出。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_zy5_begin",
+      "repeat": 3,
+      "input": "那個看起來十分陌生的城市就開始吞噬他熟悉的日常生活。",
+      "expected_fixed": "那個看起來十分陌生的城市就開始吞噬他熟悉的日常生活。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_zy5_become",
+      "repeat": 3,
+      "input": "那個看起來十分陌生的城市就變成他再也認不得的地方。",
+      "expected_fixed": "那個看起來十分陌生的城市就變成他再也認不得的地方。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_zy5_thereupon",
+      "repeat": 3,
+      "input": "那個看起來十分陌生的城市就此吞噬他熟悉的日常生活。",
+      "expected_fixed": "那個看起來十分陌生的城市就此吞噬他熟悉的日常生活。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_zy5_gradually",
+      "repeat": 3,
+      "input": "那個看起來十分陌生的城市卻依然保有他熟悉的日常味道。",
+      "expected_fixed": "那個看起來十分陌生的城市卻依然保有他熟悉的日常味道。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_zy5_slowly",
+      "repeat": 3,
+      "input": "那個看起來十分陌生的城市才慢慢顯露他熟悉的生活節奏。",
+      "expected_fixed": "那個看起來十分陌生的城市才慢慢顯露他熟悉的生活節奏。",
+      "expected_issues": []
     }
   ]
 }

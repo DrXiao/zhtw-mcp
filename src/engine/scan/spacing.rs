@@ -58,7 +58,7 @@ fn is_fullwidth_digit(ch: char) -> bool {
 fn fullwidth_to_halfwidth_digit(ch: char) -> char {
     debug_assert!(is_fullwidth_digit(ch));
     // Safe: fullwidth digits U+FF10..U+FF19 map to U+0030..U+0039.
-    char::from_u32(ch as u32 - 0xFF10 + '0' as u32).unwrap()
+    char::from_u32(ch as u32 - 0xFF10 + '0' as u32).expect("U+FF10..U+FF19 maps into ASCII 0-9")
 }
 
 impl super::Scanner {
@@ -75,8 +75,8 @@ impl super::Scanner {
             return;
         }
 
-        // Sliding window: prev/curr/next chars with byte offsets.
-        // Avoids materializing the full Vec<(usize, char)>.
+        // Sliding window: prev/curr/next chars with byte offsets. Avoids
+        // materializing the full Vec<(usize, char)>.
         let mut iter = text.char_indices().peekable();
         let mut prev: Option<(usize, char)> = None;
         // Track consecutive identical punct run length for rule 4.
@@ -111,7 +111,8 @@ impl super::Scanner {
                 }
                 // Rule 4: repeated full-width punctuation.
                 else if is_fullwidth_punct(ch) && same_punct_run > 0 {
-                    // For paired punct (… and —), allow exactly 2 consecutive (run=1).
+                    // For paired punct (… and —), allow exactly 2 consecutive
+                    // (run=1).
                     let should_flag = if is_paired_punct(ch) {
                         same_punct_run >= 2
                     } else {
@@ -131,7 +132,8 @@ impl super::Scanner {
                 else if let Some(&(next_offset, next_ch)) = iter.peek() {
                     let next_len = next_ch.len_utf8();
                     if !is_excluded(next_offset, next_offset + next_len, excluded) {
-                        // Rule 1: CJK immediately adjacent to Latin (no space between).
+                        // Rule 1: CJK immediately adjacent to Latin (no space
+                        // between).
                         if (is_cjk_ideograph(ch) && next_ch.is_ascii_alphabetic())
                             || (ch.is_ascii_alphabetic() && is_cjk_ideograph(next_ch))
                         {
@@ -141,7 +143,8 @@ impl super::Scanner {
                             ));
                         }
 
-                        // Rule 2: CJK immediately adjacent to digit (no space between).
+                        // Rule 2: CJK immediately adjacent to digit (no space
+                        // between).
                         if (is_cjk_ideograph(ch) && next_ch.is_ascii_digit())
                             || (ch.is_ascii_digit() && is_cjk_ideograph(next_ch))
                         {
@@ -151,8 +154,8 @@ impl super::Scanner {
                             ));
                         }
 
-                        // Rule 3: unwanted space adjacent to full-width punctuation.
-                        // Space before full-width punct.
+                        // Rule 3: unwanted space adjacent to full-width
+                        // punctuation. Space before full-width punct.
                         if ch == ' ' && prev.is_some_and(|(_, pc)| pc != ' ') {
                             let mut fwd = iter.clone();
                             let mut space_end_offset = next_offset;
@@ -402,7 +405,8 @@ mod tests {
 
     #[test]
     fn space_after_fullwidth_punct_before_latin() {
-        // Per guidelines: "全形標點與其他字元之間不加空格" applies to Latin too.
+        // Per guidelines: "全形標點與其他字元之間不加空格" applies to Latin
+        // too.
         let issues = spacing_issues("好， Test很好");
         assert!(
             issues.iter().any(|(c, _)| c.contains("全形標點")),
@@ -422,8 +426,9 @@ mod tests {
     #[test]
     fn space_after_fullwidth_punct_before_digit() {
         let issues = spacing_issues("共 3 項，其中有 2 項");
-        // "，其" has no space → OK. But "， 2" would be flagged.
-        // This input has no space after comma, so no flag.
+
+        // "，其" has no space → OK. But "， 2" would be flagged. This input has
+        // no space after comma, so no flag.
         assert!(
             !issues
                 .iter()
@@ -438,7 +443,7 @@ mod tests {
         );
     }
 
-    // ---- Edge-case stress tests for sliding-window rewrite ----
+    // Edge-case stress tests for sliding-window rewrite
 
     #[test]
     fn space_at_text_start_before_fullwidth_punct() {
@@ -455,8 +460,8 @@ mod tests {
 
     #[test]
     fn trailing_spaces_after_fullwidth_punct() {
-        // Text ends with spaces after fullwidth punct: the forward scan
-        // for space-after-punct should not fire because after_ch stays ' '.
+        // Text ends with spaces after fullwidth punct: the forward scan for
+        // space-after-punct should not fire because after_ch stays ' '.
         let issues = spacing_issues("好，   ");
         assert!(
             !issues
@@ -481,8 +486,8 @@ mod tests {
 
     #[test]
     fn punct_run_resets_after_non_punct() {
-        // ！好！ — the second ！ should not be flagged as repeated because
-        // a CJK char intervenes, resetting same_punct_run.
+        // ！好！ — the second ！ should not be flagged as repeated because a
+        // CJK char intervenes, resetting same_punct_run.
         let issues = spacing_issues("太棒！好！");
         assert!(
             !issues.iter().any(|(c, _)| c.contains("不重複")),
@@ -541,8 +546,8 @@ mod tests {
     #[test]
     fn fullwidth_digit_adjacent_to_cjk() {
         // Fullwidth digit next to CJK should flag rule 5 (fullwidth→halfwidth)
-        // but NOT rule 2 (CJK-digit spacing), because the fullwidth digit
-        // is not an ASCII digit.
+        // but NOT rule 2 (CJK-digit spacing), because the fullwidth digit is
+        // not an ASCII digit.
         let issues = spacing_issues("有３項");
         let has_fw_digit = issues.iter().any(|(c, _)| c.contains("數字應使用"));
         assert!(has_fw_digit, "should flag fullwidth digit: {issues:?}");
@@ -570,7 +575,8 @@ mod tests {
 
     #[test]
     fn rule4_quadruple_ellipsis() {
-        // 4 consecutive ellipsis marks — run=1 is OK (paired), run=2 and 3 flagged.
+        // 4 consecutive ellipsis marks — run=1 is OK (paired), run=2 and 3
+        // flagged.
         let issues = spacing_issues("他說…………算了");
         let repeat_count = issues.iter().filter(|(c, _)| c.contains("不重複")).count();
         assert_eq!(
