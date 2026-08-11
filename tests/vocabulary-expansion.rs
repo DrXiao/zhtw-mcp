@@ -738,3 +738,232 @@ fn monolithic_kernel_suggestion() {
         hit.unwrap().suggestions
     );
 }
+
+// Geospatial / military / networking terminology
+//
+// Target terms for 座標, 麥卡托, 格網, 停駐, 生命週期, 下拉式選單 and 相符 come
+// from externals/wintak-taiwan-coordinates, a WinTAK mapping plugin whose zh-TW
+// documentation is gated on this linter. The rest follow 國家教育研究院 樂詞網
+// and 內政部國土測繪中心 usage, as recorded in each rule's context field.
+//
+// Every rule here is two to four characters, so the aho-corasick matcher can
+// hit across morpheme boundaries (方差 inside 地方差異, 慣導 inside 習慣導致).
+// Each rule therefore gets a boundary-crossing negative case, and each gated
+// rule gets a negative that carries a positive clue, so the test fails if the
+// exception or negative clue is deleted.
+
+fn shared_scanner() -> &'static Scanner {
+    static SCANNER: std::sync::OnceLock<Scanner> = std::sync::OnceLock::new();
+    SCANNER.get_or_init(full_scanner)
+}
+
+/// Assert that scanning text flags found exactly once, with suggestion first.
+fn assert_flags(text: &str, found: &str, suggestion: &str) {
+    let issues = shared_scanner().scan(text).issues;
+    let hits: Vec<_> = issues.iter().filter(|i| i.found == found).collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "{} must be flagged exactly once in {:?}, got {:?}",
+        found,
+        text,
+        issues
+    );
+    assert_eq!(
+        hits[0].suggestions.first().map(String::as_str),
+        Some(suggestion),
+        "{} should suggest {} first, got: {:?}",
+        found,
+        suggestion,
+        hits[0].suggestions
+    );
+}
+
+/// Assert that scanning text does not flag found.
+fn assert_clean(text: &str, found: &str) {
+    let issues = shared_scanner().scan(text).issues;
+    assert!(
+        issues.iter().all(|i| i.found != found),
+        "{} must not be flagged in {:?}, got {:?}",
+        found,
+        text,
+        issues
+    );
+}
+
+#[test]
+fn geo_coordinate_term() {
+    assert_flags("請輸入坐標後按下前往", "坐標", "座標");
+    assert_flags("使用通用橫墨卡托投影", "墨卡托", "麥卡托");
+    assert_flags("這份遙感影像的解析度不足", "遙感", "遙測");
+
+    // 坐標系 must still win by leftmost-longest, and must fire in a geodetic
+    // context rather than only a mathematical one.
+    assert_flags("TWD97 坐標系統的轉換參數", "坐標系", "座標系統");
+    assert_clean("TWD97 坐標系統的轉換參數", "坐標");
+}
+
+#[test]
+fn geo_coordinate_boundary_crossings() {
+    // 坐 is a common verb and 標 opens many words, so the pattern spans a
+    // morpheme boundary in ordinary prose. Every one of these was a
+    // reproducible false positive, and under safe-fix it rewrote the text.
+    for text in [
+        "請坐標準姿勢以免脊椎受傷",
+        "他坐標示的位置等候",
+        "遊客乘坐標高三千公尺的纜車，輸入資料後送出",
+        "抗議民眾靜坐標語寫著訴求，經緯度不明",
+        "他打坐標榜自己的定位與經度",
+    ] {
+        assert_clean(text, "坐標");
+    }
+    assert_clean("他有一種逍遙感覺", "遙感");
+    assert_clean("遙感應器材已經安裝完成", "遙感");
+    assert_clean("遙感探測是中央大學的研究領域", "遙感");
+}
+
+#[test]
+fn geo_coordinate_survives_common_prefixes() {
+    // The words guarding the boundary above must not swallow the real hits:
+    // 針對, 終端 and 範圍 all end in a character that starts a 坐 verb.
+    assert_flags("針對坐標轉換的精度做測試", "坐標", "座標");
+    assert_flags("終端坐標的轉換需要投影參數", "坐標", "座標");
+    assert_flags("範圍坐標的經緯度換算", "坐標", "座標");
+}
+
+#[test]
+fn new_rules_skip_their_boundary_collisions() {
+    assert_clean("現場的聒噪聲音持續不斷", "噪聲");
+    assert_clean("航空通訊系統每半小時傳輸一次氣象報文", "報文");
+    assert_clean("在地圖上畫出網格以便定位", "網格");
+    assert_clean("視窗前的乘客看著飛機停靠空橋", "停靠");
+    assert_clean("側邊的視窗外，遊艇停靠在防波堤旁", "停靠");
+
+    // Each of these splits the rule across a word boundary: 不停|靠近,
+    // 馬匹|配種, 平方|差, 督導|彈藥, 官網|格式, 海報|文案, 分組|播送,
+    // 遮掩|碼頭. The left word carries the boundary, so it lives in the
+    // segmenter lexicon rather than in a per-rule exception.
+    assert_clean("游標不停靠近側邊面板時，工具列就會浮動出現", "停靠");
+    assert_clean("牧場的馬匹配種紀錄要跟血統書逐筆比對", "匹配");
+    assert_clean("國小數學先教平方差公式，統計課才會用到標準差", "方差");
+    assert_clean("長官督導彈藥庫存，並檢查部隊武器保養狀況", "導彈");
+    assert_clean("報名表請照官網格式填寫，並附上住家經緯度座標", "網格");
+    assert_clean("這張海報文案要重新排版，再上傳到伺服器", "報文");
+    assert_clean("電視台把節目分組播送到不同頻道的網路串流平台", "組播");
+    assert_clean("工人用帆布遮掩碼頭的貨櫃，網路攝影機拍不到", "掩碼");
+    // 被丟包 is the colloquial "stood up", a homograph rather than a boundary.
+    assert_clean("網路上流傳很多被丟包的影片，真的很誇張", "丟包");
+}
+
+#[test]
+fn the_two_network_rules_do_not_cancel_each_other() {
+    // 組播報文 once produced nothing at all: an exception on 組播 and a lexicon
+    // entry for 播報 combined into a silent double miss on the sentence both
+    // rules exist for. 組播 fires again, so the sentence is caught.
+    assert_flags("路由器會把組播報文轉送到各個網段", "組播", "群播");
+
+    // 報文 stays masked here, and that is the intended trade rather than a
+    // leftover of the double miss. 播報 is in the segmenter lexicon because it
+    // guards two real false positives, and it also covers the 報 of 報文
+    // whenever a 播 precedes it. Both guards below are what pay for that.
+    assert_clean("路由器會把組播報文轉送到各個網段", "報文");
+    assert_clean("主播播報文稿的速度很快", "報文");
+    assert_clean("新聞組播報今天的頭條", "組播");
+}
+
+#[test]
+fn geo_grid_needs_surveying_context() {
+    // Surveying grid is 格網 in zh-TW.
+    assert_flags("軍事網格座標以圖幅編號標示", "網格", "格網");
+
+    // Mesh, layout and compute grids keep 網格 even with a surveying clue
+    // nearby, which is what the negative clues and exceptions are for.
+    assert_clean("地圖模型的網格貼圖需要重新算圖", "網格");
+    assert_clean("高程模型的網格劃分交給有限元素分析", "網格");
+    assert_clean("這個版面用三欄網格排版", "網格");
+}
+
+#[test]
+fn military_terms() {
+    assert_flags("飛彈射程內的導彈威脅", "導彈", "飛彈");
+    assert_flags("精確導引武器採用雷射制導", "制導", "導引");
+    assert_flags("衛星訊號中斷時由慣導維持定位", "慣導", "慣性導航");
+}
+
+#[test]
+fn military_boundary_crossings() {
+    // 輔導/領導 + 彈性, 抑制/強制 + 導入, 習慣 + 導致 are ordinary zh-TW.
+    assert_clean("飛彈部隊也推動輔導彈性學習", "導彈");
+    assert_clean("領導彈性調整值勤時間", "導彈");
+    assert_clean("雷射加工要抑制導電性", "制導");
+    assert_clean("武器庫存管理強制導入新流程", "制導");
+    assert_clean("導航習慣導致他忽略警示", "慣導");
+}
+
+#[test]
+fn network_terms() {
+    assert_flags("以組播方式在網路上散布位置回報", "組播", "群播");
+    assert_flags("鏈路品質不佳時會丟包", "丟包", "封包遺失");
+    assert_flags("解析封包標頭的報文欄位", "報文", "訊息");
+    assert_flags("設定網段的掩碼後重新連線", "掩碼", "遮罩");
+    // The longer 子網掩碼 rule wins by leftmost-longest.
+    assert_flags("子網掩碼設定錯誤", "子網掩碼", "子網路遮罩");
+    assert_clean("子網掩碼設定錯誤", "掩碼");
+}
+
+#[test]
+fn network_boundary_crossings() {
+    assert_clean("網路節目組播出的時段", "組播");
+    assert_clean("上傳封包前先丟包裹到郵局", "丟包");
+    assert_clean("解析欄位時附上情報文件", "報文");
+    assert_clean("傳輸協定的通報文號已建檔", "報文");
+}
+
+#[test]
+fn statistics_terms() {
+    assert_flags("取樣結果的均值與標準差", "均值", "平均值");
+    assert_flags("統計樣本的方差偏高", "方差", "變異數");
+}
+
+#[test]
+fn statistics_boundary_crossings() {
+    assert_clean("統計上兩者均值得參考", "均值");
+    assert_clean("取樣時的均值定理推導", "均值");
+    assert_clean("統計顯示地方差異很大", "方差");
+    assert_clean("估計借方差額後沖銷", "方差");
+    // The correct term must survive the substring match.
+    assert_clean("樣本的平均值符合預期", "均值");
+}
+
+#[test]
+fn signal_and_ui_terms() {
+    assert_flags("無線電的噪聲蓋過通聯", "噪聲", "雜訊");
+    assert_flags("從下拉框選擇縣市", "下拉框", "下拉式選單");
+    assert_flags("外掛的生命周期由主程式管理", "生命周期", "生命週期");
+    assert_clean("鼓噪聲響持續了整個下午", "噪聲");
+}
+
+#[test]
+fn dock_needs_window_context() {
+    assert_flags("把窗格停靠在視窗右側", "停靠", "停駐");
+    // Positive clue present, negative clue and exception must still win.
+    assert_clean("視窗外就是公車停靠站", "停靠");
+    assert_clean("面板上顯示船隻停靠的港口", "停靠");
+}
+
+#[test]
+fn match_needs_software_context() {
+    assert_flags("字串匹配失敗時回傳空結果", "匹配", "相符");
+    // Positive clue present, exception must still win.
+    assert_clean("搜尋欄位旁的天線阻抗匹配要調整", "匹配");
+}
+
+#[test]
+fn digital_gate_stays_narrow() {
+    // 數字 meaning "number" is far more common than 數字 meaning "digital", so
+    // the gate must not widen to mapping or imaging vocabulary.
+    assert_flags("數字轉型的技術藍圖", "數字", "數位");
+    assert_clean("地圖上的數字代表路線編號", "數字");
+    assert_clean("高程欄位的數字要對齊", "數字");
+    assert_clean("訊號強度的數字是負七十", "數字");
+}

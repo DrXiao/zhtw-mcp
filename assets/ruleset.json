@@ -205,6 +205,13 @@
       "english": "dropdown list"
     },
     {
+      "from": "下拉框",
+      "to": ["下拉式選單", "下拉式清單"],
+      "type": "cross_strait",
+      "context": "@domain UI。combo box/dropdown；tw 用「下拉式選單」(@seealso 下拉列表, 組合框)",
+      "english": "dropdown / combo box"
+    },
+    {
       "from": "下拉菜單",
       "to": ["下拉式選單"],
       "type": "cross_strait",
@@ -274,6 +281,15 @@
       "to": [""],
       "type": "ai_filler",
       "context": "writing humanizer: slogan-like sublimating ending; replace with a concrete claim"
+    },
+    {
+      "from": "丟包",
+      "to": ["封包遺失"],
+      "type": "cross_strait",
+      "context": "@domain 網路。packet loss；tw 用「封包遺失」或「掉封包」",
+      "english": "packet loss",
+      "context_clues": ["網路", "封包", "連線", "延遲", "頻寬", "傳輸", "通訊", "重傳", "鏈路", "訊號"],
+      "exceptions": ["丟包裹", "丟包袱", "被丟包"]
     },
     {
       "from": "並口",
@@ -1130,6 +1146,16 @@
       "context": "@domain 醫學",
       "english": "prosthesis",
       "context_clues": ["截肢", "復健", "裝置", "肢體"]
+    },
+    {
+      "from": "停靠",
+      "to": ["停駐"],
+      "type": "cross_strait",
+      "context": "@domain UI。視窗 dock；tw 用「停駐」。交通工具「停靠」為正確 tw 用法",
+      "english": "dock (window)",
+      "context_clues": ["窗格", "視窗", "面板", "工具列", "浮動", "側邊"],
+      "negative_context_clues": ["車", "船", "港", "站", "碼頭", "月台", "飛機", "客機", "遊艇", "渡輪", "捷運", "空橋", "泊位", "岸邊", "防波堤"],
+      "exceptions": ["停靠點", "停靠位", "停靠時間"]
     },
     {
       "from": "健壯",
@@ -2063,6 +2089,15 @@
       "context_clues": ["財報", "會計", "營收", "損益"]
     },
     {
+      "from": "制導",
+      "to": ["導引"],
+      "type": "cross_strait",
+      "context": "@domain 軍事。guidance；tw 用「導引」(精確導引武器)",
+      "english": "guidance (weapons)",
+      "context_clues": ["武器", "雷達", "彈道", "飛彈", "射程", "目標", "精確", "炸彈", "攻擊", "導引"],
+      "negative_context_clues": ["機制", "管制", "控制", "體制", "法制"]
+    },
+    {
       "from": "刷手機",
       "to": ["滑手機"],
       "type": "cross_strait",
@@ -2314,6 +2349,15 @@
       "type": "cross_strait",
       "context": "@domain 程式設計",
       "english": "assembly language"
+    },
+    {
+      "from": "匹配",
+      "to": ["相符", "比對"],
+      "type": "cross_strait",
+      "context": "@domain IT。match；tw 用「相符」(結果) 或「比對」(動作)。電子學「阻抗匹配」為正確 tw 用法",
+      "english": "match",
+      "context_clues": ["字串", "正規表示式", "樣式", "關鍵字", "欄位", "比對"],
+      "negative_context_clues": ["阻抗", "電路", "天線", "訊號源"]
     },
     {
       "from": "千兆",
@@ -3061,6 +3105,14 @@
       "context_clues": ["表單", "UI", "選擇", "勾選", "介面"]
     },
     {
+      "from": "噪聲",
+      "to": ["雜訊", "噪音"],
+      "type": "cross_strait",
+      "context": "@domain 通訊。noise；訊號用「雜訊」，聲學用「噪音」",
+      "english": "noise",
+      "exceptions": ["鼓噪聲", "喧噪聲", "聒噪聲"]
+    },
+    {
       "from": "嚮導",
       "to": ["精靈"],
       "type": "cross_strait",
@@ -3373,12 +3425,29 @@
       "context_clues": ["作業系統", "行程", "執行緒", "排程", "OS"]
     },
     {
+      "from": "均值",
+      "to": ["平均值"],
+      "type": "cross_strait",
+      "context": "@domain 數學。mean；tw 用「平均值」",
+      "english": "mean",
+      "context_clues": ["樣本", "母體", "標準差", "估計", "統計", "變異", "方差", "取樣", "訊號", "濾波"],
+      "exceptions": ["均值得", "均值定理", "均值不等式"]
+    },
+    {
+      "from": "坐標",
+      "to": ["座標"],
+      "type": "cross_strait",
+      "context": "@domain 地理資訊。cn 用「坐標」；tw 教育部辭典與樂詞網用「座標」。需要語境線索，因為「坐」是常用動詞 (乘坐、靜坐)，會與「標X」跨詞界相接 (@seealso 坐標系)",
+      "english": "coordinate",
+      "context_clues": ["座標", "系統", "轉換", "輸入", "經度", "緯度", "高程", "定位", "投影", "圖幅", "測繪", "格網", "經緯", "WGS84", "TWD97", "TWD67", "MGRS", "UTM"],
+      "exceptions": ["坐標示", "坐標準"]
+    },
+    {
       "from": "坐標系",
       "to": ["座標系統", "座標系"],
       "type": "cross_strait",
       "context": "@domain 數學。cn「坐標」= tw「座標」；cn「系」= tw「系統」",
-      "english": "coordinate system",
-      "context_clues": ["直角", "極", "笛卡兒", "卡氏", "向量", "平面"]
+      "english": "coordinate system"
     },
     {
       "from": "坐落於",
@@ -3530,6 +3599,15 @@
       "english": "stack"
     },
     {
+      "from": "報文",
+      "to": ["訊息", "封包"],
+      "type": "cross_strait",
+      "context": "@domain 網路。cn「報文」指協定訊息；tw 依層級用「訊息」或「封包」",
+      "english": "message (protocol)",
+      "context_clues": ["協定", "封包", "標頭", "傳輸", "解析", "欄位", "伺服器", "通訊", "位元組", "TCP", "UDP", "HTTP"],
+      "negative_context_clues": ["氣象", "航空", "天氣", "METAR", "TAF", "觀測"]
+    },
+    {
       "from": "報道",
       "to": ["報導"],
       "type": "cross_strait",
@@ -3607,6 +3685,13 @@
       "type": "cross_strait",
       "context": "@domain IT",
       "english": "augmented reality"
+    },
+    {
+      "from": "墨卡托",
+      "to": ["麥卡托"],
+      "type": "cross_strait",
+      "context": "@domain 地理資訊。Mercator 音譯；tw 作「麥卡托」(通用橫麥卡托座標系統 UTM)",
+      "english": "Mercator"
     },
     {
       "from": "墨魚",
@@ -4371,6 +4456,15 @@
       "context": "@domain 教育。限學術語境。cn「導師」；tw 用「指導教授」(advisor/supervisor)",
       "english": "advisor/supervisor",
       "context_clues": ["論文", "研究", "碩士", "博士", "指導"]
+    },
+    {
+      "from": "導彈",
+      "to": ["飛彈"],
+      "type": "cross_strait",
+      "context": "@domain 軍事。missile；tw 用「飛彈」",
+      "english": "missile",
+      "context_clues": ["射程", "彈道", "武器", "發射", "攔截", "巡弋", "防空", "雷達", "部隊", "飛彈", "目標"],
+      "negative_context_clues": ["報導", "主導", "領導", "引導"]
     },
     {
       "from": "導火索",
@@ -5241,6 +5335,15 @@
       "english": "slow motion"
     },
     {
+      "from": "慣導",
+      "to": ["慣性導航"],
+      "type": "cross_strait",
+      "context": "@domain 軍事。cn 縮略語；tw 不縮寫，寫作「慣性導航」",
+      "english": "inertial navigation",
+      "context_clues": ["定位", "導航", "衛星", "慣性", "陀螺", "誤差", "漂移", "訊號", "GPS"],
+      "negative_context_clues": ["習慣"]
+    },
+    {
       "from": "憑感覺編程",
       "to": ["Vibe Coding"],
       "type": "translationese",
@@ -5703,6 +5806,14 @@
       "english": "defer",
       "context_clues": ["求值", "初始化", "排程", "任務", "非同步"],
       "negative_context_clues": ["會議", "選舉", "比賽"]
+    },
+    {
+      "from": "掩碼",
+      "to": ["遮罩"],
+      "type": "cross_strait",
+      "context": "@domain 網路。mask；tw 用「遮罩」(@seealso 子網掩碼)",
+      "english": "mask",
+      "context_clues": ["子網", "位元", "網路", "網段", "遮罩", "閘道", "前綴", "IP"]
     },
     {
       "from": "提供支援",
@@ -6299,6 +6410,14 @@
       "type": "cross_strait",
       "context": "@domain 日常",
       "english": "instant noodles"
+    },
+    {
+      "from": "方差",
+      "to": ["變異數"],
+      "type": "cross_strait",
+      "context": "@domain 數學。variance；tw 用「變異數」",
+      "english": "variance",
+      "context_clues": ["樣本", "母體", "標準差", "估計", "分布", "分佈", "統計", "變異", "期望值", "常態", "誤差"]
     },
     {
       "from": "方括弧",
@@ -8215,6 +8334,13 @@
       "english": "Vanuatu"
     },
     {
+      "from": "生命周期",
+      "to": ["生命週期"],
+      "type": "cross_strait",
+      "context": "@domain IT。lifecycle；tw 用「週」不用「周」表週期",
+      "english": "lifecycle"
+    },
+    {
       "from": "生存空間操作符",
       "to": ["生存空間運算子"],
       "type": "cross_strait",
@@ -9499,6 +9625,15 @@
       "context_clues": ["程式", "軟體", "系統", "電腦", "網路"]
     },
     {
+      "from": "組播",
+      "to": ["群播", "多點傳送"],
+      "type": "cross_strait",
+      "context": "@domain 網路。multicast；tw 用「群播」",
+      "english": "multicast",
+      "context_clues": ["封包", "網路", "位址", "傳輸", "路由", "群組", "串流", "訂閱", "IP"],
+      "exceptions": ["組播出", "組播放", "組播音"]
+    },
+    {
       "from": "結構性變化",
       "to": [],
       "type": "ai_filler",
@@ -9580,6 +9715,16 @@
       "type": "cross_strait",
       "context": "@domain 網路",
       "english": "internet cafe"
+    },
+    {
+      "from": "網格",
+      "to": ["格網"],
+      "type": "cross_strait",
+      "context": "@domain 地理資訊。測繪語境的 grid，tw 國土測繪用「格網」；圖學/版面的 mesh、grid layout 用「網格」為正確 tw 用法",
+      "english": "grid (surveying)",
+      "context_clues": ["座標", "測繪", "圖幅", "經緯", "高程", "MGRS", "UTM", "TWD97", "TWD67"],
+      "negative_context_clues": ["版面", "佈局", "排版", "運算", "算圖", "模型", "貼圖", "有限元素", "劃分", "切割", "元件", "網頁", "CSS"],
+      "exceptions": ["網格系統", "網格化", "網格分析", "網格產生"]
     },
     {
       "from": "網格線",
@@ -11823,6 +11968,14 @@
       "type": "cross_strait",
       "context": "@domain 日常",
       "english": "da Vinci"
+    },
+    {
+      "from": "遙感",
+      "to": ["遙測"],
+      "type": "cross_strait",
+      "context": "@domain 地理資訊。remote sensing；tw 學界與官方用「遙測」",
+      "english": "remote sensing",
+      "exceptions": ["遙感探測", "遙感應", "逍遙感"]
     },
     {
       "from": "遞歸",

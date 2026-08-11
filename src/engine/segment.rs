@@ -945,6 +945,27 @@ static GENERAL_VOCAB: &[&str] = &[
     // Academic / technical prose (word-boundary disambiguation)
     "累積", "引導", "分佈", "序列", "函數", "變數", "模型", "估計", "觀測", "假設", "推導", "證明",
     "收斂", "機率", "隨機", "樣本", "頻率", "密度", "偏差", "變異", "差分", "形式", "排程",
+    // Party and role nouns ending in 方, which abut 差異/差距/差別 and make
+    // short rules such as 方差 fire across the boundary.
+    "對方", "雙方", "官方", "我方", "資方", "勞方", "借方", "貸方", "校方", "院方", "軍方", "警方",
+    // Verbs ending in 導 or 制, which abut 彈性/彈劾 and 導入/導致/導向.
+    "輔導", "領導", "指導", "報導", "主導", "倡導", "教導", "疏導", "強制", "抑制", "管制", "限制",
+    "控制",
+    // Other high-frequency words that cross the START of a short rule term, the
+    // only side the straddle check can block from: 播報 covers the 報 of 報文,
+    // 分組 the 組 of 組播. A word that merely follows the term cannot block it,
+    // so the cases where the term comes first are handled by rule exceptions.
+    "小組", "群組", "情報", "通報", "回報", "簡報", "申報", "習慣", "部門", "專門", "播報",
+    // Verbs ending in 坐, which abut 標高/標語/標示/標榜 and would otherwise
+    // let the 坐標 rule fire across the boundary. Only verbs whose first
+    // character rarely ends another word: 對坐 would break 針對坐標, 端坐 would
+    // break 終端坐標, and 圍坐 would break 範圍坐標.
+    "乘坐", "靜坐", "打坐", "就坐", "久坐", "危坐",
+    // Left-hand words that abut the other two-character rules across a
+    // boundary: 不停|靠近, 馬匹|配種, 平方|差, 督導|彈藥, 官網|格式, 海報|文案,
+    // 分組|播送, 遮掩|碼頭.  The straddle check can only block from the left,
+    // so this is where these belong rather than in per-rule exceptions.
+    "不停", "馬匹", "平方", "督導", "官網", "海報", "分組", "遮掩",
 ];
 
 /// Common Chinese function words and particles used to help segmentation.
