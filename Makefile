@@ -22,6 +22,12 @@ distclean: clean
 check: $(S2T_DATA)
 	cargo test
 	cargo clippy --all-targets -- -D warnings
+# The default feature set is not the only one that ships: the browser extension
+# builds the library with browser-wasm and no native, and that configuration
+# used to accumulate dead-code warnings nothing gated. Lint the two non-default
+# shapes as well. Library only, since the binary needs native.
+	cargo clippy --lib --no-default-features -- -D warnings
+	cargo clippy --lib --no-default-features --features browser-wasm -- -D warnings
 	cargo fmt --check
 	python3 scripts/check-ruleset.py --lint
 
