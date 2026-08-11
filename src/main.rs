@@ -43,18 +43,173 @@ const COLORS_OFF: Colors = Colors {
     reset: "",
 };
 
-fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    let default_log = if args.iter().any(|a| a == "--debug") {
-        "debug"
-    } else if args.iter().any(|a| a == "--verbose") {
-        "info"
-    } else {
-        "warn"
-    };
-    zhtw_mcp::trace::init(default_log);
+// Command line
+//
+// Parsing is a pure function over argv (`parse_args`) and execution is a
+// separate dispatch (`run`). They were one 845-line `main` that mixed the two,
+// which meant every flag combination could only be tested by spawning the
+// binary. Keep them separate: `parse_args` must not touch the filesystem, the
+// environment, or the network, so the flag matrix stays unit-testable.
 
-    // Parse CLI args:
+/// A fully parsed command line: global flags plus the selected subcommand.
+struct Cli {
+    overrides_path: Option<PathBuf>,
+    suppressions_path: Option<PathBuf>,
+    packs_dir: Option<PathBuf>,
+    active_packs: Vec<String>,
+    config_path: Option<PathBuf>,
+    command: Command,
+}
+
+/// The subcommand to run.  Absent subcommand means MCP server over stdio.
+enum Command {
+    Server,
+    Lint(Box<LintArgs>),
+    Convert(ConvertArgs),
+    Setup(String),
+    Pack { cmd: String, arg: Option<String> },
+    Tm(TmArgs),
+    CacheClear,
+}
+
+/// Flags accepted after the `lint` subcommand.  Everything that is not a known
+/// flag is a file path, which is why `lint` consumes the rest of the argv.
+struct LintArgs {
+    files: Vec<String>,
+    format: LintFormat,
+    max_errors: Option<usize>,
+    max_warnings: Option<usize>,
+    profile: Option<String>,
+    content_type: Option<String>,
+    exclude_patterns: Vec<String>,
+    fix_mode: Option<zhtw_mcp::fixer::FixMode>,
+    dry_run: bool,
+    explain: bool,
+    relaxed: bool,
+    exempt_blockquotes: bool,
+    consistency: bool,
+    detect_ai: bool,
+    detect_translationese: bool,
+    /// Emit the composite three-axis scorecard.  Set only by `--detect-style`,
+    /// which also flips detect_ai and detect_translationese.
+    detect_style: bool,
+    translationese_domain: zhtw_mcp::engine::translationese_score::TranslationeseDomain,
+    ai_threshold_multiplier: f32,
+    baseline_path: Option<PathBuf>,
+    update_baseline: bool,
+    diff_from: Option<String>,
+    #[cfg(feature = "translate")]
+    verify: bool,
+    telemetry: bool,
+}
+
+impl Default for LintArgs {
+    fn default() -> Self {
+        Self {
+            files: Vec::new(),
+            format: LintFormat::Human,
+            max_errors: None,
+            max_warnings: None,
+            profile: None,
+            content_type: None,
+            exclude_patterns: Vec::new(),
+            fix_mode: None,
+            dry_run: false,
+            explain: false,
+            relaxed: false,
+            exempt_blockquotes: false,
+            consistency: false,
+            detect_ai: false,
+            detect_translationese: false,
+            detect_style: false,
+            translationese_domain:
+                zhtw_mcp::engine::translationese_score::TranslationeseDomain::General,
+            ai_threshold_multiplier: 1.0,
+            baseline_path: None,
+            update_baseline: false,
+            diff_from: None,
+            #[cfg(feature = "translate")]
+            verify: false,
+            telemetry: false,
+        }
+    }
+}
+
+#[derive(Default)]
+struct ConvertArgs {
+    files: Vec<String>,
+    content_type: Option<String>,
+    #[cfg(feature = "translate")]
+    verify: bool,
+}
+
+#[derive(Default)]
+struct TmArgs {
+    cmd: String,
+    arg: Option<String>,
+    found: Option<String>,
+    suggested: Option<String>,
+    chose: Option<String>,
+    context: Option<String>,
+}
+
+/// Read a required path value, keeping each flag's own missing-value message.
+fn path_value(value: Option<&String>, missing: &'static str) -> Result<PathBuf> {
+    Ok(PathBuf::from(value.context(missing)?))
+}
+
+/// Validate a `--content-type` value.
+///
+/// Shared by `lint` and `convert` so a typo is an error in both. `convert` used
+/// to accept anything and fall through to auto-detection, which silently gave
+/// extension-based behaviour instead of saying the value was wrong.
+fn validated_content_type(value: Option<&String>) -> Result<String> {
+    let ct = value.context("--content-type requires a value")?;
+    match ct.as_str() {
+        // `convert` accepted these two abbreviations before the validator was
+        // shared, and `run_convert` still has arms for them. Normalize instead
+        // of rejecting, so sharing the validator does not quietly drop an
+        // argument that used to work, and so `lint` gains them too.
+        "md" => Ok("markdown".to_owned()),
+        "yml" => Ok("yaml".to_owned()),
+        "plain" | "markdown" | "markdown-scan-code" | "yaml" => Ok(ct.clone()),
+        _ => anyhow::bail!(
+            "unknown content-type: {ct} (expected 'plain', 'markdown', 'markdown-scan-code', or 'yaml')"
+        ),
+    }
+}
+
+/// Read the optional `low|medium|high` level that may follow `--detect-ai` and
+/// `--detect-style`.
+///
+/// Returns `None` when the next argument is not a level, and the caller must
+/// then leave the current multiplier alone: `--detect-ai low --detect-style`
+/// has to keep the low threshold, not reset it to the default because the
+/// second flag carried no level of its own.
+fn detect_threshold(next: Option<&String>) -> Option<f32> {
+    match next.map(String::as_str) {
+        Some("low") => Some(0.5),
+        Some("medium") => Some(1.0),
+        Some("high") => Some(1.5),
+        _ => None,
+    }
+}
+
+/// Reject a second subcommand rather than letting one win by dispatch order,
+/// which is what the flat-variable version did.
+fn claim(current: &Command, name: &str) -> Result<()> {
+    match current {
+        Command::Server => Ok(()),
+        _ => anyhow::bail!("only one subcommand is allowed, found a second: {name}"),
+    }
+}
+
+/// Parse argv (including argv[0]) into a `Cli`.
+///
+/// Pure: no filesystem, environment, or network access.  Defaults that need any
+/// of those are resolved in `run`.
+fn parse_args(args: &[String]) -> Result<Cli> {
+    // Usage:
     //   zhtw-mcp                                — run MCP server (default paths)
     //   zhtw-mcp --overrides <path>             — custom overrides JSON path
     //   zhtw-mcp --suppressions <path>          — custom suppressions JSON path
@@ -68,447 +223,77 @@ fn main() -> Result<()> {
     //   zhtw-mcp pack export <name>             — export a pack
     //   zhtw-mcp pack validate <file>           — validate a pack file
     //   zhtw-mcp pack list                      — list available packs
-    let mut overrides_path: Option<PathBuf> = None;
-    let mut suppressions_path: Option<PathBuf> = None;
-    let mut packs_dir: Option<PathBuf> = None;
-    let mut active_packs: Vec<String> = Vec::new();
-    let mut lint_files: Vec<String> = Vec::new();
-    let mut lint_format = LintFormat::Human;
-    let mut max_errors: Option<usize> = None;
-    let mut max_warnings: Option<usize> = None;
-    let mut profile_str: Option<String> = None;
-    let mut content_type_str: Option<String> = None;
-    let mut exclude_patterns: Vec<String> = Vec::new();
-    let mut config_path: Option<PathBuf> = None;
-    let mut fix_mode: Option<zhtw_mcp::fixer::FixMode> = None;
-    let mut dry_run = false;
-    let mut explain = false;
-    let mut relaxed = false;
-    let mut exempt_blockquotes = false;
-    let mut consistency = false;
-    let mut detect_ai = false;
-    let mut detect_translationese = false;
-
-    // Emit composite three-axis scorecard when --detect-style is used (set
-    // alongside detect_ai + detect_translationese in that arm).
-    let mut detect_style = false;
-    let mut translationese_domain =
-        zhtw_mcp::engine::translationese_score::TranslationeseDomain::General;
-    let mut ai_threshold_multiplier: f32 = 1.0;
-    let mut baseline_path: Option<PathBuf> = None;
-    let mut update_baseline = false;
-    let mut diff_from: Option<String> = None;
-    #[cfg(feature = "translate")]
-    let mut verify = false;
-    let mut telemetry = false;
-    let mut setup_host: Option<String> = None;
-    let mut pack_cmd: Option<String> = None;
-    let mut pack_arg: Option<String> = None;
-    let mut tm_cmd: Option<String> = None;
-    let mut tm_arg: Option<String> = None;
-    let mut tm_record_found: Option<String> = None;
-    let mut tm_record_suggested: Option<String> = None;
-    let mut tm_record_chose: Option<String> = None;
-    let mut tm_record_context: Option<String> = None;
+    let mut cli = Cli {
+        overrides_path: None,
+        suppressions_path: None,
+        packs_dir: None,
+        active_packs: Vec::new(),
+        config_path: None,
+        command: Command::Server,
+    };
     let mut i = 1;
 
     while i < args.len() {
         match args[i].as_str() {
             "--overrides" | "--db" => {
                 i += 1;
-                overrides_path = Some(PathBuf::from(
-                    args.get(i).context("--overrides requires a path")?,
-                ));
+                cli.overrides_path = Some(path_value(args.get(i), "--overrides requires a path")?);
             }
             "--pack" => {
                 i += 1;
-                active_packs.push(args.get(i).context("--pack requires a name")?.clone());
+                cli.active_packs
+                    .push(args.get(i).context("--pack requires a name")?.clone());
             }
             "--packs-dir" => {
                 i += 1;
-                packs_dir = Some(PathBuf::from(
-                    args.get(i).context("--packs-dir requires a path")?,
-                ));
+                cli.packs_dir = Some(path_value(args.get(i), "--packs-dir requires a path")?);
             }
             "lint" => {
-                i += 1;
-                // Collect all non-flag arguments as files.
-                while i < args.len() {
-                    match args[i].as_str() {
-                        "--format" => {
-                            i += 1;
-                            let fmt = args.get(i).context("--format requires a value")?;
-                            lint_format = match fmt.as_str() {
-                                "json" => LintFormat::Json,
-                                "human" => LintFormat::Human,
-                                "sarif" => LintFormat::Sarif,
-                                "compact" => LintFormat::Compact,
-                                "tabular" => LintFormat::Tabular,
-                                _ => anyhow::bail!(
-                                    "unknown format: {fmt} (expected 'json', 'human', 'sarif', 'compact', or 'tabular')"
-                                ),
-                            };
-                        }
-                        "--max-errors" => {
-                            i += 1;
-                            let v: usize = args
-                                .get(i)
-                                .context("--max-errors requires a number")?
-                                .parse()
-                                .context("--max-errors must be a non-negative integer")?;
-                            max_errors = Some(v);
-                        }
-                        "--max-warnings" => {
-                            i += 1;
-                            max_warnings = Some(
-                                args.get(i)
-                                    .context("--max-warnings requires a number")?
-                                    .parse()
-                                    .context("--max-warnings must be a non-negative integer")?,
-                            );
-                        }
-                        "--profile" => {
-                            i += 1;
-                            profile_str =
-                                Some(args.get(i).context("--profile requires a value")?.clone());
-                        }
-                        "--relaxed" => {
-                            relaxed = true;
-                        }
-                        "--exempt-blockquotes" => {
-                            exempt_blockquotes = true;
-                        }
-                        "--consistency" => {
-                            consistency = true;
-                        }
-                        "--content-type" => {
-                            i += 1;
-                            let ct = args.get(i).context("--content-type requires a value")?;
-                            match ct.as_str() {
-                                "plain" | "markdown" | "markdown-scan-code" | "yaml" => {
-                                    content_type_str = Some(ct.clone())
-                                }
-                                _ => anyhow::bail!(
-                                    "unknown content-type: {ct} (expected 'plain', 'markdown', 'markdown-scan-code', or 'yaml')"
-                                ),
-                            }
-                        }
-                        "--exclude" => {
-                            i += 1;
-                            exclude_patterns
-                                .push(args.get(i).context("--exclude requires a pattern")?.clone());
-                        }
-                        "--fix" | "--fix=lexical_safe" => {
-                            fix_mode = Some(zhtw_mcp::fixer::FixMode::LexicalSafe);
-                        }
-                        "--fix=orthographic" => {
-                            fix_mode = Some(zhtw_mcp::fixer::FixMode::Orthographic);
-                        }
-                        "--fix=lexical_contextual" => {
-                            fix_mode = Some(zhtw_mcp::fixer::FixMode::LexicalContextual);
-                        }
-                        arg if arg.starts_with("--fix=") => {
-                            anyhow::bail!(
-                                "unknown fix mode: {} (expected 'orthographic', 'lexical_safe', or 'lexical_contextual')",
-                                &arg[6..]
-                            );
-                        }
-                        "--dry-run" => {
-                            dry_run = true;
-                        }
-                        "--explain" => {
-                            explain = true;
-                        }
-                        "--baseline" => {
-                            i += 1;
-                            baseline_path = Some(PathBuf::from(
-                                args.get(i).context("--baseline requires a file path")?,
-                            ));
-                        }
-                        "--update-baseline" => {
-                            update_baseline = true;
-                        }
-                        "--diff-from" => {
-                            i += 1;
-                            diff_from = Some(
-                                args.get(i)
-                                    .context("--diff-from requires a git ref")?
-                                    .clone(),
-                            );
-                        }
-                        "--detect-ai" => {
-                            detect_ai = true;
-                            // Peek at next arg for optional threshold level.
-                            if let Some(next) = args.get(i + 1) {
-                                match next.as_str() {
-                                    "low" => {
-                                        ai_threshold_multiplier = 0.5;
-                                        i += 1;
-                                    }
-                                    "medium" => {
-                                        ai_threshold_multiplier = 1.0;
-                                        i += 1;
-                                    }
-                                    "high" => {
-                                        ai_threshold_multiplier = 1.5;
-                                        i += 1;
-                                    }
-                                    _ => {} // not a threshold level, leave for next iteration
-                                }
-                            }
-                        }
-                        "--detect-translationese" => {
-                            detect_translationese = true;
-                        }
-                        "--translationese-domain" => {
-                            // Per-domain threshold calibration for the
-                            // translationese score: general | technical |
-                            // literary | news.
-                            if let Some(next) = args.get(i + 1) {
-                                match zhtw_mcp::engine::translationese_score::TranslationeseDomain::from_str_strict(next) {
-                                    Some(d) => {
-                                        translationese_domain = d;
-                                        i += 1;
-                                    }
-                                    None => {
-                                        anyhow::bail!(
-                                            "unknown --translationese-domain value '{next}' (expected: general|technical|literary|news)"
-                                        );
-                                    }
-                                }
-                            } else {
-                                anyhow::bail!(
-                                    "--translationese-domain requires a value (general|technical|literary|news)"
-                                );
-                            }
-                        }
-                        "--detect-style" => {
-                            // Combined shorthand: enable both AI filler and
-                            // translationese detection. Scores remain
-                            // orthogonal — reported side by side, never merged.
-                            detect_ai = true;
-                            detect_translationese = true;
-                            detect_style = true;
-
-                            // Keep the same optional threshold syntax as
-                            // --detect-ai.
-                            if let Some(next) = args.get(i + 1) {
-                                match next.as_str() {
-                                    "low" => {
-                                        ai_threshold_multiplier = 0.5;
-                                        i += 1;
-                                    }
-                                    "medium" => {
-                                        ai_threshold_multiplier = 1.0;
-                                        i += 1;
-                                    }
-                                    "high" => {
-                                        ai_threshold_multiplier = 1.5;
-                                        i += 1;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        #[cfg(feature = "translate")]
-                        "--verify" => {
-                            verify = true;
-                        }
-                        #[cfg(not(feature = "translate"))]
-                        "--verify" => {
-                            anyhow::bail!(
-                                "--verify requires the 'translate' feature; rebuild with --features translate"
-                            );
-                        }
-                        "--telemetry" => {
-                            telemetry = true;
-                        }
-                        "--verbose" => {}
-                        "--debug" => {}
-                        _ => {
-                            lint_files.push(args[i].clone());
-                        }
-                    }
-                    i += 1;
-                }
-                if lint_files.is_empty() {
-                    anyhow::bail!("lint requires at least one file path or '--' for stdin");
-                }
+                claim(&cli.command, "lint")?;
+                let (lint, used) = parse_lint(&args[i + 1..])?;
+                i += used;
+                cli.command = Command::Lint(Box::new(lint));
             }
             "setup" => {
+                claim(&cli.command, "setup")?;
                 i += 1;
-                setup_host = Some(args.get(i).context("setup requires a host name")?.clone());
-            }
-            "convert" => {
-                // convert subcommand: SC→TW pipeline (built-in s2t + zhtw-mcp
-                // fix). Reads SC text from files or stdin, outputs corrected
-                // zh-TW.
-                i += 1;
-                let mut convert_files: Vec<String> = Vec::new();
-                let mut convert_content_type: Option<String> = None;
-                #[cfg(feature = "translate")]
-                let mut convert_verify = false;
-                while i < args.len() {
-                    match args[i].as_str() {
-                        "--content-type" => {
-                            i += 1;
-                            convert_content_type = Some(
-                                args.get(i)
-                                    .context("--content-type requires a value")?
-                                    .clone(),
-                            );
-                        }
-                        #[cfg(feature = "translate")]
-                        "--verify" => {
-                            convert_verify = true;
-                        }
-                        #[cfg(not(feature = "translate"))]
-                        "--verify" => {
-                            anyhow::bail!(
-                                "--verify requires the 'translate' feature; rebuild with --features translate"
-                            );
-                        }
-                        "--" => {
-                            convert_files.push("--".into());
-                        }
-                        arg if arg.starts_with('-') => {
-                            anyhow::bail!("unknown convert flag: {arg}");
-                        }
-                        _ => {
-                            convert_files.push(args[i].clone());
-                        }
-                    }
-                    i += 1;
-                }
-                if convert_files.is_empty() {
-                    convert_files.push("--".into()); // default: stdin
-                }
-                return run_convert(
-                    &convert_files,
-                    convert_content_type.as_deref(),
-                    overrides_path.unwrap_or_else(zhtw_mcp::rules::store::default_overrides_path),
-                    #[cfg(feature = "translate")]
-                    convert_verify,
+                cli.command = Command::Setup(
+                    args.get(i)
+                        .context("setup requires a host name")?
+                        .to_string(),
                 );
             }
+            "convert" => {
+                claim(&cli.command, "convert")?;
+                let (convert, used) = parse_convert(&args[i + 1..])?;
+                i += used;
+                cli.command = Command::Convert(convert);
+            }
             "tm" => {
-                i += 1;
-                let subcmd = args
-                    .get(i)
-                    .context("tm requires a subcommand (list|export|import|clear|record)")?
-                    .clone();
-                match subcmd.as_str() {
-                    "export" | "import" => {
-                        i += 1;
-                        tm_arg = Some(
-                            args.get(i)
-                                .context(format!("tm {subcmd} requires a file path"))?
-                                .clone(),
-                        );
-                    }
-                    "record" => {
-                        // Parse --found, --suggested, --chose, --context
-                        // key-value args.
-                        i += 1;
-                        while i < args.len() && args[i].starts_with("--") {
-                            match args[i].as_str() {
-                                "--found" => {
-                                    i += 1;
-                                    tm_record_found = Some(
-                                        args.get(i).context("--found requires a value")?.clone(),
-                                    );
-                                }
-                                "--suggested" => {
-                                    i += 1;
-                                    tm_record_suggested = Some(
-                                        args.get(i)
-                                            .context("--suggested requires a value")?
-                                            .clone(),
-                                    );
-                                }
-                                "--chose" => {
-                                    i += 1;
-                                    tm_record_chose = Some(
-                                        args.get(i).context("--chose requires a value")?.clone(),
-                                    );
-                                }
-                                "--context" => {
-                                    i += 1;
-                                    tm_record_context = Some(
-                                        args.get(i).context("--context requires a value")?.clone(),
-                                    );
-                                }
-                                other => {
-                                    anyhow::bail!("unknown tm record flag: {other}");
-                                }
-                            }
-                            i += 1;
-                        }
-                        // Back up one so the outer loop's i += 1 doesn't skip.
-                        i -= 1;
-                    }
-                    "list" | "clear" => {}
-                    _ => {} // let run_tm_cmd report the error
-                }
-                tm_cmd = Some(subcmd);
+                claim(&cli.command, "tm")?;
+                let (tm, used) = parse_tm(&args[i + 1..])?;
+                i += used;
+                cli.command = Command::Tm(tm);
             }
             "pack" => {
-                i += 1;
-                let subcmd = args
-                    .get(i)
-                    .context("pack requires a subcommand (import|export|validate|list)")?
-                    .clone();
-                // Only consume a trailing arg for subcommands that need one.
-                match subcmd.as_str() {
-                    "import" | "export" | "validate" => {
-                        i += 1;
-                        pack_arg = Some(
-                            args.get(i)
-                                .context(format!("pack {subcmd} requires an argument"))?
-                                .clone(),
-                        );
-                    }
-                    "list" => {} // no argument
-                    _ => {}      // let run_pack_cmd report the error
-                }
-                pack_cmd = Some(subcmd);
+                claim(&cli.command, "pack")?;
+                let (cmd, arg, used) = parse_pack(&args[i + 1..])?;
+                i += used;
+                cli.command = Command::Pack { cmd, arg };
             }
             "cache" => {
-                i += 1;
-                let subcmd = args
-                    .get(i)
-                    .context("cache requires a subcommand (clear)")?
-                    .clone();
-                match subcmd.as_str() {
-                    "clear" => {
-                        if i + 1 < args.len() {
-                            anyhow::bail!(
-                                "cache clear does not accept additional arguments: {}",
-                                args[i + 1]
-                            );
-                        }
-                        let mut cache =
-                            zhtw_mcp::rules::judgment_cache::JudgmentCache::open_default();
-                        let count = cache.len();
-                        cache.clear();
-                        cache.flush();
-                        eprintln!("judgment cache cleared ({count} entries removed)");
-                        return Ok(());
-                    }
-                    other => anyhow::bail!("unknown cache subcommand: {other} (expected 'clear')"),
-                }
+                claim(&cli.command, "cache")?;
+                i += parse_cache(&args[i + 1..])?;
+                cli.command = Command::CacheClear;
             }
             "--suppressions" => {
                 i += 1;
-                suppressions_path = Some(PathBuf::from(
-                    args.get(i).context("--suppressions requires a path")?,
-                ));
+                cli.suppressions_path =
+                    Some(path_value(args.get(i), "--suppressions requires a path")?);
             }
             "--config" => {
                 i += 1;
-                config_path = Some(PathBuf::from(
-                    args.get(i).context("--config requires a path")?,
-                ));
+                cli.config_path = Some(path_value(args.get(i), "--config requires a path")?);
             }
             "--verbose" => {}
             "--debug" => {}
@@ -519,166 +304,527 @@ fn main() -> Result<()> {
         i += 1;
     }
 
+    Ok(cli)
+}
+
+/// Parse the arguments after `lint`.
+///
+/// `lint` consumes the rest of the command line: anything that is not a known
+/// flag is a file path, so a global flag written after `lint` becomes a path
+/// rather than an error. Returns the arguments consumed, like every other
+/// subcommand parser here, so `parse_args` advances its cursor the same way for
+/// all of them.
+fn parse_lint(rest: &[String]) -> Result<(LintArgs, usize)> {
+    let mut lint = LintArgs::default();
+    let mut i = 0;
+
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--format" => {
+                i += 1;
+                let fmt = rest.get(i).context("--format requires a value")?;
+                lint.format = match fmt.as_str() {
+                    "json" => LintFormat::Json,
+                    "human" => LintFormat::Human,
+                    "sarif" => LintFormat::Sarif,
+                    "compact" => LintFormat::Compact,
+                    "tabular" => LintFormat::Tabular,
+                    _ => anyhow::bail!(
+                        "unknown format: {fmt} (expected 'json', 'human', 'sarif', 'compact', or 'tabular')"
+                    ),
+                };
+            }
+            "--max-errors" => {
+                i += 1;
+                lint.max_errors = Some(
+                    rest.get(i)
+                        .context("--max-errors requires a number")?
+                        .parse()
+                        .context("--max-errors must be a non-negative integer")?,
+                );
+            }
+            "--max-warnings" => {
+                i += 1;
+                lint.max_warnings = Some(
+                    rest.get(i)
+                        .context("--max-warnings requires a number")?
+                        .parse()
+                        .context("--max-warnings must be a non-negative integer")?,
+                );
+            }
+            "--profile" => {
+                i += 1;
+                lint.profile = Some(rest.get(i).context("--profile requires a value")?.clone());
+            }
+            "--relaxed" => {
+                lint.relaxed = true;
+            }
+            "--exempt-blockquotes" => {
+                lint.exempt_blockquotes = true;
+            }
+            "--consistency" => {
+                lint.consistency = true;
+            }
+            "--content-type" => {
+                i += 1;
+                lint.content_type = Some(validated_content_type(rest.get(i))?);
+            }
+            "--exclude" => {
+                i += 1;
+                lint.exclude_patterns
+                    .push(rest.get(i).context("--exclude requires a pattern")?.clone());
+            }
+            "--fix" | "--fix=lexical_safe" => {
+                lint.fix_mode = Some(zhtw_mcp::fixer::FixMode::LexicalSafe);
+            }
+            "--fix=orthographic" => {
+                lint.fix_mode = Some(zhtw_mcp::fixer::FixMode::Orthographic);
+            }
+            "--fix=lexical_contextual" => {
+                lint.fix_mode = Some(zhtw_mcp::fixer::FixMode::LexicalContextual);
+            }
+            arg if arg.starts_with("--fix=") => {
+                anyhow::bail!(
+                    "unknown fix mode: {} (expected 'orthographic', 'lexical_safe', or 'lexical_contextual')",
+                    &arg[6..]
+                );
+            }
+            "--dry-run" => {
+                lint.dry_run = true;
+            }
+            "--explain" => {
+                lint.explain = true;
+            }
+            "--baseline" => {
+                i += 1;
+                lint.baseline_path =
+                    Some(path_value(rest.get(i), "--baseline requires a file path")?);
+            }
+            "--update-baseline" => {
+                lint.update_baseline = true;
+            }
+            "--diff-from" => {
+                i += 1;
+                lint.diff_from = Some(
+                    rest.get(i)
+                        .context("--diff-from requires a git ref")?
+                        .clone(),
+                );
+            }
+            "--detect-ai" => {
+                lint.detect_ai = true;
+                if let Some(mult) = detect_threshold(rest.get(i + 1)) {
+                    lint.ai_threshold_multiplier = mult;
+                    i += 1;
+                }
+            }
+            "--detect-translationese" => {
+                lint.detect_translationese = true;
+            }
+            "--translationese-domain" => {
+                // Per-domain threshold calibration for the
+                // translationese score: general | technical |
+                // literary | news.
+                let next = rest.get(i + 1).context(
+                    "--translationese-domain requires a value (general|technical|literary|news)",
+                )?;
+                let domain =
+                    zhtw_mcp::engine::translationese_score::TranslationeseDomain::from_str_strict(
+                        next,
+                    );
+                lint.translationese_domain = domain.with_context(|| {
+                    format!(
+                        "unknown --translationese-domain value '{next}' (expected: general|technical|literary|news)"
+                    )
+                })?;
+                i += 1;
+            }
+            "--detect-style" => {
+                // Combined shorthand: enable both AI filler and translationese
+                // detection. Scores remain orthogonal — reported side by side,
+                // never merged.
+                lint.detect_ai = true;
+                lint.detect_translationese = true;
+                lint.detect_style = true;
+
+                // Keep the same optional threshold syntax as --detect-ai.
+                if let Some(mult) = detect_threshold(rest.get(i + 1)) {
+                    lint.ai_threshold_multiplier = mult;
+                    i += 1;
+                }
+            }
+            #[cfg(feature = "translate")]
+            "--verify" => {
+                lint.verify = true;
+            }
+            #[cfg(not(feature = "translate"))]
+            "--verify" => {
+                anyhow::bail!(
+                    "--verify requires the 'translate' feature; rebuild with --features translate"
+                );
+            }
+            "--telemetry" => {
+                lint.telemetry = true;
+            }
+            "--verbose" => {}
+            "--debug" => {}
+            _ => {
+                lint.files.push(rest[i].clone());
+            }
+        }
+        i += 1;
+    }
+
+    if lint.files.is_empty() {
+        anyhow::bail!("lint requires at least one file path or '--' for stdin");
+    }
+    if lint.detect_style && !matches!(lint.format, LintFormat::Json) {
+        anyhow::bail!("--detect-style is only supported with --format json");
+    }
+    Ok((lint, i))
+}
+
+/// Parse the arguments after `convert`, which also consumes the rest of the
+/// command line.  With no file arguments it reads stdin.
+fn parse_convert(rest: &[String]) -> Result<(ConvertArgs, usize)> {
+    let mut convert = ConvertArgs::default();
+    let mut i = 0;
+
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--content-type" => {
+                i += 1;
+                convert.content_type = Some(validated_content_type(rest.get(i))?);
+            }
+            #[cfg(feature = "translate")]
+            "--verify" => {
+                convert.verify = true;
+            }
+            #[cfg(not(feature = "translate"))]
+            "--verify" => {
+                anyhow::bail!(
+                    "--verify requires the 'translate' feature; rebuild with --features translate"
+                );
+            }
+            "--" => {
+                convert.files.push("--".into());
+            }
+            arg if arg.starts_with('-') => {
+                anyhow::bail!("unknown convert flag: {arg}");
+            }
+            _ => {
+                convert.files.push(rest[i].clone());
+            }
+        }
+        i += 1;
+    }
+    if convert.files.is_empty() {
+        convert.files.push("--".into()); // default: stdin
+    }
+    Ok((convert, i))
+}
+
+/// Parse the arguments after `tm`.  Only `export`, `import`, and `record`
+/// consume anything beyond the subcommand name; an unknown subcommand is passed
+/// through so `run_tm_cmd` reports it.
+fn parse_tm(rest: &[String]) -> Result<(TmArgs, usize)> {
+    let mut tm = TmArgs {
+        cmd: rest
+            .first()
+            .context("tm requires a subcommand (list|export|import|clear|record)")?
+            .clone(),
+        ..TmArgs::default()
+    };
+    let mut i = 1;
+
+    match tm.cmd.as_str() {
+        "export" | "import" => {
+            tm.arg = Some(
+                rest.get(i)
+                    .with_context(|| format!("tm {} requires a file path", tm.cmd))?
+                    .clone(),
+            );
+            i += 1;
+        }
+        "record" => {
+            while i < rest.len() && rest[i].starts_with("--") {
+                let flag = rest[i].as_str();
+                let slot = match flag {
+                    "--found" => &mut tm.found,
+                    "--suggested" => &mut tm.suggested,
+                    "--chose" => &mut tm.chose,
+                    "--context" => &mut tm.context,
+                    other => anyhow::bail!("unknown tm record flag: {other}"),
+                };
+                *slot = Some(
+                    rest.get(i + 1)
+                        .with_context(|| format!("{flag} requires a value"))?
+                        .clone(),
+                );
+                i += 2;
+            }
+        }
+        _ => {} // list, clear, and anything run_tm_cmd should reject
+    }
+    Ok((tm, i))
+}
+
+/// Parse the arguments after `pack`.  Only `import`, `export`, and `validate`
+/// take an argument; `list` does not, and an unknown subcommand is passed
+/// through so `run_pack_cmd` reports it.
+fn parse_pack(rest: &[String]) -> Result<(String, Option<String>, usize)> {
+    let cmd = rest
+        .first()
+        .context("pack requires a subcommand (import|export|validate|list)")?
+        .clone();
+    match cmd.as_str() {
+        "import" | "export" | "validate" => {
+            let arg = rest
+                .get(1)
+                .with_context(|| format!("pack {cmd} requires an argument"))?
+                .clone();
+            Ok((cmd, Some(arg), 2))
+        }
+        _ => Ok((cmd, None, 1)),
+    }
+}
+
+/// Parse the arguments after `cache`.  `clear` is the only subcommand and it
+/// takes nothing, so trailing arguments are a typo worth reporting.
+fn parse_cache(rest: &[String]) -> Result<usize> {
+    match rest.first().map(String::as_str) {
+        Some("clear") => match rest.get(1) {
+            Some(extra) => {
+                anyhow::bail!("cache clear does not accept additional arguments: {extra}")
+            }
+            None => Ok(1),
+        },
+        Some(other) => anyhow::bail!("unknown cache subcommand: {other} (expected 'clear')"),
+        None => anyhow::bail!("cache requires a subcommand (clear)"),
+    }
+}
+
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let default_log = if args.iter().any(|a| a == "--debug") {
+        "debug"
+    } else if args.iter().any(|a| a == "--verbose") {
+        "info"
+    } else {
+        "warn"
+    };
+    zhtw_mcp::trace::init(default_log);
+
+    run(parse_args(&args)?)
+}
+
+/// Execute a parsed command line.  Everything that reads the environment, the
+/// filesystem, or the network lives here rather than in `parse_args`.
+fn run(cli: Cli) -> Result<()> {
+    let Cli {
+        overrides_path,
+        suppressions_path,
+        packs_dir,
+        active_packs,
+        config_path,
+        command,
+    } = cli;
     let packs_dir = packs_dir.unwrap_or_else(zhtw_mcp::rules::store::default_packs_dir);
 
-    // Setup subcommand: generate integration config for a host editor.
-    if let Some(ref host_str) = setup_host {
-        if host_str == "translation-guide" || host_str == "translation_guide" {
-            return run_translation_guide();
-        }
-        return run_setup(host_str);
-    }
-
-    // TM subcommand: manage translation memory. Respect .zhtw-mcp.toml
-    // translation_memory override so `tm record` writes to the same file that
-    // `lint` reads.
-    if let Some(cmd) = tm_cmd {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let project_cfg = match &config_path {
-            Some(p) => zhtw_mcp::config::ProjectConfig::from_file(p).ok(),
-            None => zhtw_mcp::config::ProjectConfig::discover(&cwd),
-        };
-        let tm_path = project_cfg
-            .as_ref()
-            .and_then(|c| c.translation_memory.as_ref().map(PathBuf::from))
-            .unwrap_or_else(|| zhtw_mcp::rules::store::discover_tm_path(&cwd));
-        return run_tm_cmd(
-            &cmd,
-            tm_arg.as_deref(),
-            &tm_path,
-            tm_record_found.as_deref(),
-            tm_record_suggested.as_deref(),
-            tm_record_chose.as_deref(),
-            tm_record_context.as_deref(),
-        );
-    }
-
-    // Pack subcommand: manage rule packs.
-    if let Some(cmd) = pack_cmd {
-        return run_pack_cmd(&cmd, pack_arg.as_deref(), &packs_dir);
-    }
-
-    // Lint subcommand: batch mode supporting multiple files.
-    if !lint_files.is_empty() {
-        // Load project config: explicit --config > auto-discover from cwd.
-        let project_cfg = match &config_path {
-            Some(p) => Some(zhtw_mcp::config::ProjectConfig::from_file(p)?),
-            None => {
-                let cwd = std::env::current_dir().unwrap_or_default();
-                zhtw_mcp::config::ProjectConfig::discover(&cwd)
+    match command {
+        // Setup subcommand: generate integration config for a host editor.
+        Command::Setup(host) => {
+            if host == "translation-guide" || host == "translation_guide" {
+                return run_translation_guide();
             }
-        };
-
-        // Merge: CLI flags override config, config overrides defaults.
-        let cfg_ref = project_cfg.as_ref();
-        let eff_overrides = overrides_path
-            .or_else(|| cfg_ref.and_then(|c| c.overrides.as_ref().map(PathBuf::from)))
-            .unwrap_or_else(zhtw_mcp::rules::store::default_overrides_path);
-        let eff_profile = profile_str
-            .as_deref()
-            .or_else(|| cfg_ref.and_then(|c| c.profile.as_deref()));
-        // CLI --relaxed flag overrides config file relaxed setting.
-        let eff_relaxed = relaxed || cfg_ref.and_then(|c| c.relaxed).unwrap_or(false);
-        // CLI --exempt-blockquotes flag OR `[markdown] exempt_blockquotes`.
-        let eff_exempt_blockquotes = exempt_blockquotes
-            || cfg_ref
-                .and_then(|c| c.markdown.as_ref())
-                .and_then(|m| m.exempt_blockquotes)
-                .unwrap_or(false);
-        let eff_content_type = content_type_str
-            .as_deref()
-            .or_else(|| cfg_ref.and_then(|c| c.content_type.as_deref()));
-        let eff_max_errors = max_errors
-            .or_else(|| cfg_ref.and_then(|c| c.max_errors))
-            .unwrap_or(0);
-        let eff_max_warnings = max_warnings.or_else(|| cfg_ref.and_then(|c| c.max_warnings));
-
-        // Merge exclude patterns: CLI + config.
-        if let Some(cfg_exclude) = cfg_ref.and_then(|c| c.exclude.as_ref()) {
-            for pat in cfg_exclude {
-                if !exclude_patterns.contains(pat) {
-                    exclude_patterns.push(pat.clone());
-                }
-            }
+            run_setup(&host)
         }
 
-        // Merge packs: CLI + config.
-        if let Some(cfg_packs) = cfg_ref.and_then(|c| c.packs.as_ref()) {
-            for p in cfg_packs {
-                if !active_packs.contains(p) {
-                    active_packs.push(p.clone());
-                }
-            }
+        Command::CacheClear => {
+            let mut cache = zhtw_mcp::rules::judgment_cache::JudgmentCache::open_default();
+            let count = cache.len();
+            cache.clear();
+            cache.flush();
+            eprintln!("judgment cache cleared ({count} entries removed)");
+            Ok(())
         }
 
-        // Resolve TM path: config override > auto-discover from cwd.
-        let eff_tm_path = cfg_ref
-            .and_then(|c| c.translation_memory.as_ref().map(PathBuf::from))
-            .unwrap_or_else(|| {
-                let cwd = std::env::current_dir().unwrap_or_default();
-                zhtw_mcp::rules::store::discover_tm_path(&cwd)
-            });
-
-        // Build project glossary from `[glossary]` section.
-        let eff_glossary = cfg_ref
-            .and_then(|c| c.glossary.as_ref())
-            .map(|g| zhtw_mcp::rules::glossary::ProjectGlossary {
-                banned: g.banned.clone().unwrap_or_default(),
-                preferred: g.preferred.clone().unwrap_or_default(),
-                proper_nouns: g.proper_nouns.clone().unwrap_or_default(),
-            })
-            .unwrap_or_default();
-
-        if detect_style && !matches!(lint_format, LintFormat::Json) {
-            anyhow::bail!("--detect-style is only supported with --format json");
-        }
-
-        return run_lint_batch(&LintBatchParams {
-            file_args: &lint_files,
-            format: lint_format,
-            max_errors: eff_max_errors,
-            max_warnings: eff_max_warnings,
-            profile_name: eff_profile,
-            content_type_override: eff_content_type,
-            overrides_path: &eff_overrides,
-            packs_dir: &packs_dir,
-            active_packs: &active_packs,
-            exclude_patterns: &exclude_patterns,
-            fix_mode: fix_mode.unwrap_or(zhtw_mcp::fixer::FixMode::None),
-            dry_run,
-            explain,
-            baseline_path: baseline_path.as_deref(),
-            update_baseline,
-            diff_from: diff_from.as_deref(),
+        Command::Convert(convert) => run_convert(
+            &convert.files,
+            convert.content_type.as_deref(),
+            overrides_path.unwrap_or_else(zhtw_mcp::rules::store::default_overrides_path),
             #[cfg(feature = "translate")]
-            verify,
-            relaxed: eff_relaxed,
-            exempt_blockquotes: eff_exempt_blockquotes,
-            detect_ai,
-            detect_translationese,
-            detect_style,
-            translationese_domain,
-            ai_threshold_multiplier,
-            tm_path: Some(eff_tm_path),
-            glossary: eff_glossary,
-            consistency,
-            telemetry,
+            convert.verify,
+        ),
+
+        // TM subcommand: manage translation memory. Respect .zhtw-mcp.toml
+        // translation_memory override so `tm record` writes to the same file
+        // that `lint` reads.
+        Command::Tm(tm) => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let project_cfg = match &config_path {
+                Some(p) => zhtw_mcp::config::ProjectConfig::from_file(p).ok(),
+                None => zhtw_mcp::config::ProjectConfig::discover(&cwd),
+            };
+            let tm_path = project_cfg
+                .as_ref()
+                .and_then(|c| c.translation_memory.as_ref().map(PathBuf::from))
+                .unwrap_or_else(|| zhtw_mcp::rules::store::discover_tm_path(&cwd));
+            run_tm_cmd(
+                &tm.cmd,
+                tm.arg.as_deref(),
+                &tm_path,
+                tm.found.as_deref(),
+                tm.suggested.as_deref(),
+                tm.chose.as_deref(),
+                tm.context.as_deref(),
+            )
+        }
+
+        // Pack subcommand: manage rule packs.
+        Command::Pack { cmd, arg } => run_pack_cmd(&cmd, arg.as_deref(), &packs_dir),
+
+        // Lint subcommand: batch mode supporting multiple files.
+        Command::Lint(lint) => {
+            run_lint(*lint, overrides_path, config_path, packs_dir, active_packs)
+        }
+
+        Command::Server => {
+            // Server mode: open override store, then run MCP over stdio.
+            let overrides_path =
+                overrides_path.unwrap_or_else(zhtw_mcp::rules::store::default_overrides_path);
+            let suppressions_path =
+                suppressions_path.unwrap_or_else(zhtw_mcp::rules::store::default_suppressions_path);
+            run_server(&overrides_path, &suppressions_path, packs_dir, active_packs)
+        }
+    }
+}
+
+/// Merge `lint` flags with `.zhtw-mcp.toml`, then run the batch.  CLI flags win
+/// over config values, config values win over defaults.
+fn run_lint(
+    lint: LintArgs,
+    overrides_path: Option<PathBuf>,
+    config_path: Option<PathBuf>,
+    packs_dir: PathBuf,
+    mut active_packs: Vec<String>,
+) -> Result<()> {
+    // Load project config: explicit --config > auto-discover from cwd.
+    let project_cfg = match &config_path {
+        Some(p) => Some(zhtw_mcp::config::ProjectConfig::from_file(p)?),
+        None => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            zhtw_mcp::config::ProjectConfig::discover(&cwd)
+        }
+    };
+
+    let cfg_ref = project_cfg.as_ref();
+    let eff_overrides = overrides_path
+        .or_else(|| cfg_ref.and_then(|c| c.overrides.as_ref().map(PathBuf::from)))
+        .unwrap_or_else(zhtw_mcp::rules::store::default_overrides_path);
+    let eff_profile = lint
+        .profile
+        .as_deref()
+        .or_else(|| cfg_ref.and_then(|c| c.profile.as_deref()));
+    // CLI --relaxed flag overrides config file relaxed setting.
+    let eff_relaxed = lint.relaxed || cfg_ref.and_then(|c| c.relaxed).unwrap_or(false);
+    // CLI --exempt-blockquotes flag OR `[markdown] exempt_blockquotes`.
+    let eff_exempt_blockquotes = lint.exempt_blockquotes
+        || cfg_ref
+            .and_then(|c| c.markdown.as_ref())
+            .and_then(|m| m.exempt_blockquotes)
+            .unwrap_or(false);
+    let eff_content_type = lint
+        .content_type
+        .as_deref()
+        .or_else(|| cfg_ref.and_then(|c| c.content_type.as_deref()));
+    let eff_max_errors = lint
+        .max_errors
+        .or_else(|| cfg_ref.and_then(|c| c.max_errors))
+        .unwrap_or(0);
+    let eff_max_warnings = lint
+        .max_warnings
+        .or_else(|| cfg_ref.and_then(|c| c.max_warnings));
+
+    // Merge exclude patterns: CLI + config.
+    let mut exclude_patterns = lint.exclude_patterns;
+    if let Some(cfg_exclude) = cfg_ref.and_then(|c| c.exclude.as_ref()) {
+        for pat in cfg_exclude {
+            if !exclude_patterns.contains(pat) {
+                exclude_patterns.push(pat.clone());
+            }
+        }
+    }
+
+    // Merge packs: CLI + config.
+    if let Some(cfg_packs) = cfg_ref.and_then(|c| c.packs.as_ref()) {
+        for p in cfg_packs {
+            if !active_packs.contains(p) {
+                active_packs.push(p.clone());
+            }
+        }
+    }
+
+    // Resolve TM path: config override > auto-discover from cwd.
+    let eff_tm_path = cfg_ref
+        .and_then(|c| c.translation_memory.as_ref().map(PathBuf::from))
+        .unwrap_or_else(|| {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            zhtw_mcp::rules::store::discover_tm_path(&cwd)
         });
-    }
 
-    // Reject lint-only flags used without lint subcommand.
-    if content_type_str.is_some() {
-        anyhow::bail!("--content-type is only valid with the 'lint' subcommand");
-    }
+    // Build project glossary from `[glossary]` section.
+    let eff_glossary = cfg_ref
+        .and_then(|c| c.glossary.as_ref())
+        .map(|g| zhtw_mcp::rules::glossary::ProjectGlossary {
+            banned: g.banned.clone().unwrap_or_default(),
+            preferred: g.preferred.clone().unwrap_or_default(),
+            proper_nouns: g.proper_nouns.clone().unwrap_or_default(),
+        })
+        .unwrap_or_default();
 
-    // Server mode: open override store, then run MCP over stdio.
-    let overrides_path =
-        overrides_path.unwrap_or_else(zhtw_mcp::rules::store::default_overrides_path);
+    run_lint_batch(&LintBatchParams {
+        file_args: &lint.files,
+        format: lint.format,
+        max_errors: eff_max_errors,
+        max_warnings: eff_max_warnings,
+        profile_name: eff_profile,
+        content_type_override: eff_content_type,
+        overrides_path: &eff_overrides,
+        packs_dir: &packs_dir,
+        active_packs: &active_packs,
+        exclude_patterns: &exclude_patterns,
+        fix_mode: lint.fix_mode.unwrap_or(zhtw_mcp::fixer::FixMode::None),
+        dry_run: lint.dry_run,
+        explain: lint.explain,
+        baseline_path: lint.baseline_path.as_deref(),
+        update_baseline: lint.update_baseline,
+        diff_from: lint.diff_from.as_deref(),
+        #[cfg(feature = "translate")]
+        verify: lint.verify,
+        relaxed: eff_relaxed,
+        exempt_blockquotes: eff_exempt_blockquotes,
+        detect_ai: lint.detect_ai,
+        detect_translationese: lint.detect_translationese,
+        detect_style: lint.detect_style,
+        translationese_domain: lint.translationese_domain,
+        ai_threshold_multiplier: lint.ai_threshold_multiplier,
+        tm_path: Some(eff_tm_path),
+        glossary: eff_glossary,
+        consistency: lint.consistency,
+        telemetry: lint.telemetry,
+    })
+}
 
-    let suppressions_path =
-        suppressions_path.unwrap_or_else(zhtw_mcp::rules::store::default_suppressions_path);
-    let store = zhtw_mcp::rules::store::OverrideStore::open(&overrides_path)?;
-    let suppression_store = zhtw_mcp::rules::store::SuppressionStore::open(&suppressions_path)?;
+/// Open the stores and serve MCP over stdio.
+fn run_server(
+    overrides_path: &Path,
+    suppressions_path: &Path,
+    packs_dir: PathBuf,
+    active_packs: Vec<String>,
+) -> Result<()> {
+    let store = zhtw_mcp::rules::store::OverrideStore::open(overrides_path)?;
+    let suppression_store = zhtw_mcp::rules::store::SuppressionStore::open(suppressions_path)?;
     let pack_store = zhtw_mcp::rules::store::PackStore::new(packs_dir);
 
     // Discover translation memory in project root.
@@ -2505,4 +2651,453 @@ fn is_excluded(path: &str, patterns: &[String]) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse a command line written without the program name.
+    fn parse(argv: &[&str]) -> Result<Cli> {
+        let mut args = vec!["zhtw-mcp".to_string()];
+        args.extend(argv.iter().map(|s| s.to_string()));
+        parse_args(&args)
+    }
+
+    fn lint_of(argv: &[&str]) -> LintArgs {
+        match parse(argv).expect("parse should succeed").command {
+            Command::Lint(l) => *l,
+            _ => panic!("expected a lint command from {argv:?}"),
+        }
+    }
+
+    fn convert_of(argv: &[&str]) -> ConvertArgs {
+        match parse(argv).expect("parse should succeed").command {
+            Command::Convert(c) => c,
+            _ => panic!("expected a convert command from {argv:?}"),
+        }
+    }
+
+    fn tm_of(argv: &[&str]) -> TmArgs {
+        match parse(argv).expect("parse should succeed").command {
+            Command::Tm(t) => t,
+            _ => panic!("expected a tm command from {argv:?}"),
+        }
+    }
+
+    fn err_of(argv: &[&str]) -> String {
+        parse(argv)
+            .err()
+            .unwrap_or_else(|| panic!("expected {argv:?} to fail"))
+            .to_string()
+    }
+
+    #[test]
+    fn no_args_runs_the_server() {
+        let cli = parse(&[]).unwrap();
+        assert!(matches!(cli.command, Command::Server));
+        assert!(cli.overrides_path.is_none());
+        assert!(cli.active_packs.is_empty());
+    }
+
+    #[test]
+    fn global_flags_precede_the_subcommand() {
+        let cli = parse(&[
+            "--pack",
+            "medical",
+            "--pack",
+            "legal",
+            "--overrides",
+            "/tmp/o.json",
+            "--suppressions",
+            "/tmp/s.json",
+            "--packs-dir",
+            "/tmp/packs",
+            "--config",
+            "/tmp/c.toml",
+            "lint",
+            "a.md",
+        ])
+        .unwrap();
+        assert_eq!(cli.active_packs, ["medical", "legal"]);
+        assert_eq!(cli.overrides_path.unwrap().to_str(), Some("/tmp/o.json"));
+        assert_eq!(cli.suppressions_path.unwrap().to_str(), Some("/tmp/s.json"));
+        assert_eq!(cli.packs_dir.unwrap().to_str(), Some("/tmp/packs"));
+        assert_eq!(cli.config_path.unwrap().to_str(), Some("/tmp/c.toml"));
+    }
+
+    #[test]
+    fn global_flags_require_their_value() {
+        for flag in [
+            "--overrides",
+            "--pack",
+            "--packs-dir",
+            "--suppressions",
+            "--config",
+        ] {
+            assert!(parse(&[flag]).is_err(), "{flag} without a value must fail");
+        }
+    }
+
+    #[test]
+    fn lint_collects_files_and_defaults() {
+        let lint = lint_of(&["lint", "a.md", "b.md"]);
+        assert_eq!(lint.files, ["a.md", "b.md"]);
+        assert!(matches!(lint.format, LintFormat::Human));
+        assert_eq!(lint.max_errors, None);
+        assert!(lint.fix_mode.is_none());
+        assert!(!lint.detect_ai);
+    }
+
+    #[test]
+    fn lint_without_files_fails() {
+        assert!(err_of(&["lint"]).contains("at least one file"));
+        assert!(err_of(&["lint", "--relaxed"]).contains("at least one file"));
+    }
+
+    #[test]
+    fn lint_formats() {
+        for (name, want) in [
+            ("json", LintFormat::Json),
+            ("human", LintFormat::Human),
+            ("sarif", LintFormat::Sarif),
+            ("compact", LintFormat::Compact),
+            ("tabular", LintFormat::Tabular),
+        ] {
+            let lint = lint_of(&["lint", "a.md", "--format", name]);
+            assert_eq!(
+                std::mem::discriminant(&lint.format),
+                std::mem::discriminant(&want),
+                "--format {name}"
+            );
+        }
+        assert!(err_of(&["lint", "a.md", "--format", "xml"]).contains("unknown format"));
+        assert!(err_of(&["lint", "a.md", "--format"]).contains("requires a value"));
+    }
+
+    #[test]
+    fn lint_numeric_flags() {
+        let lint = lint_of(&["lint", "a.md", "--max-errors", "3", "--max-warnings", "7"]);
+        assert_eq!(lint.max_errors, Some(3));
+        assert_eq!(lint.max_warnings, Some(7));
+        assert!(err_of(&["lint", "a.md", "--max-errors", "x"]).contains("--max-errors"));
+        assert!(err_of(&["lint", "a.md", "--max-warnings", "-1"]).contains("--max-warnings"));
+    }
+
+    #[test]
+    fn lint_fix_modes() {
+        use zhtw_mcp::fixer::FixMode;
+        for (arg, want) in [
+            ("--fix", FixMode::LexicalSafe),
+            ("--fix=lexical_safe", FixMode::LexicalSafe),
+            ("--fix=orthographic", FixMode::Orthographic),
+            ("--fix=lexical_contextual", FixMode::LexicalContextual),
+        ] {
+            let lint = lint_of(&["lint", "a.md", arg]);
+            assert_eq!(lint.fix_mode, Some(want), "{arg}");
+        }
+        assert!(err_of(&["lint", "a.md", "--fix=wild"]).contains("unknown fix mode"));
+    }
+
+    #[test]
+    fn lint_content_type_is_validated() {
+        for ct in ["plain", "markdown", "markdown-scan-code", "yaml"] {
+            let lint = lint_of(&["lint", "a.md", "--content-type", ct]);
+            assert_eq!(lint.content_type.as_deref(), Some(ct));
+        }
+        assert!(err_of(&["lint", "a.md", "--content-type", "rst"]).contains("unknown content-type"));
+    }
+
+    #[test]
+    fn detect_ai_level_is_optional() {
+        // No level: the next token stays a file path.
+        let lint = lint_of(&["lint", "--detect-ai", "a.md"]);
+        assert!(lint.detect_ai);
+        assert_eq!(lint.files, ["a.md"]);
+        assert_eq!(lint.ai_threshold_multiplier, 1.0);
+
+        for (level, mult) in [("low", 0.5), ("medium", 1.0), ("high", 1.5)] {
+            let lint = lint_of(&["lint", "--detect-ai", level, "a.md"]);
+            assert_eq!(lint.ai_threshold_multiplier, mult, "--detect-ai {level}");
+            assert_eq!(lint.files, ["a.md"], "--detect-ai {level} ate the file");
+        }
+    }
+
+    #[test]
+    fn a_later_flag_without_a_level_keeps_the_earlier_one() {
+        // --detect-style carries no level here, so it must not reset the low
+        // threshold --detect-ai already requested. Order must not matter.
+        let a = lint_of(&[
+            "lint",
+            "a.md",
+            "--detect-ai",
+            "low",
+            "--detect-style",
+            "--format",
+            "json",
+        ]);
+        let b = lint_of(&[
+            "lint",
+            "a.md",
+            "--detect-style",
+            "--detect-ai",
+            "low",
+            "--format",
+            "json",
+        ]);
+        assert_eq!(a.ai_threshold_multiplier, 0.5);
+        assert_eq!(b.ai_threshold_multiplier, 0.5);
+
+        // An explicit level still wins, whichever flag carries it.
+        let c = lint_of(&[
+            "lint",
+            "a.md",
+            "--detect-ai",
+            "low",
+            "--detect-style",
+            "high",
+            "--format",
+            "json",
+        ]);
+        assert_eq!(c.ai_threshold_multiplier, 1.5);
+    }
+
+    #[test]
+    fn detect_style_implies_both_axes_and_needs_json() {
+        let lint = lint_of(&["lint", "a.md", "--detect-style", "--format", "json"]);
+        assert!(lint.detect_style && lint.detect_ai && lint.detect_translationese);
+        assert!(err_of(&["lint", "a.md", "--detect-style"]).contains("--format json"));
+    }
+
+    #[test]
+    fn translationese_domain_is_validated() {
+        let lint = lint_of(&["lint", "a.md", "--translationese-domain", "technical"]);
+        assert!(matches!(
+            lint.translationese_domain,
+            zhtw_mcp::engine::translationese_score::TranslationeseDomain::Technical
+        ));
+        assert!(
+            err_of(&["lint", "a.md", "--translationese-domain", "poetic"])
+                .contains("unknown --translationese-domain")
+        );
+        assert!(err_of(&["lint", "--translationese-domain"]).contains("requires a value"));
+    }
+
+    #[test]
+    fn lint_boolean_flags() {
+        let lint = lint_of(&[
+            "lint",
+            "a.md",
+            "--relaxed",
+            "--exempt-blockquotes",
+            "--consistency",
+            "--dry-run",
+            "--explain",
+            "--update-baseline",
+            "--telemetry",
+            "--detect-translationese",
+        ]);
+        assert!(lint.relaxed);
+        assert!(lint.exempt_blockquotes);
+        assert!(lint.consistency);
+        assert!(lint.dry_run);
+        assert!(lint.explain);
+        assert!(lint.update_baseline);
+        assert!(lint.telemetry);
+        assert!(lint.detect_translationese);
+    }
+
+    #[test]
+    fn lint_path_flags() {
+        let lint = lint_of(&[
+            "lint",
+            "a.md",
+            "--baseline",
+            "base.json",
+            "--diff-from",
+            "origin/main",
+            "--exclude",
+            "vendor/**",
+            "--exclude",
+            "*.tmp",
+            "--profile",
+            "strict",
+        ]);
+        assert_eq!(lint.baseline_path.unwrap().to_str(), Some("base.json"));
+        assert_eq!(lint.diff_from.as_deref(), Some("origin/main"));
+        assert_eq!(lint.exclude_patterns, ["vendor/**", "*.tmp"]);
+        assert_eq!(lint.profile.as_deref(), Some("strict"));
+    }
+
+    #[test]
+    fn lint_treats_unknown_flags_as_file_paths() {
+        // Documented behavior: global flags belong before the subcommand, so
+        // anything unrecognized after `lint` is a path, not an error.
+        let lint = lint_of(&["lint", "--pack", "medical"]);
+        assert_eq!(lint.files, ["--pack", "medical"]);
+    }
+
+    #[test]
+    fn lint_accepts_stdin_and_log_flags() {
+        let lint = lint_of(&["lint", "--", "--verbose", "--debug"]);
+        assert_eq!(lint.files, ["--"]);
+    }
+
+    #[cfg(feature = "translate")]
+    #[test]
+    fn verify_flag_is_recognized_when_the_feature_is_on() {
+        assert!(lint_of(&["lint", "a.md", "--verify"]).verify);
+        assert!(convert_of(&["convert", "--verify"]).verify);
+    }
+
+    #[cfg(not(feature = "translate"))]
+    #[test]
+    fn verify_flag_explains_the_missing_feature() {
+        assert!(err_of(&["lint", "a.md", "--verify"]).contains("translate"));
+        assert!(err_of(&["convert", "--verify"]).contains("translate"));
+    }
+
+    #[test]
+    fn convert_defaults_to_stdin() {
+        assert_eq!(convert_of(&["convert"]).files, ["--"]);
+    }
+
+    #[test]
+    fn convert_validates_content_type_like_lint() {
+        assert_eq!(
+            convert_of(&["convert", "a.md", "--content-type", "yaml"])
+                .content_type
+                .as_deref(),
+            Some("yaml")
+        );
+
+        // The two abbreviations convert accepted before the validator was
+        // shared still work, normalized to the long form.
+        for (given, want) in [("md", "markdown"), ("yml", "yaml")] {
+            assert_eq!(
+                convert_of(&["convert", "a.md", "--content-type", given])
+                    .content_type
+                    .as_deref(),
+                Some(want)
+            );
+            assert_eq!(
+                lint_of(&["lint", "a.md", "--content-type", given])
+                    .content_type
+                    .as_deref(),
+                Some(want)
+            );
+        }
+        // Used to be accepted and silently fall through to auto-detection.
+        assert!(err_of(&["convert", "a.md", "--content-type", "markdwon"])
+            .contains("unknown content-type"));
+        assert!(err_of(&["convert", "a.md", "--content-type"]).contains("requires a value"));
+    }
+
+    #[test]
+    fn convert_collects_files_and_rejects_unknown_flags() {
+        let convert = convert_of(&["convert", "a.md", "--content-type", "markdown"]);
+        assert_eq!(convert.files, ["a.md"]);
+        assert_eq!(convert.content_type.as_deref(), Some("markdown"));
+        assert!(err_of(&["convert", "--nope"]).contains("unknown convert flag"));
+    }
+
+    #[test]
+    fn tm_record_collects_key_values() {
+        let tm = tm_of(&[
+            "tm",
+            "record",
+            "--found",
+            "軟件",
+            "--suggested",
+            "軟體",
+            "--chose",
+            "軟體",
+            "--context",
+            "句子",
+        ]);
+        assert_eq!(tm.cmd, "record");
+        assert_eq!(tm.found.as_deref(), Some("軟件"));
+        assert_eq!(tm.suggested.as_deref(), Some("軟體"));
+        assert_eq!(tm.chose.as_deref(), Some("軟體"));
+        assert_eq!(tm.context.as_deref(), Some("句子"));
+        assert!(err_of(&["tm", "record", "--bogus", "x"]).contains("unknown tm record flag"));
+        assert!(err_of(&["tm", "record", "--found"]).contains("--found requires a value"));
+    }
+
+    #[test]
+    fn tm_argument_consumption_is_per_subcommand() {
+        for sub in ["export", "import"] {
+            assert_eq!(tm_of(&["tm", sub, "f.json"]).arg.as_deref(), Some("f.json"));
+            assert!(err_of(&["tm", sub]).contains("requires a file path"));
+        }
+        for sub in ["list", "clear"] {
+            assert!(tm_of(&["tm", sub]).arg.is_none());
+        }
+        assert!(err_of(&["tm"]).contains("tm requires a subcommand"));
+    }
+
+    #[test]
+    fn pack_argument_consumption_is_per_subcommand() {
+        for sub in ["import", "export", "validate"] {
+            match parse(&["pack", sub, "x"]).unwrap().command {
+                Command::Pack { cmd, arg } => {
+                    assert_eq!(cmd, sub);
+                    assert_eq!(arg.as_deref(), Some("x"));
+                }
+                _ => panic!("expected pack"),
+            }
+            assert!(err_of(&["pack", sub]).contains("requires an argument"));
+        }
+        match parse(&["pack", "list"]).unwrap().command {
+            Command::Pack { cmd, arg } => {
+                assert_eq!(cmd, "list");
+                assert!(arg.is_none());
+            }
+            _ => panic!("expected pack"),
+        }
+        assert!(err_of(&["pack"]).contains("pack requires a subcommand"));
+    }
+
+    #[test]
+    fn cache_clear_takes_no_extra_arguments() {
+        assert!(matches!(
+            parse(&["cache", "clear"]).unwrap().command,
+            Command::CacheClear
+        ));
+        assert!(err_of(&["cache", "clear", "all"]).contains("does not accept additional"));
+        assert!(err_of(&["cache", "purge"]).contains("unknown cache subcommand"));
+        assert!(err_of(&["cache"]).contains("cache requires a subcommand"));
+    }
+
+    #[test]
+    fn setup_requires_a_host() {
+        match parse(&["setup", "claude"]).unwrap().command {
+            Command::Setup(h) => assert_eq!(h, "claude"),
+            _ => panic!("expected setup"),
+        }
+        assert!(err_of(&["setup"]).contains("requires a host name"));
+    }
+
+    #[test]
+    fn a_second_subcommand_is_rejected() {
+        // The flat-variable version silently resolved this by dispatch order.
+        assert!(err_of(&["setup", "claude", "pack", "list"]).contains("only one subcommand"));
+        assert!(err_of(&["pack", "list", "cache", "clear"]).contains("only one subcommand"));
+    }
+
+    #[test]
+    fn unknown_top_level_argument_is_rejected() {
+        assert!(err_of(&["--nope"]).contains("unknown argument"));
+        assert!(err_of(&["frobnicate"]).contains("unknown argument"));
+        // --content-type is lint-only, so it is unknown at the top level.
+        assert!(err_of(&["--content-type", "markdown"]).contains("unknown argument"));
+    }
+
+    #[test]
+    fn log_level_flags_are_accepted_anywhere() {
+        assert!(matches!(
+            parse(&["--verbose", "--debug"]).unwrap().command,
+            Command::Server
+        ));
+    }
 }
