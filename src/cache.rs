@@ -73,6 +73,19 @@ pub struct ScanParams {
     // cache hits must be invalidated when toggled.
     #[serde(default)]
     pub exempt_blockquotes: bool,
+
+    // Build identity of the scanner itself. `ruleset_hash` covers the rules but
+    // not the passes that interpret them, so without this an upgrade that
+    // changes a detector keeps serving the old binary's results for every
+    // unchanged file until the 24-hour TTL expires. Carries the crate version
+    // plus a hash of the scanner sources (see `emit_engine_fingerprint` in
+    // build.rs), because a version alone only moves at a release bump and would
+    // miss exactly the source-build case this is meant to cover. Entries
+    // written before this field existed deserialize with an empty string and
+    // therefore miss, which is the intended outcome and is pinned by
+    // `legacy_entries_without_engine_version_miss`.
+    #[serde(default)]
+    pub engine_version: String,
 }
 
 /// A single cached entry.
@@ -353,29 +366,14 @@ fn default_cache_path() -> PathBuf {
 /// Hashes directly into blake3 without allocating an intermediate String.
 /// One entry per (file, params) tuple — mtime/content validated on lookup.
 fn fast_key(file_path: &str, params: &ScanParams) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(file_path.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(params.ruleset_hash.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(params.profile.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(params.content_type.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(params.fix_mode.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(if params.detect_ai { b"ai" } else { b"" });
-    hasher.update(b"\0");
-    hasher.update(if params.detect_translationese {
-        b"trans"
-    } else {
-        b""
-    });
-    hasher.update(b"\0");
-    hasher.update(params.translationese_domain.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(params.ai_threshold.as_bytes());
-    hasher.finalize().to_hex()[..32].to_string()
+    // Serialize the pair rather than listing fields. JSON is self-delimiting,
+    // with quoted strings and named keys, so distinct pairs cannot produce the
+    // same bytes, and a field added to ScanParams later joins the key without
+    // anyone remembering to add it here. Enumerating fields is how the
+    // blockquote flag and the effective profile came to be ignored for
+    // invalidation, twice, with a stale strict-lint result as the symptom.
+    let json = serde_json::to_vec(&(file_path, params)).expect("ScanParams is serializable");
+    blake3_hex(&json)[..32].to_string()
 }
 
 /// Extract mtime (seconds since epoch) from filesystem metadata.
@@ -448,6 +446,7 @@ mod tests {
             translationese_domain: "general".into(),
             ai_threshold: "1.0".into(),
             exempt_blockquotes: false,
+            engine_version: "test".into(),
         }
     }
 
@@ -462,7 +461,28 @@ mod tests {
             translationese_domain: "general".into(),
             ai_threshold: "1.0".into(),
             exempt_blockquotes: false,
+            engine_version: "test".into(),
         }
+    }
+
+    /// Put `base` into a fresh cache, confirm it hits, then confirm `variant`
+    /// misses on both the fast and the content path. Lookup never compares the
+    /// stored params, so a field absent from the key shows up here as the
+    /// variant hitting the base entry.
+    fn assert_variant_misses(base: &ScanParams, variant: &ScanParams) {
+        let dir = TempDir::new().unwrap();
+        let mut cache = ScanCache::open(dir.path().join("c.bin"));
+
+        cache.put("a.md", b"hello", 1000, 5, base, empty_output(), false, 5);
+        assert!(matches!(
+            cache.check_fast("a.md", 1000, 5, base),
+            CacheResult::Hit(_)
+        ));
+        assert!(matches!(
+            cache.check_fast("a.md", 1000, 5, variant),
+            CacheResult::Miss
+        ));
+        assert!(cache.check_content("a.md", b"hello", variant).is_none());
     }
 
     #[test]
@@ -504,95 +524,166 @@ mod tests {
 
     #[test]
     fn detect_ai_changes_cache_key() {
+        let p = test_params();
+        assert_variant_misses(
+            &p,
+            &ScanParams {
+                detect_ai: true,
+                ..p.clone()
+            },
+        );
+    }
+
+    #[test]
+    fn legacy_entries_without_engine_version_miss() {
+        // The whole invalidation scheme rests on old entries deserializing with
+        // empty defaults and therefore missing. Write a cache file that
+        // predates both new fields and check that, rather than trusting the
+        // #[serde(default)] annotations to stay put.
         let dir = TempDir::new().unwrap();
-        let mut cache = ScanCache::open(dir.path().join("c.bin"));
+        let path = dir.path().join("legacy.json");
         let p = test_params();
 
-        cache.put("a.md", b"hello", 1000, 5, &p, empty_output(), false, 5);
+        // Build a current entry, then strip the two fields back out of the
+        // serialized form to reproduce a file written by an older binary.
+        {
+            let mut cache = ScanCache::open(path.clone());
+            cache.put("a.md", b"hello", 1000, 5, &p, empty_output(), false, 5);
+            cache.flush();
+        }
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let mut stripped = 0;
+        for entry in doc.as_array_mut().expect("cache file is an array") {
+            if let Some(params) = entry.get_mut("params").and_then(|p| p.as_object_mut()) {
+                params.remove("engine_version");
+                params.remove("exempt_blockquotes");
+                stripped += 1;
+            }
+        }
+        assert!(stripped > 0, "test did not find a params object to strip");
+        std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
 
-        // Same params with detect_ai=false: hit.
-        assert!(matches!(
-            cache.check_fast("a.md", 1000, 5, &p),
-            CacheResult::Hit(_)
-        ));
+        let mut cache = ScanCache::open(path);
 
-        // Same file + mtime + size but detect_ai=true: miss (different key).
-        let p_ai = ScanParams {
-            detect_ai: true,
+        // The entry must still LOAD, which is what #[serde(default)] buys.
+        // Without it the file fails to parse, load_entries swallows the error
+        // and returns an empty map, and the Miss below would hold for the wrong
+        // reason. Looking it up with legacy-shaped params must therefore Hit.
+        let legacy_shaped = ScanParams {
+            engine_version: String::new(),
+            exempt_blockquotes: false,
             ..p.clone()
         };
+        assert!(
+            matches!(
+                cache.check_fast("a.md", 1000, 5, &legacy_shaped),
+                CacheResult::Hit(_)
+            ),
+            "legacy entry did not load: the serde defaults are gone"
+        );
+
+        // And current params miss it, because the key now carries both fields.
         assert!(matches!(
-            cache.check_fast("a.md", 1000, 5, &p_ai),
+            cache.check_fast("a.md", 1000, 5, &p),
             CacheResult::Miss
         ));
+        assert!(cache.check_content("a.md", b"hello", &p).is_none());
+    }
+
+    #[test]
+    fn exempt_blockquotes_changes_cache_key() {
+        // The flag changes which spans are scanned, so a warm cache must not
+        // answer for the other setting. It used to: the field was on ScanParams
+        // but absent from the key, so a plain lint followed by an exempt one
+        // returned the first run's issues.
+        let p = test_params();
+        assert_variant_misses(
+            &p,
+            &ScanParams {
+                exempt_blockquotes: true,
+                ..p.clone()
+            },
+        );
+    }
+
+    #[test]
+    fn profile_config_changes_cache_key() {
+        // The key carries the whole effective ProfileConfig, not the name the
+        // user asked for. The relaxed flag rewrites that config without
+        // changing the name, so keying on the name let a relaxed run answer for
+        // a strict one and a strict gate report clean. Derive both strings the
+        // way build_lint_setup does, so this pins the real mechanism rather
+        // than two arbitrary strings that happen to differ.
+        use crate::rules::ruleset::Profile;
+        let strict = Profile::Strict.config();
+        let relaxed = strict.with_relaxed();
+        assert_ne!(
+            format!("{strict:?}"),
+            format!("{relaxed:?}"),
+            "with_relaxed must change the config it is keyed on"
+        );
+
+        let p = ScanParams {
+            profile: format!("{strict:?}"),
+            ..test_params()
+        };
+        assert_variant_misses(
+            &p,
+            &ScanParams {
+                profile: format!("{relaxed:?}"),
+                ..p.clone()
+            },
+        );
+    }
+
+    #[test]
+    fn engine_version_changes_cache_key() {
+        // ruleset_hash covers the rules, not the passes that interpret them.
+        // Without this an upgrade that changes a detector keeps serving the old
+        // binary's results for every unchanged file until the TTL expires.
+        let p = test_params();
+        assert_variant_misses(
+            &p,
+            &ScanParams {
+                engine_version: "0.2.0".into(),
+                ..p.clone()
+            },
+        );
     }
 
     #[test]
     fn ai_threshold_changes_cache_key() {
-        let dir = TempDir::new().unwrap();
-        let mut cache = ScanCache::open(dir.path().join("c.bin"));
         let p = ScanParams {
             detect_ai: true,
             ai_threshold: "1.0".into(),
             ..test_params()
         };
-
-        cache.put("a.md", b"hello", 1000, 5, &p, empty_output(), false, 5);
-
-        // Same threshold: hit.
-        assert!(matches!(
-            cache.check_fast("a.md", 1000, 5, &p),
-            CacheResult::Hit(_)
-        ));
-
-        // Different threshold (low sensitivity): miss.
-        let p_low = ScanParams {
-            ai_threshold: "0.5".into(),
-            ..p.clone()
-        };
-        assert!(matches!(
-            cache.check_fast("a.md", 1000, 5, &p_low),
-            CacheResult::Miss
-        ));
-
-        // Different threshold (high sensitivity): also miss.
-        let p_high = ScanParams {
-            ai_threshold: "1.5".into(),
-            ..p.clone()
-        };
-        assert!(matches!(
-            cache.check_fast("a.md", 1000, 5, &p_high),
-            CacheResult::Miss
-        ));
+        for threshold in ["0.5", "1.5"] {
+            assert_variant_misses(
+                &p,
+                &ScanParams {
+                    ai_threshold: threshold.into(),
+                    ..p.clone()
+                },
+            );
+        }
     }
 
     #[test]
     fn translationese_domain_changes_cache_key() {
-        let dir = TempDir::new().unwrap();
-        let mut cache = ScanCache::open(dir.path().join("c.bin"));
         let p = ScanParams {
             detect_translationese: true,
             translationese_domain: "general".into(),
             ..test_params()
         };
-
-        cache.put("a.md", b"hello", 1000, 5, &p, empty_output(), false, 5);
-
-        // Same domain: hit.
-        assert!(matches!(
-            cache.check_fast("a.md", 1000, 5, &p),
-            CacheResult::Hit(_)
-        ));
-
-        // Same file + mtime + size but different calibration domain: miss.
-        let p_technical = ScanParams {
-            translationese_domain: "technical".into(),
-            ..p.clone()
-        };
-        assert!(matches!(
-            cache.check_fast("a.md", 1000, 5, &p_technical),
-            CacheResult::Miss
-        ));
+        assert_variant_misses(
+            &p,
+            &ScanParams {
+                translationese_domain: "technical".into(),
+                ..p.clone()
+            },
+        );
     }
 
     #[test]

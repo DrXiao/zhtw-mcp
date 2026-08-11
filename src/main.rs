@@ -1577,7 +1577,14 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
 
         let cache_params = zhtw_mcp::cache::ScanParams {
             ruleset_hash: ruleset_hash.clone(),
-            profile: profile.name().to_owned(),
+
+            // The whole effective config, not `profile.name()`. The name is the
+            // profile the user asked for; the scanner is built from this
+            // struct, and flags such as --relaxed change it without changing
+            // the name. Keying on the name let a --relaxed run answer for a
+            // strict one and vice versa, so a strict gate could report clean.
+            // Debug covers every field, so a new one cannot be forgotten here.
+            profile: format!("{cfg:?}"),
             content_type: format!("{content_type:?}"),
             fix_mode: fix_mode_str.clone(),
             detect_ai: params.detect_ai,
@@ -1585,6 +1592,11 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             translationese_domain: cfg.translationese_domain.name().to_owned(),
             ai_threshold: format!("{:.1}", params.ai_threshold_multiplier),
             exempt_blockquotes: cfg.exempt_blockquotes,
+            engine_version: format!(
+                "{}+{}",
+                env!("CARGO_PKG_VERSION"),
+                env!("ZHTW_ENGINE_FINGERPRINT")
+            ),
         };
 
         // Open file via fd, stat from the fd (TOCTOU-safe). Check cache BEFORE
