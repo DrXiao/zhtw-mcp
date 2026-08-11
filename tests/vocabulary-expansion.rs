@@ -14,9 +14,7 @@ fn full_scanner() -> Scanner {
     Scanner::new(ruleset.spelling_rules, ruleset.case_rules)
 }
 
-// ---------------------------------------------------------------------------
 // 4.2: Political / regional proper nouns
-// ---------------------------------------------------------------------------
 
 #[test]
 fn country_laos() {
@@ -125,9 +123,7 @@ fn tw_country_names_clean() {
     assert!(country_issues.is_empty());
 }
 
-// ---------------------------------------------------------------------------
 // 4.1: IT/software terminology
-// ---------------------------------------------------------------------------
 
 #[test]
 fn it_probability() {
@@ -157,8 +153,8 @@ fn existing_it_rules_still_fire() {
 
 #[test]
 fn namespace_not_flagged() {
-    // 命名空間 is already standard TW usage; the incorrect cross_strait
-    // rule mapping it to 名稱空間/名字空間 was removed.
+    // 命名空間 is already standard TW usage; the incorrect cross_strait rule
+    // mapping it to 名稱空間/名字空間 was removed.
     let scanner = full_scanner();
     let issues = scanner.scan("使用命名空間隔離模組").issues;
     assert!(
@@ -169,9 +165,9 @@ fn namespace_not_flagged() {
 
 #[test]
 fn row_column_vector_terms_not_swapped() {
-    // 列/行 terms are valid Taiwanese terms in row/column contexts.
-    // Generic math clues cannot prove the author meant the PRC sense, and
-    // swapping them can reverse the mathematical meaning.
+    // 列/行 terms are valid Taiwanese terms in row/column contexts. Generic
+    // math clues cannot prove the author meant the PRC sense, and swapping them
+    // can reverse the mathematical meaning.
     let scanner = full_scanner();
     let issues = scanner
         .scan("矩陣的每一列可視為列向量；矩陣的每一行可視為行向量。初等列變換與初等行變換不同。")
@@ -215,9 +211,7 @@ fn political_nouns_fire_under_all_profiles() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // 4.3: Context clues on ambiguous rules
-// ---------------------------------------------------------------------------
 
 #[test]
 fn context_clues_present_on_ambiguous_rules() {
@@ -351,9 +345,7 @@ fn country_rules_have_english_field() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // 6.2: Political stance profiles
-// ---------------------------------------------------------------------------
 
 #[test]
 fn roc_centric_flags_all_political_terms() {
@@ -456,9 +448,7 @@ fn stance_allows_rule_logic() {
     assert!(!PoliticalStance::Neutral.allows_rule("東盟"));
 }
 
-// ---------------------------------------------------------------------------
 // Context-clue gate: scanner-level false-positive suppression
-// ---------------------------------------------------------------------------
 
 #[test]
 fn scanner_suppresses_zhichi_in_political_context() {
@@ -609,14 +599,12 @@ fn scanner_fires_yunxing_in_software_context() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // 14.4: CS Terminology — 參數 must NOT be flagged (correct zh-TW for parameter)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn parameter_canshu_not_flagged() {
     // 參數 is the correct zh-TW term for "parameter"; the old rule incorrectly
-    // flagged it as wrong.  After disabling that rule, it must not fire.
+    // flagged it as wrong. After disabling that rule, it must not fire.
     let scanner = full_scanner();
     let issues = scanner.scan("函式的參數需要明確型別").issues;
     assert!(
@@ -640,9 +628,7 @@ fn argument_yinshu_not_affected() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // 宏 rule: exceptions for compound words where 宏 means "grand/vast"
-// ---------------------------------------------------------------------------
 
 #[test]
 fn macro_hong_fires_standalone() {

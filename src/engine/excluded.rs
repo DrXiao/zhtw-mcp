@@ -1,9 +1,9 @@
 // Excluded range builder.
 //
-// Builds byte ranges that should be excluded from spell-checking: URLs,
-// file paths, and @mentions. Code block/inline code exclusion is handled
-// by pulldown-cmark (see markdown.rs) for both plain-text and Markdown
-// input, replacing the former regex-based backtick patterns.
+// Builds byte ranges that should be excluded from spell-checking: URLs, file
+// paths, and @mentions. Code block/inline code exclusion is handled by
+// pulldown-cmark (see markdown.rs) for both plain-text and Markdown input,
+// replacing the former regex-based backtick patterns.
 
 use std::sync::LazyLock;
 
@@ -49,7 +49,7 @@ static RE_MENTION: LazyLock<Regex> =
 pub fn build_excluded_ranges(content: &str) -> Vec<ByteRange> {
     let mut ranges: Vec<ByteRange> = Vec::new();
 
-    // 1. URLs (no overlap check).  RE_URL uses [^\s「」『』《》]+ so it covers
+    // 1. URLs (no overlap check). RE_URL uses [^\s「」『』《》]+ so it covers
     //    IRIs (unencoded CJK path segments) while stopping before quote marks.
     add_matched_ranges(content, &RE_URL, &mut ranges, false);
 
@@ -132,8 +132,8 @@ fn add_path_ranges(content: &str, ranges: &mut Vec<ByteRange>) {
         let start = m.start();
         let end = m.end();
 
-        // Backtrack check: is this path part of a URL?
-        // Only skip paths that are continuations of a URL.
+        // Backtrack check: is this path part of a URL? Only skip paths that are
+        // continuations of a URL.
         let before_start = content.floor_char_boundary(start.saturating_sub(BACKTRACK));
         let before = &content[before_start..start];
         if is_url_suffix(before) {
@@ -326,8 +326,8 @@ mod tests {
 
     #[test]
     fn is_excluded_binary_search() {
-        // Build 12 non-overlapping ranges so we exercise the binary-search
-        // path (threshold is >10).
+        // Build 12 non-overlapping ranges so we exercise the binary-search path
+        // (threshold is >10).
         let ranges: Vec<ByteRange> = (0..12)
             .map(|i| ByteRange {
                 start: i * 10,
@@ -366,8 +366,8 @@ mod tests {
         assert!(!is_excluded(100, 101, &[]));
     }
 
-    // build_excluded_ranges does NOT cover backticks
-    // (code block exclusion is handled by pulldown-cmark in markdown.rs)
+    // build_excluded_ranges does NOT cover backticks (code block exclusion is
+    // handled by pulldown-cmark in markdown.rs)
 
     #[test]
     fn backticks_not_excluded_by_content_ranges() {

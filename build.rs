@@ -1,10 +1,10 @@
-// Build script: pre-serialize assets/ruleset.json to postcard binary format.
-// At runtime, postcard::from_bytes is ~10x faster than serde_json::from_str.
+// Build script: pre-serialize assets/ruleset.json to postcard binary format. At
+// runtime, postcard::from_bytes is ~10x faster than serde_json::from_str.
 
 use std::path::Path;
 
-// Mirror the ruleset types needed for deserialization.
-// These must match the runtime types in src/rules/ruleset.rs exactly.
+// Mirror the ruleset types needed for deserialization. These must match the
+// runtime types in src/rules/ruleset.rs exactly.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Ruleset {
     spelling_rules: Vec<SpellingRule>,

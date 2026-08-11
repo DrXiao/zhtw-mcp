@@ -1,31 +1,29 @@
 // MMSEG word segmenter.
 //
-// Scope: word boundaries only — NOT a full Chinese NLP toolkit. No POS
-// tagging, no parsing. Designed for heuristic analysis in dunhao detection
-// dunhao detection, ambiguity resolution, and variant context awareness.
+// Scope: word boundaries only — NOT a full Chinese NLP toolkit. No POS tagging,
+// no parsing. Designed for heuristic analysis in dunhao detection dunhao
+// detection, ambiguity resolution, and variant context awareness.
 //
-// Algorithm: MMSEG (Chih-Hao Tsai, 1996) 4-rule chunk scoring.
-// At each position, generate candidate 3-word chunks (up to max_word_len
-// chars each); score by 4 rules in order:
+// Algorithm: MMSEG (Chih-Hao Tsai, 1996) 4-rule chunk scoring. At each
+// position, generate candidate 3-word chunks (up to max_word_len chars each);
+// score by 4 rules in order:
 //   (1) max total matched characters in chunk
 //   (2) max average word length (fewest total words)
 //   (3) min variance of word lengths
 //   (4) max sum of frequency weights of single-character words in chunk
-// Select winning chunk's first word, advance, repeat.
-// Complexity: O(n × L^3), L = max_word_len (typically ≤ 10), so O(n).
+// Select winning chunk's first word, advance, repeat. Complexity: O(n × L^3), L
+// = max_word_len (typically ≤ 10), so O(n).
 //
-// Lexicon: built from spelling rule vocabulary (from+to terms), a general
-// zh-TW prose vocabulary (~180 common words), and a curated stop-word list
-// of common function words and particles.
-// Freq weights: rule terms=1, general vocab=5, stop words=10.
+// Lexicon: built from spelling rule vocabulary (from+to terms), a general zh-TW
+// prose vocabulary (~180 common words), and a curated stop-word list of common
+// function words and particles. Freq weights: rule terms=1, general vocab=5,
+// stop words=10.
 
 use std::collections::HashSet;
 
 use rustc_hash::FxHashMap;
 
-// ---------------------------------------------------------------------------
 // CharTrie — character-indexed trie for O(L) dict lookups
-// ---------------------------------------------------------------------------
 
 /// A node in the character trie.  Each node optionally stores a freq weight
 /// (non-zero = terminal) and a map from the next character to child nodes.
@@ -35,8 +33,9 @@ struct TrieNode {
     freq: u32,
     /// Whether this word is a rule 'from' term (excluded from boundary checks).
     is_rule_from: bool,
-    // FxHashMap: char keys don't need SipHash's DoS resistance, and this map
-    // is probed once per character on the scan hot path (~56% of spelling-only
+
+    // FxHashMap: char keys don't need SipHash's DoS resistance, and this map is
+    // probed once per character on the scan hot path (~56% of spelling-only
     // time) as well as filled on every startup.
     children: FxHashMap<char, TrieNode>,
 }
@@ -182,7 +181,9 @@ impl CharTrie {
         node.freq
     }
 
-    /// Look up a word's freq weight.  Returns `Some(freq)` if found, `None` otherwise.
+    /// Look up a word's freq weight.
+    ///
+    /// Returns `Some(freq)` if found, `None` otherwise.
     #[cfg(test)]
     fn get_freq(&self, word: &str) -> Option<u32> {
         let mut chars = word.chars();
@@ -218,7 +219,8 @@ pub struct Segmenter {
     /// Maximum word length (in chars) across all dictionary entries.
     /// Computed at construction time so long entries (e.g. country names)
     /// are reachable without a hardcoded constant.
-    /// Invariant: max_word_len <= MAX_WORD_LEN_LIMIT (enforced at construction).
+    /// Invariant: max_word_len <= MAX_WORD_LEN_LIMIT (enforced at
+    /// construction).
     max_word_len: usize,
     /// Rule 'from' terms — cn-style patterns that the AC scanner is trying
     /// to detect.  Excluded from word-boundary straddle checks so that one
@@ -393,8 +395,8 @@ impl Segmenter {
         }
 
         // Stop words get freq=10 (favours common function words at Rule 4
-        // tie-breaks).  Use insert_tracking: higher freq always wins, so
-        // stop words override freq=1 from rules even if already present.
+        // tie-breaks). Use insert_tracking: higher freq always wins, so stop
+        // words override freq=1 from rules even if already present.
         for w in STOP_WORDS {
             if trie.insert_tracking(w, 10, false, &mut max_word_len) {
                 word_count += 1;
@@ -441,14 +443,17 @@ impl Segmenter {
         result
     }
 
-    /// Select the best first-word token at pos using MMSEG 4-rule chunk scoring.
+    /// Select the best first-word token at pos using MMSEG 4-rule chunk
+    /// scoring.
     ///
     /// Generates all candidate 3-word chunks (shorter at end-of-string) and
     /// returns the first word of the highest-scoring chunk.
     fn best_first_word(&self, chars: &[(usize, char)], pos: usize) -> ChunkWord {
         let n = chars.len();
         let w1_candidates = self.candidates_at(chars, pos);
-        // Stack-allocated chunk: [words; 3] + length, avoids heap alloc per comparison.
+
+        // Stack-allocated chunk: [words; 3] + length, avoids heap alloc per
+        // comparison.
         let mut best: Option<([ChunkWord; 3], usize)> = None;
 
         for &w1 in &w1_candidates {
@@ -588,19 +593,22 @@ impl Segmenter {
     ///
     /// Non-CJK characters act as natural word boundaries.
     ///
-    /// Cost: O(L^2) dictionary lookups where L = max_word_len (typically <= 10).
+    /// Cost: O(L^2) dictionary lookups where L = max_word_len (typically <=
+    /// 10).
     pub fn word_straddles_boundary(&self, text: &str, boundary: usize) -> bool {
         self.word_straddles_boundary_with_limit(text, boundary, None)
     }
 
     /// Like `word_straddles_boundary`, but only considers dictionary words
     /// whose start position is strictly before `no_walk_after`.  When checking
-    /// the *end* boundary of a match, pass `Some(match_start)` as `no_walk_after`
+    /// the *end* boundary of a match, pass `Some(match_start)` as
+    /// `no_walk_after`
     /// so that dictionary words beginning inside the match (e.g. "目的"
     /// overlapping the end of "項目") are ignored — they represent a
     /// different segmentation, not a boundary violation.
     ///
-    /// Pass `None` to disable the limit (equivalent to `word_straddles_boundary`).
+    /// Pass `None` to disable the limit (equivalent to
+    /// `word_straddles_boundary`).
     pub fn word_straddles_boundary_with_limit(
         &self,
         text: &str,
@@ -615,7 +623,7 @@ impl Segmenter {
 
         // Fast guard: if the char immediately before the boundary is not CJK,
         // the backward walk will produce zero start positions and the function
-        // is guaranteed to return false.  Avoids the loop setup cost for
+        // is guaranteed to return false. Avoids the loop setup cost for
         // boundaries at ASCII, whitespace, or punctuation edges.
         if boundary > 0 {
             let prev = text.floor_char_boundary(boundary - 1);
@@ -628,8 +636,8 @@ impl Segmenter {
             return false;
         }
 
-        // Similarly, if the char at the boundary (the first char after it)
-        // is not CJK, no dictionary word can extend across it.
+        // Similarly, if the char at the boundary (the first char after it) is
+        // not CJK, no dictionary word can extend across it.
         if boundary < text.len() {
             if let Some(ch) = text[boundary..].chars().next() {
                 if !is_cjk_ideograph(ch) {
@@ -646,7 +654,8 @@ impl Segmenter {
     /// Check whether a known dictionary word straddles either edge of the
     /// byte range [start, end).  Combined check avoids two separate function
     /// calls for the same match span.  For the end boundary, dictionary words
-    /// starting inside the match are ignored (see `word_straddles_boundary_with_limit`).
+    /// starting inside the match are ignored (see
+    /// `word_straddles_boundary_with_limit`).
     pub fn match_straddles_word_boundary(&self, text: &str, start: usize, end: usize) -> bool {
         self.word_straddles_boundary(text, start)
             || self.word_straddles_boundary_with_limit(text, end, Some(start))
@@ -659,10 +668,12 @@ impl Segmenter {
     }
 
     /// Like [`build_boundary_bitmap`] but reuses a pre-collected char index
-    /// to avoid a redundant `char_indices()` pass when the caller already has it.
+    /// to avoid a redundant `char_indices()` pass when the caller already has
+    /// it.
     ///
     /// Uses the character trie for O(L) forward walks instead of per-substring
-    /// HashMap probes, eliminating the dominant bottleneck (56% of spelling_only).
+    /// HashMap probes, eliminating the dominant bottleneck (56% of
+    /// spelling_only).
     pub fn build_boundary_bitmap_from_chars(
         &self,
         text: &str,
@@ -688,7 +699,7 @@ impl Segmenter {
             }
 
             // Walk the trie from position i, collecting all multi-char
-            // non-rule-from dict matches.  One trie descent replaces up to
+            // non-rule-from dict matches. One trie descent replaces up to
             // max_word_len HashMap probes per position.
             self.trie
                 .walk_matches(chars, i, |char_len, _freq, is_rule_from| {
@@ -744,8 +755,9 @@ impl Segmenter {
                 break;
             }
             pos = text.floor_char_boundary(pos - 1);
+
             // Skip start positions strictly inside the match span — words
-            // starting there are not external boundary violations.  Still
+            // starting there are not external boundary violations. Still
             // consider a candidate that starts exactly at the match start,
             // because a longer dictionary word may extend past the right edge.
             if let Some(limit) = no_walk_after {
@@ -761,13 +773,13 @@ impl Segmenter {
             n_starts += 1;
         }
 
-        // For each start, walk the trie forward past the boundary looking
-        // for non-rule-from dict words that straddle it.
-        // (max_word_len <= BUF is enforced at construction via assert.)
+        // For each start, walk the trie forward past the boundary looking for
+        // non-rule-from dict words that straddle it. (max_word_len <= BUF is
+        // enforced at construction via assert.)
         for &(start, chars_before) in &starts[..n_starts] {
-            // Build a char array from start position forward. Preserve the
-            // old semantics: once probing steps past the boundary into a
-            // non-CJK character, stop before including it in the probe.
+            // Build a char array from start position forward. Preserve the old
+            // semantics: once probing steps past the boundary into a non-CJK
+            // character, stop before including it in the probe.
             let mut probe: [(usize, char); BUF] = [(0, '\0'); BUF];
             let mut plen = 0;
             let mut bpos = start;
@@ -788,7 +800,9 @@ impl Segmenter {
                     if found || is_rule_from || char_len <= chars_before {
                         return;
                     }
-                    // Word of char_len starting at 'start' extends past boundary.
+
+                    // Word of char_len starting at 'start' extends past
+                    // boundary.
                     found = true;
                 });
             if found {
@@ -831,7 +845,8 @@ pub(crate) fn token_contains_clue(token: &str, clue: &str) -> bool {
 
 const ZERO_WORD: ChunkWord = (0, 0, false);
 
-/// Returns true if chunk a scores strictly better than chunk b (stack-array variant).
+/// Returns true if chunk a scores strictly better than chunk b (stack-array
+/// variant).
 fn chunk_beats_arr(a: &([ChunkWord; 3], usize), b: &([ChunkWord; 3], usize)) -> bool {
     compare_chunks(&a.0[..a.1], &b.0[..b.1]) == std::cmp::Ordering::Greater
 }
@@ -856,20 +871,21 @@ fn compare_chunks(a: &[ChunkWord], b: &[ChunkWord]) -> std::cmp::Ordering {
         ord => return ord,
     }
 
-    // Rule 2: max average word length.
-    // With equal totals: higher average ⟺ fewer words.
+    // Rule 2: max average word length. With equal totals: higher average ⟺
+    // fewer words.
     let a_count = a.len();
     let b_count = b.len();
-    // Fewer words in a → a wins.  b_count.cmp(&a_count) is Greater when b has
+
+    // Fewer words in a → a wins. b_count.cmp(&a_count) is Greater when b has
     // more words, i.e. a has fewer words, meaning a wins (return Greater).
     match b_count.cmp(&a_count) {
         Ordering::Equal => {}
         ord => return ord,
     }
 
-    // Rule 3: min variance of word lengths.
-    // Totals and counts are equal here, so the mean is identical.
-    // Use Σ (li × count - total)² as an integer proxy for variance × count².
+    // Rule 3: min variance of word lengths. Totals and counts are equal here,
+    // so the mean is identical. Use Σ (li × count - total)² as an integer proxy
+    // for variance × count².
     let a_var: i64 = a
         .iter()
         .map(|&(l, _, _)| {
@@ -884,7 +900,8 @@ fn compare_chunks(a: &[ChunkWord], b: &[ChunkWord]) -> std::cmp::Ordering {
             d * d
         })
         .sum();
-    // Lower variance wins.  b_var.cmp(&a_var) is Greater when b_var > a_var,
+
+    // Lower variance wins. b_var.cmp(&a_var) is Greater when b_var > a_var,
     // meaning a has lower variance, meaning a wins (return Greater).
     match b_var.cmp(&a_var) {
         Ordering::Equal => {}
@@ -1028,8 +1045,9 @@ mod tests {
     #[test]
     fn longest_match_wins() {
         let seg = test_segmenter();
-        // "程式語言" should match as one token, not "程式" + "語言".
-        // MMSEG Rule 2: ["程式語言"(4)] (1 word, avg=4) beats
+
+        // "程式語言" should match as one token, not "程式" + "語言". MMSEG Rule
+        // 2: ["程式語言"(4)] (1 word, avg=4) beats
         //               ["程式"(2), "語"(1), "言"(1)] (3 words, avg≈1.3) on avg word length.
         let tokens = seg.segment("程式語言");
         assert_eq!(tokens.len(), 1);
@@ -1167,7 +1185,7 @@ mod tests {
         assert_eq!(seg.count_context_clues("你好世界", &["蘋果", "橘子"]), 0);
     }
 
-    // --- MMSEG-specific tests ---
+    // MMSEG-specific tests
 
     /// MMSEG Rule 3 (min variance) resolves ambiguity in "研究生命科學".
     /// FMM greedy-left takes "研究生"(3) first; MMSEG finds the more-balanced
@@ -1193,9 +1211,9 @@ mod tests {
     #[test]
     fn mmseg_rule2_min_words() {
         // "ABCD" where "AB"(2) and "ABCD"(4) are both in dict, nothing follows.
-        // Chunk ["ABCD"(4)] has 1 word, avg=4.
-        // Chunk ["AB"(2), "C"(1), "D"(1)] has 3 words, avg≈1.3.
-        // Equal total chars (4 each), Rule 2 picks "ABCD" (fewer words).
+        // Chunk ["ABCD"(4)] has 1 word, avg=4. Chunk ["AB"(2), "C"(1), "D"(1)]
+        // has 3 words, avg≈1.3. Equal total chars (4 each), Rule 2 picks "ABCD"
+        // (fewer words).
         let seg = Segmenter::new(["AB", "ABCD", "C", "D"].iter().map(|s| s.to_string()));
         let tokens = seg.segment("ABCD");
         assert_eq!(tokens.len(), 1);
@@ -1205,11 +1223,12 @@ mod tests {
     /// MMSEG Rule 3 (min variance) resolves ties after Rules 1 and 2.
     #[test]
     fn mmseg_rule3_min_variance() {
-        // "ABCDE" (5 chars).  Dict has "AB"(2), "ABC"(3), "CD"(2), "DE"(2), "E"(1).
-        // Chunk from "ABC": ["ABC"(3), "DE"(2)] = total 5, 2 words, avg=2.5
+        // "ABCDE" (5 chars). Dict has "AB"(2), "ABC"(3), "CD"(2), "DE"(2),
+        // "E"(1). Chunk from "ABC": ["ABC"(3), "DE"(2)] = total 5, 2 words,
+        // avg=2.5
         //                    var: ((3-2.5)²+(2-2.5)²)/2 = (0.25+0.25)/2 = 0.25
-        // Chunk from "AB":  ["AB"(2), "CD"(2), "E"(1)] = total 5, 3 words
-        // Rule 2 (min words): "ABC"-first chunk wins (2 < 3 words).
+        // Chunk from "AB": ["AB"(2), "CD"(2), "E"(1)] = total 5, 3 words Rule 2
+        // (min words): "ABC"-first chunk wins (2 < 3 words).
         let seg = Segmenter::new(["AB", "ABC", "CD", "DE", "E"].iter().map(|s| s.to_string()));
         let tokens = seg.segment("ABCDE");
         assert_eq!(tokens[0].text, "ABC");
@@ -1225,6 +1244,7 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string()),
         );
+
         // Rule 1 (total chars): ["研究"(2),"生命"(2),"科學"(2)] = 6
         //                   vs  ["研究生"(3),"命"(1-OOV),"科"(1-OOV)] = 5
         // → "研究" chunk wins, so "研究" appears as a token.
@@ -1269,18 +1289,19 @@ mod tests {
     /// MMSEG deterministic tiebreaker: leftmost-longest resolves final ties.
     #[test]
     fn mmseg_tiebreaker_leftmost_longest() {
-        // "ABAB": dict has "AB"(2) and "A"(1-OOV), "B"(1-OOV).
-        // Two possible 2-word chunks starting at pos 0:
+        // "ABAB": dict has "AB"(2) and "A"(1-OOV), "B"(1-OOV). Two possible
+        // 2-word chunks starting at pos 0:
         //   ["AB"(2), "AB"(2)] total=4, avg=2, var=0
         //   ["A"(1), "B"(1), "AB"(2)] — but this is 3-word chunk; total=4, avg=4/3
-        // Rule 2: ["AB","AB"] (2 words) wins over 3-word chunk → "AB" as first token.
+        // Rule 2: ["AB","AB"] (2 words) wins over 3-word chunk → "AB" as first
+        // token.
         let seg = Segmenter::new(["AB"].iter().map(|s| s.to_string()));
         let tokens = seg.segment("ABAB");
         assert_eq!(tokens[0].text, "AB");
         assert_eq!(tokens[1].text, "AB");
     }
 
-    // --- Clue absorption (17.1b) tests ---
+    // Clue absorption (17.1b) tests
 
     /// MMSEG Rule 1 prefers "下拉菜單"(4) as one token over "下拉"(2)+"菜單"(2)
     /// because 4-char single token wins on total chars in the chunk.  The clue
@@ -1347,7 +1368,7 @@ mod tests {
         assert!(!token_contains_clue("下拉", "下拉菜單"));
     }
 
-    // --- General vocabulary supplement tests ---
+    // General vocabulary supplement tests
 
     /// General vocab is included in from_rules() dict.
     #[test]
@@ -1398,13 +1419,16 @@ mod tests {
             editorial_confidence: None,
         }];
         let seg = Segmenter::from_rules(&rules);
-        // "提供" and "處理" are general vocab; "數據" and "分析"/"處理" are rule terms.
-        // Without general vocab, "目前提供的數據處理" would degrade on "提供" (single-char fallback).
+
+        // "提供" and "處理" are general vocab; "數據" and "分析"/"處理" are
+        // rule terms. Without general vocab, "目前提供的數據處理" would degrade
+        // on "提供" (single-char fallback).
         assert!(seg.has_context_clue("目前提供的數據處理方式", &["處理"]));
         assert!(seg.has_context_clue("進行數據分析的過程", &["分析"]));
     }
 
-    /// General vocab words segment as multi-char tokens, not single-char fallback.
+    /// General vocab words segment as multi-char tokens, not single-char
+    /// fallback.
     #[test]
     fn general_vocab_segments_as_multichar() {
         use crate::rules::ruleset::{RuleType, SpellingRule};
@@ -1455,6 +1479,7 @@ mod tests {
             editorial_confidence: None,
         }];
         let seg = Segmenter::from_rules(&rules);
+
         // Rule term "設計" inserted first with freq=1; general vocab uses
         // or_insert(5) which does NOT overwrite the existing freq=1.
         assert_eq!(seg.trie.get_freq("設計"), Some(1));
@@ -1462,8 +1487,8 @@ mod tests {
 
     #[test]
     fn word_straddles_boundary_detects_cross_word_match() {
-        // "累積" + "分佈" are distinct words.  An AC match for "積分"
-        // starting at the 積 in 累積分佈 straddles a word boundary.
+        // "累積" + "分佈" are distinct words. An AC match for "積分" starting
+        // at the 積 in 累積分佈 straddles a word boundary.
         let seg = Segmenter::new(
             ["累積", "分佈", "排程", "序列", "引導"]
                 .iter()
@@ -1538,8 +1563,8 @@ mod tests {
     #[test]
     fn end_boundary_limit_still_considers_words_starting_at_match_start() {
         // The end-boundary limiter should ignore dictionary words that start
-        // strictly inside the match, but it must still catch a longer word
-        // that begins exactly at the match start and extends past the match.
+        // strictly inside the match, but it must still catch a longer word that
+        // begins exactly at the match start and extends past the match.
         let seg = Segmenter::new(["項目管理"].iter().map(|s| s.to_string()));
         let text = "項目管理流程";
         let start = 0;
