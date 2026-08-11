@@ -6,9 +6,10 @@ detector gates can name the exact fixtures they cover.
 
 ## Provenance
 
-Diagnostic patterns and the six-red-flag taxonomy are distilled from a
-third-party MIT-licensed EN→ZH translation review checklist (see commit
-history for the upstream attribution).  No raw text from the upstream
+Diagnostic patterns and the six-red-flag taxonomy are distilled from
+[Cuimao777/cuimao-translator](https://github.com/Cuimao777/cuimao-translator),
+MIT licensed, commit `e734bd3700f03009c9110226ad0ba0840a2342f9`.  The same
+attribution is recorded in `THIRD-PARTY-NOTICES.md`.  No raw text from the upstream
 project's Simplified Chinese excerpts appears verbatim — every fixture
 has been:
 
