@@ -4109,6 +4109,68 @@ fn scan_zy5_long_premodifier(
     }
 }
 
+/// True if `s` contains an adverb or auxiliary that opens a predicate.
+///
+/// The multi-character markers are unambiguous. A single-character one counts
+/// unless it is part of a listed word, because these characters are also
+/// ordinary morphemes: 成就 and 人才 end with one, 就地 and 便利 start with
+/// one.
+///
+/// The list is curated and will never be complete, and that is the deliberate
+/// choice. A missing entry costs one suppression that should have fired, which
+/// is a quiet miss on an advisory rule. The alternative, testing the character
+/// after the marker against a set of predicate openers, fails the other way:
+/// these markers precede ordinary verbs and manner adverbs far more often than
+/// function words (就開始, 就變成, 就徹底, 卻依然, 才慢慢), so any closed set
+/// misses most of them and the false positive this guard exists to stop comes
+/// straight back. For a linter the quiet miss is the right failure.
+fn opens_a_predicate(s: &str) -> bool {
+    // Every listed word is two characters with the marker as its head or its
+    // tail, so the mask is two lookups: the pair starting at the marker, and
+    // the pair ending with it.
+    const CHAR_LEN: usize = '就'.len_utf8();
+    const WORD_LEN: usize = 2 * CHAR_LEN;
+    let is_word = |window: Option<&str>| window.is_some_and(|w| MARKER_WORDS.contains(&w));
+
+    PREDICATE_MARKERS.iter().any(|marker| {
+        s.match_indices(marker).any(|(at, _)| {
+            let tail = s.get(at..at + WORD_LEN);
+            let head = at
+                .checked_sub(CHAR_LEN)
+                .and_then(|p| s.get(p..p + WORD_LEN));
+            !is_word(head) && !is_word(tail)
+        })
+    })
+}
+
+// Ordinary words containing a single-char marker, in either position. Not
+// exhaustive and cannot be: these are productive morphemes. Adding a missing
+// entry costs one suppression, so the list grows on evidence.
+const MARKER_WORDS: &[&str] = &[
+    // 就. Absent on purpose: 就地, 就此, 就算, 就近 are adverbs or a
+    // conjunction, so they do open a predicate (城市就此吞噬他的生活).
+    "成就", "造就", "遷就", "將就", "俯就", "屈就", "就業", "就讀", "就職", "就緒", "就醫", "就學",
+    "就寢", "就任", "就座", "就位", "就診",
+    // 才. Absent on purpose: 才能 reads as 才 + 能 ("only then can") far more
+    // often than as the noun. Across 12 MB of zh-TW prose every occurrence
+    // inside a ZY5-shaped span was adverbial, so masking it would trade ten
+    // false positives for no real detection.
+    "人才", "天才", "剛才", "奴才", "庸才", "英才", "秀才", "方才", "幹才", "口才", "求才", "成才",
+    "怪才", "奇才", "專才", "才華", "才幹", "才智", "才氣", "才藝", // 便
+    "方便", "順便", "簡便", "隨便", "即便", "輕便", "大便", "小便", "糞便", "不便", "以便", "便利",
+    "便當", "便宜", "便條", "便捷", "便民", "便箋",
+    // 卻.  Absent on purpose: 除卻 and 省卻 are verbs.
+    "忘卻", "退卻", "冷卻", "推卻", "了卻", "拋卻", "卻步", // 也
+    "也許",
+];
+
+/// Adverbs and auxiliaries that open a predicate.  See `opens_a_predicate`.
+/// 要 and 能 are excluded because they would match inside 需要 and 才能, which
+/// appear in genuine pre-modifier chains.
+const PREDICATE_MARKERS: &[&str] = &[
+    "也", "就", "才", "卻", "便", "可以", "應該", "必須", "已經", "正在",
+];
+
 #[allow(clippy::too_many_arguments)]
 fn emit_zy5_span_if_qualifies(
     text: &str,
@@ -4173,6 +4235,7 @@ fn emit_zy5_span_if_qualifies(
 
         let mut de_count = 0usize;
         let mut candidate_from = 0usize;
+        let mut de_bounds: Option<(usize, usize)> = None;
         while let Some(inner_p) = candidate[candidate_from..].find('的') {
             let rel_inner = candidate_from + inner_p;
             let abs_inner = sent_offset + span_start + rel_inner;
@@ -4180,9 +4243,16 @@ fn emit_zy5_span_if_qualifies(
             if is_excluded(abs_inner, abs_inner + de_len, excluded) {
                 continue;
             }
+            let bounds = de_bounds.get_or_insert((rel_inner, rel_inner));
+            bounds.1 = rel_inner;
             de_count += 1;
         }
         if de_count < min_de {
+            continue;
+        }
+        // A predicate between the first and last 的 means separate phrases.
+        let between = de_bounds.and_then(|(first, last)| candidate.get(first + de_len..last));
+        if between.is_some_and(opens_a_predicate) {
             continue;
         }
 
@@ -7221,6 +7291,85 @@ mod tests {
             crate::engine::translationese_score::TranslationeseDomain::General,
         );
         assert!(fires(&issues, "ZY5"), "expected ZY5: {issues:?}");
+    }
+
+    fn scan_general(text: &str) -> Vec<Issue> {
+        scan_indexed(
+            text,
+            crate::engine::translationese_score::TranslationeseDomain::General,
+        )
+    }
+
+    #[test]
+    fn zy5_predicate_guard_covers_ordinary_verbs_and_adverbs() {
+        // These markers precede lexical verbs and manner adverbs far more often
+        // than function words, so the guard cannot key on what follows them.
+        for word in [
+            "就開始",
+            "就變成",
+            "就徹底",
+            "就永遠",
+            "就逐漸",
+            "就此",
+            "就算",
+            "卻依然",
+            "也很快",
+            "才慢慢",
+            "便迅速",
+            "就會",
+            "就要",
+            "就被",
+        ] {
+            let text = format!("那個看起來十分陌生的城市{word}吞噬他熟悉的日常生活。");
+            let issues = scan_general(&text);
+            assert!(
+                !fires(&issues, "ZY5"),
+                "unexpected ZY5 for {word}: {issues:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn zy5_passes_when_a_predicate_separates_the_de_phrases() {
+        // 16 chars, 2 的, comma-free, but 也能 opens a predicate between them,
+        // so 每週的檢討會議 and 真正的瓶頸 modify different heads. This was a
+        // live false positive in tests/corpus/native-zh-tw.json.
+        let text = "每週的檢討會議也能聚焦真正的瓶頸。";
+        let issues = scan_general(text);
+        assert!(!fires(&issues, "ZY5"), "unexpected ZY5: {issues:?}");
+    }
+
+    #[test]
+    fn marker_words_are_all_two_characters() {
+        // opens_a_predicate masks with two fixed-width window lookups, so a
+        // longer entry would be silently ignored rather than masking anything.
+        for word in MARKER_WORDS {
+            assert_eq!(
+                word.chars().count(),
+                2,
+                "{word} must be two characters for the window mask to see it"
+            );
+        }
+    }
+
+    #[test]
+    fn zy5_predicate_guard_ignores_markers_inside_words() {
+        // The marker may sit at either end of an ordinary word: 成就 and 人才
+        // end with one, 便利 and 就業 start with one. None of them opens a
+        // predicate, so all of these stay stacked pre-modifiers and must fire.
+        for text in [
+            "那是一個工匠面對自己的成就被命運直接抹除的瞬間。",
+            "這乃是一個從不細看自己所寫之物的人才會犯下的錯誤。",
+            "為了兼顧系統的便利性與穩定性的整體平衡設計。",
+            "這是一份針對長期投入的就業輔導方案累積的完整報告。",
+            "憑著他的才華洋溢加上長年累積的舞台經驗。",
+        ] {
+            let issues = scan_general(text);
+            assert!(
+                fires(&issues, "ZY5"),
+                "expected ZY5 for {text:?}: {issues:?}"
+            );
+        }
     }
 
     #[test]
