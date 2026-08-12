@@ -1396,9 +1396,37 @@ struct LintSetup {
     cfg: zhtw_mcp::rules::ruleset::ProfileConfig,
     scanner: zhtw_mcp::engine::scan::Scanner,
     ruleset_hash: String,
-    s2t: zhtw_mcp::engine::s2t::S2TConverter,
+    /// Built on first Simplified input rather than during setup.  Its
+    /// Aho-Corasick over ST_PHRASES dominated startup, and a zh-TW linter
+    /// reading zh-TW never needs it: building it eagerly cost 183 ms per
+    /// invocation against 44 ms lazily, measured interleaved on a one-line
+    /// file with an empty cache.  OnceLock rather than a plain field so the
+    /// rayon batch path can share one converter across threads.
+    ///
+    /// Built first thing in a fresh process the same call measures ~90 ms, but
+    /// built here, after the ruleset and scanner have already warmed the
+    /// allocator, Simplified input is not measurably slower than Traditional.
+    /// Quote the end-to-end numbers rather than that isolated one.
+    s2t: std::sync::OnceLock<zhtw_mcp::engine::s2t::S2TConverter>,
     tm_store: Option<zhtw_mcp::rules::store::TranslationMemoryStore>,
     scan_cache: Option<std::sync::Mutex<zhtw_mcp::cache::ScanCache>>,
+}
+
+/// Convert `text` when it reads as Simplified, building the converter on the
+/// first such file.  Returns whether a conversion happened, which the caller
+/// reports as the `+s2t` label.
+fn s2t_convert_if_simplified(
+    s2t: &std::sync::OnceLock<zhtw_mcp::engine::s2t::S2TConverter>,
+    text: &mut String,
+) -> bool {
+    use zhtw_mcp::engine::s2t::S2TConverter;
+    use zhtw_mcp::engine::zhtype::{detect_chinese_type, ChineseType};
+
+    if detect_chinese_type(text) != ChineseType::Simplified {
+        return false;
+    }
+    *text = s2t.get_or_init(S2TConverter::new).convert(text);
+    true
 }
 
 /// Resolve flags and config into the scanner, stores, and cache the batch
@@ -1473,7 +1501,7 @@ fn build_lint_setup(
         cfg,
         scanner,
         ruleset_hash,
-        s2t: zhtw_mcp::engine::s2t::S2TConverter::new(),
+        s2t: std::sync::OnceLock::new(),
         tm_store,
         scan_cache,
     })
@@ -1663,11 +1691,7 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                 .read_to_string(&mut text)
                 .with_context(|| format!("read file: {file_arg}"))?;
 
-            let input_was_sc = zhtw_mcp::engine::zhtype::detect_chinese_type(&text)
-                == zhtw_mcp::engine::zhtype::ChineseType::Simplified;
-            if input_was_sc {
-                text = s2t.convert(&text);
-            }
+            let input_was_sc = s2t_convert_if_simplified(s2t, &mut text);
             let text_char_count = text.chars().count();
 
             // Slow-path cache: check content hash (mtime missed but content may
@@ -1719,11 +1743,7 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             "stdin input exceeds {MAX_CLI_FILE_BYTES} byte limit"
         );
 
-        let input_was_sc = zhtw_mcp::engine::zhtype::detect_chinese_type(&text)
-            == zhtw_mcp::engine::zhtype::ChineseType::Simplified;
-        if input_was_sc {
-            text = s2t.convert(&text);
-        }
+        let input_was_sc = s2t_convert_if_simplified(s2t, &mut text);
         let text_char_count = text.chars().count();
         let output = scanner.scan_for_content_type_with_config(&text, content_type, cfg);
 
