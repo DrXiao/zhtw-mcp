@@ -734,6 +734,63 @@ fn e2e_initialize_and_tools_list() {
 }
 
 #[test]
+fn e2e_initialize_protocol_version_mismatch_logs_warning() {
+    let bin = binary_path();
+    if !bin.exists() {
+        panic!("binary not found at {:?}; run `cargo build` first", bin);
+    }
+
+    let tmp_dir = tempfile::tempdir().expect("create temp dir");
+
+    let mut child = Command::new(&bin)
+        .env("HOME", tmp_dir.path())
+        .env("XDG_CONFIG_HOME", tmp_dir.path().join(".config"))
+        .env("XDG_CACHE_HOME", tmp_dir.path().join(".cache"))
+        .env("RUST_LOG", "warn")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn zhtw-mcp");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    // Send initialize request with mismatched protocol version "2024-01-01"
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "id": 0,
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
+    );
+
+    // Handshake must still succeed
+    assert_eq!(resp["id"], 0);
+    assert_eq!(resp["result"]["serverInfo"]["name"], "zhtw-mcp");
+
+    // Close stdin to let child terminate and flush stderr
+    drop(stdin);
+
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let stderr_output = String::from_utf8_lossy(&out.stderr);
+
+    // Verify warning log printed to stderr (Note: this warning is deliberately).
+    assert!(
+        stderr_output.contains("MCP protocol version mismatch"),
+        "stderr should contain warning message, got: {stderr_output}"
+    );
+}
+
+#[test]
 fn e2e_mcp_logging_capability_receives_message_notifications() {
     let bin = binary_path();
     let tmp = tempfile::TempDir::new().unwrap();
