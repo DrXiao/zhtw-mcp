@@ -2,8 +2,8 @@
 //
 // Not a criterion benchmark: cold-start is a once-per-process event. Criterion
 // runs many iterations, so its lazy statics (grammar AC, zhtype char tables,
-// clue index) are warm after iteration 1 -- it structurally cannot see the
-// cold cost. This binary measures each phase exactly once, in order:
+// clue index) are warm after iteration 1 -- it structurally cannot see the cold
+// cost. This binary measures each phase exactly once, in order:
 //
 //   ruleset_load  postcard deserialize of the embedded artifact
 //   scanner_build Aho-Corasick + segmenter construction (what Server::new does)
@@ -11,13 +11,21 @@
 //   first_scan    first tools/call scan -- pays lazy init of grammar AC etc.
 //   warm_scan     steady-state scan (min of a few iters)
 //   [cold overhead = first_scan - warm_scan]
+//   s2t_build     CLI only, and only for Simplified input
 //
 // Run: cargo run --release --bench startup
+//
 // The 50ms cold-start budget is checked against `server ready + first_scan`;
 // above it, prewarming the lazy first-hit structures during init pays off.
+//
+// Both budgets exit non-zero when missed. They print as well, but printing was
+// all the earlier version did, and that is how a 15ms reported startup sat
+// green next to a 180ms real invocation: the s2t converter was built eagerly by
+// the CLI and never measured here. Measure what the caller pays, and fail.
 
 use std::time::Instant;
 
+use zhtw_mcp::engine::s2t::S2TConverter;
 use zhtw_mcp::engine::scan::Scanner;
 use zhtw_mcp::rules::loader::load_embedded_ruleset;
 use zhtw_mcp::rules::ruleset::Profile;
@@ -64,6 +72,16 @@ fn main() {
         std::hint::black_box(&out);
     }
 
+    // The CLI pays one cost the server never does: the s2t converter, whose
+    // Aho-Corasick over ST_PHRASES dwarfs everything above. It is built lazily
+    // and only for Simplified input, so it is off the common path. It is
+    // measured anyway, because the previous version of this profile omitted it
+    // and therefore reported 15 ms for an invocation that actually took 180 ms.
+    let t_s2t = Instant::now();
+    let converter = S2TConverter::new();
+    let s2t_build = t_s2t.elapsed();
+    std::hint::black_box(converter.convert("测试"));
+
     let ready = load + build;
     let cold_overhead = first_scan.saturating_sub(warm);
     let cold_first_request = ready + first_scan;
@@ -85,11 +103,37 @@ fn main() {
         "  = cold 1st request  {:>8.3} ms  (ready + first_scan)",
         ms(cold_first_request)
     );
+    println!(
+        "  [cli only] s2t_build{:>8.3} ms  (lazy: Simplified input only)",
+        ms(s2t_build)
+    );
 
-    let gate = 50.0;
-    if ms(cold_first_request) > gate {
-        println!("\nover {gate:.0}ms gate -> prewarming worth it");
-    } else {
-        println!("\nunder {gate:.0}ms gate -> prewarming not justified");
+    // Both budgets fail the process rather than printing an opinion. A gate
+    // that only prints is not a gate: the 50 ms line sat green while the real
+    // invocation cost 180 ms, because nothing forced anyone to read it.
+    //
+    // The s2t budget catches an order-of-magnitude regression, not a percentage
+    // one, and is deliberately loose. The phase measures one Aho-Corasick
+    // construction, which moves with machine load rather than with the code: 91
+    // to 141 ms on an idle machine and 320 to 491 ms on the same machine under
+    // a parallel build. A tighter number fails for the wrong reason, and a gate
+    // that cries wolf gets ignored, which is how the 50 ms line below sat green
+    // next to a 180 ms real invocation for so long.
+    let cold_over = check("cold 1st request", ms(cold_first_request), 50.0);
+    let s2t_over = check("s2t_build", ms(s2t_build), 1000.0);
+    if cold_over || s2t_over {
+        std::process::exit(1);
     }
+    println!("\nall budgets met");
+}
+
+/// Report `measured` against `budget`, returning true when it is over.
+/// Returning the verdict rather than exiting keeps every budget reported in one
+/// run: exiting on the first breach hides the second.
+fn check(label: &str, measured: f64, budget: f64) -> bool {
+    let over = measured > budget;
+    if over {
+        eprintln!("FAIL: {label} {measured:.1} ms over {budget:.0} ms budget");
+    }
+    over
 }

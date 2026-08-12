@@ -2209,8 +2209,93 @@ fn scan_ai_negative_parallel(
     }
 }
 
-// S3: formulaic section endings — last sentence of a paragraph matching
-// formulaic closing phrases.
+/// What follows byte offset `pos`, as far as section boundaries are concerned.
+///
+/// This is what makes the detector below match its name. Without it, "section
+/// ending" phrases fire anywhere they appear, and 展望未來 in the middle of a
+/// paragraph in the middle of a document is ordinary prose, not a formulaic
+/// closer.
+///
+/// Boundaries are decided from the text alone, because the content type does
+/// not reach this far: `scan_with_config_into` takes exclusion ranges, not a
+/// `ContentType`. A heading-shaped line therefore opens a section even in plain
+/// text, where nothing is a heading. See TODO item 21.
+enum SectionBoundary {
+    /// The next non-blank line opens a new section.
+    Heading,
+    /// Nothing follows.
+    DocEnd,
+    /// More body text: not a boundary.
+    Body,
+}
+
+fn section_boundary_after(text: &str, pos: usize) -> SectionBoundary {
+    let Some(rest) = text.get(pos..) else {
+        return SectionBoundary::DocEnd;
+    };
+
+    // split_inclusive rather than `lines`, which does not treat a bare CR as a
+    // terminator and would fold a CR-delimited file into one apparent line.
+    let next_line = rest
+        .split_inclusive(['\n', '\r'])
+        .map(|raw| raw.trim_end_matches(['\n', '\r']))
+        .find(|line| !line.trim().is_empty());
+
+    // Deliberately no exclusion test here. An earlier revision rejected a
+    // heading-shaped line overlapping an exclusion range, meaning to skip a
+    // shell comment inside a code block. `is_excluded` tests overlap rather
+    // than containment, and the ranges cover inline code, paths, URLs and
+    // mentions, so a heading naming a file in backticks stopped being a
+    // boundary and the closer before it went unreported. On technical Markdown,
+    // where headings routinely name files and config keys, the detector went
+    // silent altogether.
+    //
+    // It bought nothing either: a comment inside a fenced block is already
+    // unreachable, because the fence opener is the first non-blank line and is
+    // not heading-shaped, and an indented block needs four spaces, which the
+    // indent rule rejects.
+    match next_line {
+        None => SectionBoundary::DocEnd,
+        Some(line) if is_markdown_heading_line(line) => SectionBoundary::Heading,
+        Some(_) => SectionBoundary::Body,
+    }
+}
+
+/// An ATX heading, per CommonMark: at most three spaces of indentation, then
+/// one to six hashes, then a space, a tab or the end of the line.
+///
+/// The indent limit is load-bearing rather than pedantic. Four spaces starts an
+/// indented code block, so a commented line inside one (`    # setup`) would
+/// otherwise read as a section boundary and let the detector fire on the prose
+/// before a code sample. A tab reaches column four on its own, so it cannot
+/// introduce a heading either.
+fn is_markdown_heading_line(line: &str) -> bool {
+    let indent = line.bytes().take_while(|&b| b == b' ').count();
+    if indent > 3 {
+        return false;
+    }
+    let rest = &line[indent..];
+    if rest.starts_with('\t') {
+        return false;
+    }
+    let hashes = rest.bytes().take_while(|&b| b == b'#').count();
+    (1..=6).contains(&hashes) && matches!(rest.as_bytes().get(hashes), None | Some(b' ' | b'\t'))
+}
+
+fn is_markdown_heading_sentence(text: &str) -> bool {
+    !text.contains(['\n', '\r']) && is_markdown_heading_line(text)
+}
+
+fn is_in_markdown_heading_line(text: &str, pos: usize) -> bool {
+    let line_start = text[..pos].rfind(['\n', '\r']).map_or(0, |i| i + 1);
+    let line_end = text[pos..]
+        .find(['\n', '\r'])
+        .map_or(text.len(), |i| pos + i);
+    is_markdown_heading_line(&text[line_start..line_end])
+}
+
+// S3: formulaic section endings — last sentence of a section-closing paragraph
+// matching formulaic closing phrases.
 fn scan_ai_formulaic_section_endings(
     text: &str,
     excluded: &[ByteRange],
@@ -2234,26 +2319,64 @@ fn scan_ai_formulaic_section_endings(
     // Regex-like patterns: 隨著.*不斷發展 — handled with substring checks.
     for para in &idx.paragraphs {
         let sents = idx.sentences_in_paragraph(para);
-        for sent in sents {
+
+        // Position gate applies to the closing phrases ONLY. 展望未來 is a
+        // closer, so it is only a tell at a close: a sentence that ends a
+        // section. The two pattern groups below are not closers: a significance
+        // stamp and 隨著…不斷發展 are AI tells wherever they sit, so gating
+        // them here would have deleted them.
+        //
+        // A sentence followed by a heading is a close even when body text
+        // follows that heading inside the same paragraph, so the walk runs
+        // forwards over every sentence. Searching backwards for a single
+        // candidate found the document's last sentence instead and missed the
+        // real close.
+        let mut body = sents
+            .iter()
+            .copied()
+            .filter(|s| !is_markdown_heading_sentence(&text[s.byte_start..s.byte_end]))
+            .peekable();
+
+        // The document's final sentence is a close too, which is what the
+        // DocEnd arm covers: `peek` is what makes that sentence the final one.
+        while let Some(sent) = body.next() {
+            let closes = match section_boundary_after(text, sent.byte_end) {
+                SectionBoundary::Heading => true,
+                SectionBoundary::DocEnd => body.peek().is_none(),
+                SectionBoundary::Body => false,
+            };
+            if !closes {
+                continue;
+            }
             let s = &text[sent.byte_start..sent.byte_end];
             for &phrase in FORMULAIC_ENDINGS {
-                if let Some(pos) = s.find(phrase) {
-                    let abs = sent.byte_start + pos;
-                    if !is_excluded(abs, abs + phrase.len(), excluded) {
-                        issues.push(
-                            Issue::new(
-                                abs,
-                                phrase.len(),
-                                phrase,
-                                vec![],
-                                IssueType::AiStyle,
-                                Severity::Info,
-                            )
-                            .with_context("AI structural: 公式化用語，常見於 AI 生成文本"),
-                        );
-                    }
+                // First occurrence that is neither on a heading line nor
+                // excluded; later ones in the same sentence add nothing.
+                let hit = s
+                    .match_indices(phrase)
+                    .map(|(pos, _)| sent.byte_start + pos)
+                    .find(|&abs| {
+                        !is_in_markdown_heading_line(text, abs)
+                            && !is_excluded(abs, abs + phrase.len(), excluded)
+                    });
+                if let Some(abs) = hit {
+                    issues.push(
+                        Issue::new(
+                            abs,
+                            phrase.len(),
+                            phrase,
+                            vec![],
+                            IssueType::AiStyle,
+                            Severity::Info,
+                        )
+                        .with_context("AI structural: 公式化用語，常見於 AI 生成文本"),
+                    );
                 }
             }
+        }
+
+        for sent in sents {
+            let s = &text[sent.byte_start..sent.byte_end];
             for &(start_phrase, end_phrase) in FORMULAIC_PAIRS {
                 if let Some(start) = s.find(start_phrase) {
                     if let Some(end_pos) = s[start + start_phrase.len()..].find(end_phrase) {
@@ -4571,6 +4694,171 @@ mod tests {
         );
     }
 
+    fn has_formulaic(issues: &[Issue]) -> bool {
+        issues
+            .iter()
+            .any(|i| i.context.as_ref().is_some_and(|c| c.contains("公式化用語")))
+    }
+
+    #[test]
+    fn formulaic_ending_fires_at_a_section_close() {
+        for (text, what) in [
+            // Final paragraph of the document, final sentence: this is what the
+            // detector is named for.
+            (
+                "本文介紹了新的排程策略。\n\n效能提升相當顯著。展望未來。",
+                "document-final sentence",
+            ),
+            // Same phrase closing a paragraph that a heading follows.
+            (
+                "第一節說明背景。展望未來。\n\n## 第二節\n\n這裡是內文。",
+                "before a heading",
+            ),
+            (
+                "第一節說明背景。展望未來。\n## 第二節\n\n這裡是內文。",
+                "before a heading without a blank line",
+            ),
+            (
+                "第一節說明背景。展望未來。\r## 第二節\r\r這裡是內文。",
+                "before a CR-only heading",
+            ),
+            (
+                "## 第二節\n本節總結。展望未來。",
+                "in body text after a heading without a blank line",
+            ),
+        ] {
+            assert!(has_formulaic(&scan_phase2(text)), "expected a hit {what}");
+        }
+    }
+
+    #[test]
+    fn formulaic_ending_ignores_indented_code_as_a_boundary() {
+        // Four spaces starts an indented code block, so a commented line inside
+        // one is not a heading and does not close a section.
+        let code = "## 一\n\n效能提升。展望未來。\n\n    # setup\n    print(1)\n";
+        let issues = scan_phase2(code);
+        assert!(
+            !has_formulaic(&issues),
+            "indented code read as a section boundary: {issues:?}"
+        );
+
+        let tabbed = "## 一\n\n效能提升。展望未來。\n\n\t# setup\n";
+        assert!(
+            !has_formulaic(&scan_phase2(tabbed)),
+            "tab-indented code read as a section boundary"
+        );
+
+        // Three spaces is still a heading.
+        let indented_heading = "效能提升。展望未來。\n\n   ### 標題\n\n內文。";
+        assert!(
+            has_formulaic(&scan_phase2(indented_heading)),
+            "three-space indented heading rejected"
+        );
+    }
+
+    #[test]
+    fn heading_containing_inline_code_is_still_a_section_boundary() {
+        use crate::engine::scan::{build_exclusions_for_content_type, ContentType};
+
+        // A heading naming a file or a config key in backticks is a heading.
+        // Rejecting it, which an exclusion test over the whole line did, made
+        // the detector silent on most technical Markdown.
+        for heading in [
+            "## 第二節",
+            "## 設定 `config.toml`",
+            "## 設定 src/main.rs",
+            "## 參考 https://example.com/a",
+        ] {
+            let text = format!("## 一\n\n本節總結。展望未來。\n\n{heading}\n\n這裡是內文。");
+            let ranges = build_exclusions_for_content_type(&text, ContentType::Markdown);
+            let idx = BoundaryIndex::build(&text, &ranges);
+            let mut issues = Vec::new();
+            scan_ai_structural_phase2(&text, &ranges, &mut issues, &idx);
+            assert!(
+                has_formulaic(&issues),
+                "closer lost before heading {heading:?}: {issues:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_code_fence_after_the_closer_is_not_a_section_boundary() {
+        // The mechanism is the fence opener, not the comment inside it: the
+        // first non-blank line after the closer is ```sh, which is not
+        // heading-shaped. An earlier version of this test asserted the same
+        // outcome while claiming the exclusion ranges did the work, and passed
+        // whether or not the fence contained a heading-shaped line at all.
+        let with_comment = "## 一\n\n效能提升。展望未來。\n\n```sh\n# install\nmake\n```\n";
+        let without_comment = "## 一\n\n效能提升。展望未來。\n\n```sh\nmake\n```\n";
+        for text in [with_comment, without_comment] {
+            assert!(
+                !has_formulaic(&scan_phase2(text)),
+                "a code fence after the closer opened a section: {text:?}"
+            );
+        }
+
+        // The indent rule is what rejects an indented block, and that one is
+        // reachable: four spaces is code, three is a heading.
+        assert!(!has_formulaic(&scan_phase2(
+            "本節總結。展望未來。\n    # x\n"
+        )));
+        assert!(has_formulaic(&scan_phase2(
+            "本節總結。展望未來。\n   # x\n"
+        )));
+    }
+
+    #[test]
+    fn formulaic_ending_prefers_the_heading_boundary_over_the_document_end() {
+        // The closer sits before a heading that body text follows immediately,
+        // so all of it is one paragraph. Searching backwards for a single
+        // candidate found 這裡是內文。 and missed the close entirely.
+        let text = "本節總結。展望未來。\n## 第二節\n這裡是內文。";
+        let issues = scan_phase2(text);
+        assert!(
+            has_formulaic(&issues),
+            "closer before a heading lost to the document-final sentence: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn formulaic_ending_ignores_heading_text() {
+        let text = "## 展望未來";
+        let issues = scan_phase2(text);
+        assert!(!has_formulaic(&issues), "fired on heading text: {issues:?}");
+
+        let tight = "## 展望未來\n這裡是內文。";
+        let issues = scan_phase2(tight);
+        assert!(
+            !has_formulaic(&issues),
+            "fired on heading text joined to body: {issues:?}"
+        );
+
+        let body_repeat = "## 展望未來\n本節總結。展望未來。";
+        assert!(
+            has_formulaic(&scan_phase2(body_repeat)),
+            "heading occurrence hid body closer"
+        );
+    }
+
+    #[test]
+    fn formulaic_ending_stays_quiet_mid_document() {
+        // Same phrase, same paragraph-final position, but the section continues
+        // into another body paragraph. Before this was gated, the detector
+        // fired here, which is the false positive its own name argues against.
+        let text = "第一段的結尾。展望未來。\n\n第二段還在講同一件事。\n\n第三段結束。";
+        let issues = scan_phase2(text);
+        assert!(!has_formulaic(&issues), "fired mid-document: {issues:?}");
+    }
+
+    #[test]
+    fn formulaic_ending_stays_quiet_mid_paragraph() {
+        // Closing platitude used as body prose, with real sentences after it in
+        // the same closing paragraph. Only the last sentence is a closing.
+        let text = "背景說明如下。展望未來。這一節接著討論實作細節與取捨。";
+        let issues = scan_phase2(text);
+        assert!(!has_formulaic(&issues), "fired mid-paragraph: {issues:?}");
+    }
+
     #[test]
     fn excessive_de_chain_reports_each_occurrence_with_correct_offset() {
         // Codex round 2: repeated identical clauses must report distinct
@@ -6318,7 +6606,11 @@ mod tests {
 
     #[test]
     fn ai_significance_stamping_triggers_per_paragraph() {
-        let text = "這項安排提供政策的重要框架，也印證制度的重要性。";
+        // The fixture has to put the stamp somewhere other than the last
+        // sentence of the last paragraph, or it asserts nothing: its own
+        // message claims stamping fires outside section-final sentences, and a
+        // one-sentence document cannot show that.
+        let text = "這項安排提供政策的重要框架，也印證制度的重要性。這一節接著討論實作細節。\n\n第二段還在同一節裡。";
         let issues = scan_phase2(text);
         assert!(
             issues.iter().any(|i| i
@@ -6326,6 +6618,22 @@ mod tests {
                 .as_ref()
                 .is_some_and(|c| c.contains("意義蓋章式收尾"))),
             "significance stamping should trigger outside section-final sentences: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn non_closing_ai_patterns_ignore_the_section_gate() {
+        // 隨著…不斷發展 is an opener, not a closer. Gating it on section-final
+        // position deleted it from every multi-paragraph document, which is how
+        // the position gate was first written.
+        let text =
+            "隨著人工智慧不斷發展，各行各業都受到影響。\n\n第二段說明實作細節。\n\n第三段收尾。";
+        let issues = scan_phase2(text);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.context.as_ref().is_some_and(|c| c.contains("隨著"))),
+            "隨著…不斷發展 lost mid-document: {issues:?}"
         );
     }
 

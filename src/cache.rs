@@ -26,6 +26,27 @@ const DEFAULT_TTL_SECS: u64 = 24 * 60 * 60;
 /// scanning large monorepos.  Oldest entries evicted first on overflow.
 const MAX_ENTRIES: usize = 2000;
 
+/// Maximum issues an entry may carry before it is not worth caching.  An
+/// entry stores the whole issue list, so a pathological file can dwarf every
+/// other entry: one 400 KB file produced 29,796 issues and a 6.7 MB entry,
+/// which every later run then had to parse.  Past this many issues, rescanning
+/// is cheaper than loading the cached answer, so skip the entry entirely.
+const MAX_ENTRY_ISSUES: usize = 2000;
+
+/// Maximum serialized size of the whole cache file.  `MAX_ENTRIES` bounds the
+/// count but not the bytes, and the bytes are what every run pays to parse.
+/// Oldest entries are evicted until the file fits.
+///
+/// Sized to sit ABOVE what `MAX_ENTRIES` produces in normal use, not below it.
+/// Measured: 993 real entries serialize to 7.7 MB, so a full 2000-entry cache
+/// lands near 16 MB.  An 8 MiB cap therefore bound the ordinary case rather
+/// than the pathological one, and evicted a quarter of a healthy repo's cache
+/// on every run: the next run rescanned those files, re-inserted them, and
+/// evicted another quarter, forever.  This is a backstop against entries far
+/// larger than average, which is what `MAX_ENTRY_ISSUES` already caps per
+/// entry; between them the worst case is bounded without touching normal use.
+const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+
 /// BLAKE3 hash of `data`, returned as a 64-char lowercase hex string.
 /// ~3-4x faster than SHA-256 thanks to SIMD acceleration.  Non-cryptographic
 /// use (local cache keys) makes this a safe choice.
@@ -100,6 +121,23 @@ struct CacheEntry {
     #[serde(default)]
     text_char_count: usize,
     timestamp_secs: u64,
+    /// Whether the fast path may trust this entry's mtime and size alone.
+    ///
+    /// False when the file was written within a second of being scanned. mtime
+    /// has second granularity, so a further rewrite during that same second
+    /// leaves the pair unchanged and the entry would answer for content it
+    /// never saw. Deciding at store time is what closes the window: a guard
+    /// against the clock at lookup time only covers entries that are still
+    /// fresh, not the stale pair an old entry already carries.
+    ///
+    /// Entries written before this field existed default to trusted, which is
+    /// exactly the behaviour they had, and they expire within the day.
+    #[serde(default = "default_true")]
+    fast_path_safe: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Persistent scan cache backed by a JSON file.
@@ -161,9 +199,19 @@ impl ScanCache {
     /// them. Returning the reference is what keeps the invariant in the type
     /// rather than in the caller: there is no way to observe `entries` as
     /// `None` after calling this.
+    ///
+    /// Load-time pruning, or loading a file already over the byte budget, only
+    /// changes memory. `flush` returns early unless `dirty`, and only `put` set
+    /// it, so a cache-hit-only run would leave the file untouched and pay to
+    /// parse the same garbage on the next run. Marking dirty here makes the
+    /// cleanup reach disk.
     fn ensure_loaded(&mut self) -> &mut HashMap<String, CacheEntry> {
-        let (path, ttl) = (&self.path, self.ttl_secs);
-        self.entries.get_or_insert_with(|| load_entries(path, ttl))
+        if self.entries.is_none() {
+            let (loaded, needs_rewrite) = load_entries(&self.path, self.ttl_secs);
+            self.dirty |= needs_rewrite;
+            self.entries = Some(loaded);
+        }
+        self.entries.as_mut().expect("populated directly above")
     }
 
     /// Get a reference to entries, loading if necessary.
@@ -186,9 +234,11 @@ impl ScanCache {
         params: &ScanParams,
     ) -> CacheResult {
         let ttl = self.ttl_secs;
+        let now = now_secs();
         let entries = self.ensure_loaded();
         if let Some(entry) = entries.get(&fast_key(file_path, params)) {
-            if now_secs().saturating_sub(entry.timestamp_secs) <= ttl
+            if entry.fast_path_safe
+                && now.saturating_sub(entry.timestamp_secs) <= ttl
                 && entry.file_meta.mtime_secs == mtime_secs
                 && entry.file_meta.size == size
                 && (size == 0 || entry.text_char_count > 0)
@@ -240,6 +290,14 @@ impl ScanCache {
         input_was_sc: bool,
         text_char_count: usize,
     ) {
+        if output.issues.len() > MAX_ENTRY_ISSUES {
+            tracing::debug!(
+                "not caching {file_path}: {} issues exceeds {MAX_ENTRY_ISSUES}",
+                output.issues.len()
+            );
+            return;
+        }
+        let now = now_secs();
         self.entries_mut().insert(
             fast_key(file_path, params),
             CacheEntry {
@@ -250,7 +308,11 @@ impl ScanCache {
                 output,
                 input_was_sc,
                 text_char_count,
-                timestamp_secs: now_secs(),
+                timestamp_secs: now,
+
+                // A file written within the last second may be rewritten again
+                // inside that same second, leaving mtime and size unchanged.
+                fast_path_safe: mtime_secs.saturating_add(1) < now,
             },
         );
         self.dirty = true;
@@ -266,63 +328,103 @@ impl ScanCache {
             return;
         }
 
-        // Destructured so the entries borrow stays independent of `path`, which
-        // the write below needs while `entries` is still live.
-        let Self {
-            path,
-            entries,
-            ttl_secs: ttl,
-            ..
-        } = self;
-        let ttl = *ttl;
-        let entries = entries.get_or_insert_with(|| load_entries(path, ttl));
+        // Acquire the lock BEFORE reading the file we are about to replace.
+        // `atomic_write` swaps the whole file, so serializing our own snapshot
+        // and writing it discards anything another process stored since we
+        // loaded. That race predates this cache growing a load-time cleanup,
+        // but the cleanup widened it: a run that only read the cache used to
+        // leave the file alone, and now it rewrites.
+        //
+        // Create the cache directory before opening the sidecar. `replace_file`
+        // creates it on write, but that is too late: on a first run the
+        // directory does not exist yet, opening the lock fails, and the write
+        // would then proceed unlocked. Two concurrent first runs would both
+        // take that path and one would lose everything the other stored.
+        if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                // At warn, like the write failure below: a cache that can never
+                // persist otherwise costs a full rescan every run with nothing
+                // on screen to explain it.
+                tracing::warn!("scan cache dir {} unusable: {e}", parent.display());
+                return;
+            }
+        }
+
+        let lock_path = self.path.with_extension("lock");
+        let Ok(lock_file) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&lock_path)
+        else {
+            // No lock means no way to merge safely, so decline to write at all
+            // rather than replace a file another process may be updating.
+            tracing::warn!(
+                "scan cache lock {} unusable; not writing",
+                lock_path.display()
+            );
+            return;
+        };
+
+        // Best-effort lock: if another process holds it, skip this flush but
+        // keep dirty=true so Drop retries.
+        if lock_file.try_lock_exclusive().is_err() {
+            return;
+        }
+
+        let ttl = self.ttl_secs;
+        let (on_disk, _) = load_entries(&self.path, ttl);
+        let entries = self.ensure_loaded();
+
+        // Merge rather than replace. Keys only the other process has are kept,
+        // and where both have one the newer scan wins, so neither side loses
+        // work it just did.
+        //
+        // Timestamps have second granularity, so two processes scanning one
+        // file in the same second tie and the local entry wins. That needs no
+        // finer clock: a lookup revalidates the entry against the file, so a
+        // stale winner misses and is rescanned. The fast path compares only
+        // mtime and size and so has a same-second blind spot of its own, which
+        // `check_fast` closes by declining while the recorded mtime is that
+        // fresh.
+        for (k, e) in on_disk {
+            let ours_wins = entries
+                .get(&k)
+                .is_some_and(|ours| ours.timestamp_secs >= e.timestamp_secs);
+            if !ours_wins {
+                entries.insert(k, e);
+            }
+        }
 
         // Prune expired entries.
         let now = now_secs();
         entries.retain(|_, e| now.saturating_sub(e.timestamp_secs) <= ttl);
 
-        // Evict oldest entries if over the cap.
-        if entries.len() > MAX_ENTRIES {
-            let mut by_time: Vec<(String, u64)> = entries
-                .iter()
-                .map(|(k, e)| (k.clone(), e.timestamp_secs))
-                .collect();
-            by_time.sort_by_key(|(_, ts)| *ts);
-            let to_remove = entries.len() - MAX_ENTRIES;
-            for (k, _) in by_time.into_iter().take(to_remove) {
-                entries.remove(&k);
-            }
-        }
+        // Evict oldest entries if over the count cap.
+        evict_oldest(entries, entries.len().saturating_sub(MAX_ENTRIES));
 
-        let entries_vec: Vec<&CacheEntry> = entries.values().collect();
-        let Ok(bytes) = serde_json::to_vec(&entries_vec) else {
+        // Serialize once and measure that, rather than measuring every entry
+        // separately first. The budget is above what a full cache produces, so
+        // the per-entry pass was pure waste on every run: two full
+        // serializations to enforce a cap almost never reached. Only when the
+        // one serialization comes back over budget is the measuring pass worth
+        // its cost, and then the result is serialized again post-eviction.
+        let Some(mut bytes) = serialize_entries(entries) else {
             return;
         };
+        if bytes.len() > MAX_TOTAL_BYTES {
+            evict_to_byte_budget(entries);
+            let Some(shrunk) = serialize_entries(entries) else {
+                return;
+            };
+            bytes = shrunk;
+        }
 
-        // Acquire exclusive lock on the cache file (or a .lock sidecar) to
-        // prevent concurrent CLI processes from clobbering writes.
-        let lock_path = self.path.with_extension("lock");
-        let lock_file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&lock_path);
-
-        // Best-effort lock: if another process holds it, skip this flush but
-        // keep dirty=true so Drop retries.
-        let locked = lock_file
-            .as_ref()
-            .is_ok_and(|f| f.try_lock_exclusive().is_ok());
-
-        // Write without lock if lock file creation failed; skip entirely if
-        // lock is held by another process.
-        if (locked || lock_file.is_err()) && atomic_write(&self.path, &bytes) {
+        if atomic_write(&self.path, &bytes) {
             self.dirty = false;
         }
 
-        if let Ok(ref f) = lock_file {
-            let _ = f.unlock();
-        }
+        let _ = lock_file.unlock();
     }
 }
 
@@ -330,6 +432,83 @@ impl Drop for ScanCache {
     fn drop(&mut self) {
         self.flush();
     }
+}
+
+/// Remove the `count` oldest entries, in the order `keys_oldest_first` defines.
+fn evict_oldest(entries: &mut HashMap<String, CacheEntry>, count: usize) {
+    if count == 0 {
+        return;
+    }
+    for k in keys_oldest_first(entries).into_iter().take(count) {
+        entries.remove(&k);
+    }
+}
+
+/// Keys ordered oldest-first, which is the order both caps evict in.
+///
+/// The key breaks timestamp ties. Every entry written during one run shares the
+/// same `now_secs()`, so sorting on the timestamp alone is an all-ties sort
+/// over
+/// randomized `HashMap` order, and which files survive would change run to run.
+///
+/// Shared rather than written twice, so the two caps cannot drift apart on
+/// which entries a user loses.
+fn keys_oldest_first(entries: &HashMap<String, CacheEntry>) -> Vec<String> {
+    let mut by_time: Vec<(&str, u64)> = entries
+        .iter()
+        .map(|(k, e)| (k.as_str(), e.timestamp_secs))
+        .collect();
+    by_time.sort_unstable_by_key(|&(k, ts)| (ts, k));
+    by_time.into_iter().map(|(k, _)| k.to_owned()).collect()
+}
+
+/// Drop oldest entries until the map serializes under `MAX_TOTAL_BYTES`.
+///
+/// Each entry is serialized once to measure it, so the eviction count is known
+/// before anything is removed. Returns without touching the map in the common
+/// case, where the total already fits.
+fn evict_to_byte_budget(entries: &mut HashMap<String, CacheEntry>) {
+    // A JSON array of n entries is `[` + entries + `]` with n-1 separating
+    // commas, not n. Counting one comma per entry overstates the total by a
+    // byte, which is enough to evict an extra entry exactly at the boundary.
+    let sizes: HashMap<&str, usize> = entries
+        .iter()
+        .map(|(k, e)| (k.as_str(), serde_json::to_vec(e).map_or(0, |v| v.len())))
+        .collect();
+    let mut total: usize = 2 + entries.len().saturating_sub(1) + sizes.values().sum::<usize>();
+    if total <= MAX_TOTAL_BYTES {
+        return;
+    }
+
+    // Ordering comes from `keys_oldest_first`; this pass only adds the size
+    // accounting on top of it.
+    let mut doomed = Vec::new();
+    let mut remaining = entries.len();
+    for k in keys_oldest_first(entries) {
+        if total <= MAX_TOTAL_BYTES {
+            break;
+        }
+
+        // Removing an entry drops its bytes and, while more than one remains,
+        // the comma that joined it to the rest.
+        total -= sizes.get(k.as_str()).copied().unwrap_or(0) + usize::from(remaining > 1);
+        remaining -= 1;
+        doomed.push(k);
+    }
+    tracing::debug!(
+        "scan cache over {MAX_TOTAL_BYTES} bytes: evicting {} entries",
+        doomed.len()
+    );
+    for k in doomed {
+        entries.remove(&k);
+    }
+}
+
+/// Serialize the map as the flat entry array the cache file holds, or None if
+/// serialization fails.  `flush` needs it twice, once to measure and once after
+/// a byte-budget eviction.
+fn serialize_entries(entries: &HashMap<String, CacheEntry>) -> Option<Vec<u8>> {
+    serde_json::to_vec(&entries.values().collect::<Vec<_>>()).ok()
 }
 
 /// Atomic write via [`crate::atomic::replace_file`], reporting success as a
@@ -391,29 +570,35 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Load cache entries from disk.
-/// Falls back gracefully: if the file is missing or corrupt,
-/// returns an empty map.
-fn load_entries(path: &Path, ttl_secs: u64) -> HashMap<String, CacheEntry> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(_) => return HashMap::new(),
+/// Load cache entries from disk, and report whether the file needs rewriting.
+///
+/// Falls back gracefully: a missing or corrupt file yields an empty map. The
+/// rewrite flag is what makes load-time pruning and legacy over-budget files
+/// visible to `flush`, which otherwise returns early on a read-only run.
+fn load_entries(path: &Path, ttl_secs: u64) -> (HashMap<String, CacheEntry>, bool) {
+    let Ok(bytes) = std::fs::read(path) else {
+        return (HashMap::new(), false);
     };
 
-    let entries: Vec<CacheEntry> = match serde_json::from_slice(&bytes) {
-        Ok(v) => v,
-        Err(_) => return HashMap::new(),
+    let Ok(entries) = serde_json::from_slice::<Vec<CacheEntry>>(&bytes) else {
+        return (HashMap::new(), false);
     };
 
+    // Drop expired entries, and oversized ones written before the cap existed,
+    // so a cache that already holds one heals instead of being paid for daily.
+    let before = entries.len();
     let now = now_secs();
-    entries
+    let kept: HashMap<String, CacheEntry> = entries
         .into_iter()
         .filter(|e| now.saturating_sub(e.timestamp_secs) <= ttl_secs)
+        .filter(|e| e.output.issues.len() <= MAX_ENTRY_ISSUES)
         .map(|e| {
             let key = fast_key(&e.file_path, &e.params);
             (key, e)
         })
-        .collect()
+        .collect();
+    let needs_rewrite = before != kept.len() || bytes.len() > MAX_TOTAL_BYTES;
+    (kept, needs_rewrite)
 }
 
 #[cfg(test)]
@@ -741,18 +926,365 @@ mod tests {
         let mut cache = ScanCache::open(dir.path().join("c.bin"));
         let p = test_params_plain();
 
+        // Timestamps must be recent: the TTL prune runs before the count
+        // eviction, so a fixed epoch would empty the map and let this test pass
+        // without the eviction doing anything.
+        let base = now_secs() - (MAX_ENTRIES as u64 + 10);
         for i in 0..MAX_ENTRIES + 10 {
             let name = format!("file_{i}.md");
             cache.put(&name, b"x", 100, 1, &p, empty_output(), false, 1);
             let key = fast_key(&name, &p);
             if let Some(e) = cache.entries_mut().get_mut(&key) {
-                e.timestamp_secs = i as u64 + 1_700_000_000;
+                e.timestamp_secs = base + i as u64;
             }
         }
 
         assert!(cache.entries().len() > MAX_ENTRIES);
         cache.flush();
-        assert!(cache.entries().len() <= MAX_ENTRIES);
+        assert_eq!(cache.entries().len(), MAX_ENTRIES);
+        // Oldest go first, so the newest entry must still be there.
+        let newest = format!("file_{}.md", MAX_ENTRIES + 9);
+        assert!(cache.entries().values().any(|e| e.file_path == newest));
+    }
+
+    /// Build a ScanOutput carrying `n` issues, for the entry-size caps.
+    fn output_with_issues(n: usize) -> ScanOutput {
+        use crate::rules::ruleset::{Issue, IssueType, Severity};
+        let mut out = empty_output();
+        out.issues = (0..n)
+            .map(|i| {
+                Issue::new(
+                    i,
+                    6,
+                    "軟件",
+                    vec!["軟體".to_owned()],
+                    IssueType::CrossStrait,
+                    Severity::Warning,
+                )
+            })
+            .collect();
+        out
+    }
+
+    #[test]
+    fn pathological_issue_count_is_not_cached() {
+        let dir = TempDir::new().unwrap();
+        let mut cache = ScanCache::open(dir.path().join("c.bin"));
+        let p = test_params_plain();
+
+        cache.put(
+            "huge.md",
+            b"x",
+            100,
+            1,
+            &p,
+            output_with_issues(MAX_ENTRY_ISSUES + 1),
+            false,
+            1,
+        );
+        assert!(cache.entries().is_empty(), "oversized entry was stored");
+
+        cache.put(
+            "ok.md",
+            b"x",
+            100,
+            1,
+            &p,
+            output_with_issues(MAX_ENTRY_ISSUES),
+            false,
+            1,
+        );
+        assert_eq!(cache.entries().len(), 1, "entry at the cap was rejected");
+    }
+
+    #[test]
+    fn oversized_entry_on_disk_is_dropped_on_load() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("c.bin");
+        let p = test_params_plain();
+
+        // Write an oversized entry directly, as a cache built before the cap
+        // existed would contain.
+        let entry = CacheEntry {
+            file_path: "legacy.md".into(),
+            content_hash: blake3_hex(b"x"),
+            file_meta: FileMeta {
+                mtime_secs: 100,
+                size: 1,
+            },
+            params: p.clone(),
+            output: output_with_issues(MAX_ENTRY_ISSUES + 1),
+            input_was_sc: false,
+            text_char_count: 1,
+            timestamp_secs: now_secs(),
+            fast_path_safe: true,
+        };
+        std::fs::write(&path, serde_json::to_vec(&vec![&entry]).unwrap()).unwrap();
+        let before = std::fs::metadata(&path).unwrap().len();
+
+        let mut cache = ScanCache::open(path.clone());
+        assert!(
+            cache.entries().is_empty(),
+            "legacy oversized entry survived load"
+        );
+
+        // Dropping it from the map is not the point: the cost this cap exists
+        // to remove is the per-run parse of the file, so it has to leave disk.
+        // A run that stores nothing new never called put(), so only the load
+        // path can mark the cache dirty.
+        drop(cache);
+        let after = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            after < before,
+            "oversized entry still on disk: {before} -> {after} bytes"
+        );
+        let (reloaded, _) = load_entries(&path, DEFAULT_TTL_SECS);
+        assert!(reloaded.is_empty(), "file still holds the oversized entry");
+    }
+
+    #[test]
+    fn flush_keeps_entries_another_process_wrote_after_we_loaded() {
+        // A second CLI process stores entries while this one holds a snapshot.
+        // Flushing used to serialize that snapshot and swap the whole file, so
+        // the other process's work vanished. The cleanup-on-load path made this
+        // reachable from a run that never stored anything itself.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("c.bin");
+        let p = test_params_plain();
+
+        let mut ours = ScanCache::open(path.clone());
+        ours.put("ours.md", b"x", 100, 1, &p, empty_output(), false, 1);
+        ours.entries(); // take the snapshot
+
+        // Meanwhile, another process writes a disjoint entry and exits.
+        {
+            let mut theirs = ScanCache::open(path.clone());
+            theirs.put("theirs.md", b"y", 100, 1, &p, empty_output(), false, 1);
+            theirs.flush();
+        }
+        let (mid, _) = load_entries(&path, DEFAULT_TTL_SECS);
+        assert_eq!(mid.len(), 1, "setup: other process did not land its entry");
+
+        ours.flush();
+
+        let (merged, _) = load_entries(&path, DEFAULT_TTL_SECS);
+        let names: std::collections::BTreeSet<&str> =
+            merged.values().map(|e| e.file_path.as_str()).collect();
+        assert!(
+            names.contains("theirs.md"),
+            "flush discarded a concurrently written entry: {names:?}"
+        );
+        assert!(names.contains("ours.md"), "flush lost our own entry");
+    }
+
+    #[test]
+    fn fast_path_declines_while_the_recorded_mtime_is_this_second() {
+        // mtime has second granularity, so a file rewritten to the same length
+        // within the second it was scanned matches on mtime and size and would
+        // serve the previous content's issues. The fast path must decline and
+        // let the caller fall back to the content hash, which reads the file.
+        let dir = TempDir::new().unwrap();
+        let mut cache = ScanCache::open(dir.path().join("c.bin"));
+        let p = test_params_plain();
+        let now = now_secs();
+
+        cache.put("fresh.md", b"x", now, 1, &p, empty_output(), false, 1);
+        assert!(
+            matches!(cache.check_fast("fresh.md", now, 1, &p), CacheResult::Miss),
+            "fast path trusted an mtime from this second"
+        );
+
+        // An older mtime is outside the window and still hits.
+        let old = now - 60;
+        cache.put("settled.md", b"x", old, 1, &p, empty_output(), false, 1);
+        assert!(
+            matches!(
+                cache.check_fast("settled.md", old, 1, &p),
+                CacheResult::Hit(_)
+            ),
+            "fast path stopped working for settled files"
+        );
+    }
+
+    #[test]
+    fn an_entry_stored_while_fresh_stays_off_the_fast_path() {
+        // The window a clock guard at lookup time cannot close: the file was
+        // written and scanned inside one second, so a later rewrite in that
+        // same second leaves mtime and size unchanged. Time passing does not
+        // make the recorded pair trustworthy, so the entry must keep failing
+        // the fast path and force a content check for as long as it lives.
+        let dir = TempDir::new().unwrap();
+        let mut cache = ScanCache::open(dir.path().join("c.bin"));
+        let p = test_params_plain();
+        let now = now_secs();
+
+        cache.put("fresh.md", b"x", now, 1, &p, empty_output(), false, 1);
+        let key = fast_key("fresh.md", &p);
+
+        // Age the entry by an hour. Its mtime is still the second it was
+        // written in, so nothing about it became safer.
+        if let Some(e) = cache.entries_mut().get_mut(&key) {
+            e.timestamp_secs -= 3600;
+        }
+        assert!(
+            matches!(cache.check_fast("fresh.md", now, 1, &p), CacheResult::Miss),
+            "an entry stored inside the write second became fast-path trusted"
+        );
+    }
+
+    #[test]
+    fn flush_creates_the_cache_directory_before_taking_the_lock() {
+        // On a first run the cache directory does not exist. Opening the lock
+        // sidecar used to fail there and the write proceeded unlocked, so two
+        // concurrent first runs could each replace the other's file.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("missing").join("deeper").join("c.bin");
+        let p = test_params_plain();
+
+        let mut cache = ScanCache::open(path.clone());
+        cache.put("a.md", b"x", 100, 1, &p, empty_output(), false, 1);
+        cache.flush();
+
+        assert!(path.exists(), "cache file was not written");
+        assert!(
+            path.with_extension("lock").exists(),
+            "no lock sidecar, so the write was taken unlocked"
+        );
+        let (loaded, _) = load_entries(&path, DEFAULT_TTL_SECS);
+        assert_eq!(loaded.len(), 1);
+    }
+
+    #[test]
+    fn flush_keeps_the_newer_of_two_entries_for_one_key() {
+        // Both processes scanned the same file. The later scan is the one worth
+        // keeping, whichever side holds it.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("c.bin");
+        let p = test_params_plain();
+
+        let mut ours = ScanCache::open(path.clone());
+        ours.put("same.md", b"x", 100, 1, &p, empty_output(), false, 1);
+        let key = fast_key("same.md", &p);
+        let stale = now_secs() - 500;
+        if let Some(e) = ours.entries_mut().get_mut(&key) {
+            e.timestamp_secs = stale;
+        }
+
+        {
+            let mut theirs = ScanCache::open(path.clone());
+            theirs.put("same.md", b"y", 200, 2, &p, empty_output(), false, 9);
+            theirs.flush();
+        }
+
+        ours.flush();
+
+        let (merged, _) = load_entries(&path, DEFAULT_TTL_SECS);
+        let e = merged.get(&key).expect("entry survived");
+        assert_eq!(
+            e.text_char_count, 9,
+            "older snapshot overwrote the newer scan"
+        );
+    }
+
+    #[test]
+    fn byte_cap_does_not_bind_on_a_normal_full_cache() {
+        // The regression this pins: an 8 MiB budget sat BELOW what a healthy
+        // MAX_ENTRIES-sized cache produces, so every run evicted a quarter of a
+        // repo that was doing nothing wrong, and the next run rescanned it. A
+        // full cache of ordinary documents must survive flush intact.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("c.bin");
+        let mut cache = ScanCache::open(path);
+        let p = test_params_plain();
+
+        let base = now_secs() - MAX_ENTRIES as u64;
+        for i in 0..MAX_ENTRIES {
+            let name = format!("file_{i}.md");
+            cache.put(&name, b"x", 100, 1, &p, output_with_issues(20), false, 1);
+            let key = fast_key(&name, &p);
+            if let Some(e) = cache.entries_mut().get_mut(&key) {
+                e.timestamp_secs = base + i as u64;
+            }
+        }
+        cache.flush();
+
+        assert_eq!(
+            cache.entries().len(),
+            MAX_ENTRIES,
+            "byte cap evicted from a cache that is merely full, not oversized"
+        );
+    }
+
+    #[test]
+    fn total_size_cap_evicts_oldest() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("c.bin");
+        let mut cache = ScanCache::open(path.clone());
+        let p = test_params_plain();
+
+        // Each entry sits under the per-entry cap; together they blow the file
+        // budget, which is exactly the case MAX_ENTRIES alone does not catch.
+        let base = now_secs() - 300;
+        for i in 0..300 {
+            let name = format!("file_{i}.md");
+            cache.put(&name, b"x", 100, 1, &p, output_with_issues(1000), false, 1);
+            let key = fast_key(&name, &p);
+            if let Some(e) = cache.entries_mut().get_mut(&key) {
+                e.timestamp_secs = base + i as u64;
+            }
+        }
+        cache.flush();
+
+        let written = std::fs::metadata(&path).unwrap().len() as usize;
+        assert!(
+            written <= MAX_TOTAL_BYTES,
+            "cache file {written} bytes exceeds {MAX_TOTAL_BYTES}"
+        );
+        // Newest survive: eviction is oldest-first, not arbitrary.
+        assert!(cache
+            .entries()
+            .values()
+            .any(|e| e.file_path == "file_299.md"));
+    }
+
+    #[test]
+    fn legacy_total_size_over_budget_is_rewritten_on_cache_hit_only_run() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("c.bin");
+        let p = test_params_plain();
+        let base = now_secs() - 300;
+        let entries: Vec<CacheEntry> = (0..300)
+            .map(|i| CacheEntry {
+                file_path: format!("file_{i}.md"),
+                content_hash: blake3_hex(b"x"),
+                file_meta: FileMeta {
+                    mtime_secs: 100,
+                    size: 1,
+                },
+                params: p.clone(),
+                output: output_with_issues(1000),
+                input_was_sc: false,
+                text_char_count: 1,
+                timestamp_secs: base + i,
+                fast_path_safe: true,
+            })
+            .collect();
+        std::fs::write(&path, serde_json::to_vec(&entries).unwrap()).unwrap();
+        let before = std::fs::metadata(&path).unwrap().len() as usize;
+        assert!(
+            before > MAX_TOTAL_BYTES,
+            "test cache did not exceed byte cap: {before}"
+        );
+
+        let mut cache = ScanCache::open(path.clone());
+        assert_eq!(cache.entries().len(), entries.len());
+        drop(cache);
+
+        let after = std::fs::metadata(&path).unwrap().len() as usize;
+        assert!(
+            after <= MAX_TOTAL_BYTES,
+            "legacy cache stayed over byte cap: {before} -> {after}"
+        );
     }
 
     #[test]
