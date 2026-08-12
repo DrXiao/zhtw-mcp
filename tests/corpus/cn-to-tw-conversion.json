@@ -19,7 +19,12 @@
         { "found": ",", "replace": "，", "rule_type": "punctuation" },
         { "found": "內存", "replace": "記憶體", "rule_type": "cross_strait" },
         { "found": "緩存", "replace": "快取", "rule_type": "cross_strait" },
-        { "found": "數據", "replace": "資料", "rule_type": "cross_strait", "occurrence": 2 },
+        {
+          "found": "數據",
+          "replace": "資料",
+          "rule_type": "cross_strait",
+          "occurrence": 2
+        },
         { "found": "網絡", "replace": "網路", "rule_type": "cross_strait" }
       ]
     },
@@ -186,6 +191,31 @@
         { "found": "緩存", "replace": "快取", "rule_type": "cross_strait" },
         { "found": "組件", "replace": "元件", "rule_type": "cross_strait" },
         { "found": "內存", "replace": "記憶體", "rule_type": "cross_strait" }
+      ]
+    },
+    {
+      "id": "cn_opencc_residual_ambiguous",
+      "repeat": 30,
+      "input": "金流由提供方负责结算，认证链路会先验证签章，这次事故暴露问题不少。",
+      "scan_text": "金流由提供方負責結算，認證鏈路會先驗證簽章，這次事故暴露問題不少。",
+      "expected_fixed": "金流由提供方負責結算，認證鏈路會先驗證簽章，這次事故暴露問題不少。",
+      "expected_issues": [
+        { "found": "提供方", "replace": "供應商", "rule_type": "cross_strait" },
+        { "found": "鏈路", "replace": "流程", "rule_type": "cross_strait" },
+        { "found": "暴露問題", "replace": "呈現問題", "rule_type": "cross_strait" }
+      ]
+    },
+    {
+      "id": "cn_opencc_residual_ungated_recall",
+      "repeat": 30,
+      "input": "采用层次聚类，网站启用广告跟踪，请检查这个变量的源位置。",
+      "scan_text": "採用層次聚類，網站啟用廣告跟蹤，請檢查這個變量的源位置。",
+      "expected_fixed": "採用層次聚類，網站啟用廣告跟蹤，請檢查這個變數的源位置。",
+      "expected_issues": [
+        { "found": "聚類", "replace": "分群", "rule_type": "cross_strait" },
+        { "found": "跟蹤", "replace": "追蹤", "rule_type": "cross_strait" },
+        { "found": "變量", "replace": "變數", "rule_type": "cross_strait" },
+        { "found": "源位置", "replace": "來源位置", "rule_type": "cross_strait" }
       ]
     }
   ]

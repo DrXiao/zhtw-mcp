@@ -49,6 +49,37 @@
       "expected_issues": [
         { "found": "鏈接", "replace": "連結", "rule_type": "cross_strait" }
       ]
+    },
+    {
+      "id": "det_opencc_residual_ungated",
+      "repeat": 1,
+      "input": "聚類演算法用來分析特徵。編譯錯誤要標上源位置。過期的快取項會被清掉。",
+      "expected_fixed": "分群演算法用來分析特徵。編譯錯誤要標上來源位置。過期的快取項目會被清掉。",
+      "expected_issues": [
+        { "found": "聚類", "replace": "分群", "rule_type": "cross_strait" },
+        { "found": "源位置", "replace": "來源位置", "rule_type": "cross_strait" },
+        { "found": "快取項", "replace": "快取項目", "rule_type": "cross_strait" }
+      ]
+    },
+    {
+      "id": "det_opencc_residual_gated",
+      "repeat": 1,
+      "input": "程式碼的註釋要說明變數用途，同步任務在後臺執行。",
+      "expected_fixed": "程式碼的註解要說明變數用途，同步任務在背景執行。",
+      "expected_issues": [
+        { "found": "註釋", "replace": "註解", "rule_type": "cross_strait" },
+        { "found": "後臺", "replace": "背景", "rule_type": "cross_strait" }
+      ]
+    },
+    {
+      "id": "det_opencc_residual_register",
+      "repeat": 1,
+      "input": "分析使用者的頁面軌跡要靠跟蹤，比如停留時間。",
+      "expected_fixed": "分析使用者的頁面軌跡要靠追蹤，比如停留時間。",
+      "expected_issues": [
+        { "found": "跟蹤", "replace": "追蹤", "rule_type": "cross_strait" },
+        { "found": "比如", "replace": "例如", "rule_type": "cross_strait" }
+      ]
     }
   ]
 }

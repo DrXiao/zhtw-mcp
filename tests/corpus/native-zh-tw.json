@@ -354,6 +354,97 @@
       "input": "那個看起來十分陌生的城市才慢慢顯露他熟悉的生活節奏。",
       "expected_fixed": "那個看起來十分陌生的城市才慢慢顯露他熟悉的生活節奏。",
       "expected_issues": []
+    },
+    {
+      "id": "native_residual_classical",
+      "repeat": 30,
+      "input": "古籍的註釋與訓詁考證是另一門學問，跟蹤騷擾防制法保障的是人身安全。",
+      "expected_fixed": "古籍的註釋與訓詁考證是另一門學問，跟蹤騷擾防制法保障的是人身安全。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_residual_network",
+      "repeat": 30,
+      "input": "鏈路層協定負責錯誤偵測，管理後臺的登入權限要定期收斂。",
+      "expected_fixed": "鏈路層協定負責錯誤偵測，管理後臺的登入權限要定期收斂。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_residual_api",
+      "repeat": 30,
+      "input": "快取項目已經過期，把介面暴露給外部服務呼叫前要先做權限檢查。",
+      "expected_fixed": "快取項目已經過期，把介面暴露給外部服務呼叫前要先做權限檢查。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_residual_colloquial",
+      "repeat": 30,
+      "input": "比如說這樣講你懂嗎？群聚類型分析要看時間軸。",
+      "expected_fixed": "比如說這樣講你懂嗎？群聚類型分析要看時間軸。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_residual_surveillance",
+      "repeat": 30,
+      "input": "警方跟蹤嫌犯到巷口才收網。",
+      "expected_fixed": "警方跟蹤嫌犯到巷口才收網。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_residual_wireless_link",
+      "repeat": 30,
+      "input": "設定檔可以控制無線鏈路的傳輸品質與重傳次數。",
+      "expected_fixed": "設定檔可以控制無線鏈路的傳輸品質與重傳次數。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_residual_backend_admin",
+      "repeat": 30,
+      "input": "登入後台系統之後可以切換語系。",
+      "expected_fixed": "登入後台系統之後可以切換語系。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_residual_light_source",
+      "repeat": 30,
+      "input": "光源位置需要調整，雷射的熱源位置也要重新量測。",
+      "expected_fixed": "光源位置需要調整，雷射的熱源位置也要重新量測。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_residual_converge",
+      "repeat": 30,
+      "input": "這些資料匯聚類似的特徵，屬於同一種匯聚類型。",
+      "expected_fixed": "這些資料匯聚類似的特徵，屬於同一種匯聚類型。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_residual_provide_compound",
+      "repeat": 30,
+      "input": "本館提供方便的借閱服務，也提供方向與方案給讀者。",
+      "expected_fixed": "本館提供方便的借閱服務，也提供方向與方案給讀者。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_residual_surveillance_record",
+      "repeat": 30,
+      "input": "警方紀錄跟蹤嫌犯的資料時要注意隱私保護。",
+      "expected_fixed": "警方紀錄跟蹤嫌犯的資料時要注意隱私保護。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_residual_clue_window_leak",
+      "repeat": 30,
+      "input": "除錯時先確認光源位置，熱源位置也要量測。",
+      "expected_fixed": "除錯時先確認光源位置，熱源位置也要量測。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_residual_follow_a_person",
+      "repeat": 30,
+      "input": "該使用者跟蹤同事到停車場，小偷也跟蹤目標進入大樓。",
+      "expected_fixed": "該使用者跟蹤同事到停車場，小偷也跟蹤目標進入大樓。",
+      "expected_issues": []
     }
   ]
 }

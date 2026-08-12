@@ -5095,6 +5095,16 @@
       "context_clues": ["程式", "軟體", "系統", "電腦", "網路"]
     },
     {
+      "from": "後台",
+      "to": ["背景"],
+      "type": "cross_strait",
+      "context": "@domain 作業系統。background execution → 背景；「後台」拼法版本，與「後臺」同一條規則 (@seealso 後臺)",
+      "english": "background (execution)",
+      "context_clues": ["執行", "運行", "行程", "進程", "程序", "任務", "執行緒", "常駐", "同步", "下載", "更新", "流量"],
+      "negative_context_clues": ["管理", "登入", "帳號", "權限", "營運", "上架", "儀表板"],
+      "exceptions": ["後台系統", "後台管理", "後台介面", "後台頁面", "後台帳號"]
+    },
+    {
       "from": "後台流量",
       "to": ["背景流量"],
       "type": "cross_strait",
@@ -5114,6 +5124,16 @@
       "type": "cross_strait",
       "context": "@domain 程式設計",
       "english": "suffix"
+    },
+    {
+      "from": "後臺",
+      "to": ["背景"],
+      "type": "cross_strait",
+      "context": "@domain 作業系統。background execution → 背景；backend admin 義的「後臺」保留，故以執行語境詞為條件並排除管理後臺 (@seealso 後台流量)",
+      "english": "background (execution)",
+      "context_clues": ["執行", "運行", "行程", "進程", "程序", "任務", "執行緒", "常駐", "同步", "下載", "更新", "流量"],
+      "negative_context_clues": ["管理", "登入", "帳號", "權限", "營運", "上架", "儀表板"],
+      "exceptions": ["後臺系統", "後臺管理", "後臺介面", "後臺頁面", "後臺帳號"]
     },
     {
       "from": "後驗機率",
@@ -5199,6 +5219,13 @@
       "type": "cross_strait",
       "context": "@domain 日常",
       "english": "busy waiting"
+    },
+    {
+      "from": "快取項",
+      "to": ["快取項目"],
+      "type": "cross_strait",
+      "context": "@domain IT。cache item/entry → 快取項目；已寫成「快取項目」時由 superstring 吸收，不重複標記",
+      "english": "cache entry"
     },
     {
       "from": "快捷方式",
@@ -5820,6 +5847,14 @@
       "to": ["支援"],
       "type": "translationese",
       "context": "dewesternise.V10: weak verb + nominalization"
+    },
+    {
+      "from": "提供方",
+      "to": ["提供者", "供應商", "服務提供者"],
+      "type": "cross_strait",
+      "context": "@domain 商業。provider → 提供者；供貨語境 → 供應商；service provider → 服務提供者。例外含「提供+方可/方能/方才/方始/方得」等副詞連用；此類與「提供方」名詞後接助動詞同形，取其誤報較常見而漏報較罕見",
+      "english": "provider",
+      "exceptions": ["提供方位", "提供方便", "提供方可", "提供方向", "提供方塊", "提供方始", "提供方式", "提供方得", "提供方才", "提供方案", "提供方法", "提供方能", "提供方針", "提供方面"]
     },
     {
       "from": "提前預告",
@@ -6582,6 +6617,14 @@
       "type": "cross_strait",
       "context": "@domain 程式設計",
       "english": "AI agent"
+    },
+    {
+      "from": "暴露問題",
+      "to": ["呈現問題", "顯露問題"],
+      "type": "cross_strait",
+      "context": "@domain 日常。cn 慣用語；tw 用「呈現問題」或「顯露問題」。API 術語的「暴露介面」不在此規則範圍",
+      "english": "reveal problems",
+      "editorial_confidence": "low"
     },
     {
       "from": "更好地",
@@ -7367,6 +7410,15 @@
       "english": "parent node"
     },
     {
+      "from": "比如",
+      "to": ["例如", "譬如"],
+      "type": "cross_strait",
+      "context": "@domain 日常。三者皆為正確 tw 用法，正式書面語偏「例如」；屬語域偏好，故列兩個等價替代讓作者自行取捨",
+      "english": "for example",
+      "exceptions": ["比如說"],
+      "editorial_confidence": "low"
+    },
+    {
       "from": "比特",
       "to": ["位元"],
       "type": "cross_strait",
@@ -7816,6 +7868,15 @@
       "type": "cross_strait",
       "context": "@domain 程式設計",
       "english": "source code"
+    },
+    {
+      "from": "源位置",
+      "to": ["來源位置"],
+      "type": "cross_strait",
+      "context": "@domain 程式設計。source location → 來源位置。程式語境為條件，並將「X源+位置」複合詞列為例外 (@seealso 源代碼)",
+      "english": "source location",
+      "context_clues": ["代碼", "例外", "偵錯", "原始碼", "堆疊", "日誌", "標註", "檔案", "程式", "程式碼", "符號", "編譯", "設定檔", "變數", "變量", "錯誤", "除錯"],
+      "exceptions": ["光源位置", "熱源位置", "震源位置", "電源位置", "水源位置", "音源位置", "聲源位置", "能源位置", "火源位置", "資源位置", "貨源位置", "客源位置", "房源位置", "氣源位置", "財源位置", "病源位置", "污染源位置", "汙染源位置", "輻射源位置", "感染源位置", "訊號源位置", "信號源位置", "詞源位置", "字源位置"]
     },
     {
       "from": "源文件",
@@ -10029,6 +10090,15 @@
       "english": "San Marino"
     },
     {
+      "from": "聚類",
+      "to": ["分群"],
+      "type": "cross_strait",
+      "context": "@domain 科學。clustering；tw 正式寫作用「分群」。機器學習語境為條件，並將「X聚+類Y」複合詞列為例外",
+      "english": "clustering",
+      "context_clues": ["DBSCAN", "分群", "向量", "密度", "層次", "模型", "機器學習", "演算法", "特徵", "監督式", "相似度", "資料集", "質心", "距離", "階層", "非監督"],
+      "exceptions": ["群聚類", "凝聚類", "匯聚類", "積聚類", "集聚類", "團聚類", "齊聚類", "相聚類", "聚類似"]
+    },
+    {
       "from": "聯機交易處理",
       "to": ["線上異動處理"],
       "type": "cross_strait",
@@ -11108,6 +11178,14 @@
       "context_clues": ["視窗", "微軟", "系統", "登錄"]
     },
     {
+      "from": "註釋",
+      "to": ["註解"],
+      "type": "cross_strait",
+      "context": "@domain 程式設計。程式碼 comment 在 tw 統一為「註解」；古籍訓詁義的「註釋」是正確 tw 用法，故以程式語境詞為條件",
+      "english": "code comment",
+      "context_clues": ["函式", "原始碼", "標頭", "模組", "程式", "程式碼", "編譯", "縮排", "語法", "變數", "邏輯", "重構", "類別"]
+    },
+    {
       "from": "註銷",
       "to": ["登出"],
       "type": "cross_strait",
@@ -11528,6 +11606,16 @@
       "type": "cross_strait",
       "context": "@domain 醫學",
       "english": "ultrasound"
+    },
+    {
+      "from": "跟蹤",
+      "to": ["追蹤"],
+      "type": "cross_strait",
+      "context": "@domain 日常。tracking → 追蹤；跟人的「跟蹤」是正確 tw 用法，故以數位追蹤語境詞為條件 (@seealso 跟蹤服務)",
+      "english": "tracking",
+      "context_clues": ["Cookie", "UTM", "事件", "像素", "分析", "埋點", "廣告", "成效", "曝光", "流量", "瀏覽", "軌跡", "轉換率", "頁面", "點擊"],
+      "negative_context_clues": ["警方", "警察", "嫌犯", "偵查", "跟監", "狗仔", "尾隨", "保護令"],
+      "exceptions": ["跟蹤騷擾", "跟蹤狂", "跟蹤服務"]
     },
     {
       "from": "跟蹤服務",
@@ -12320,6 +12408,16 @@
       "type": "cross_strait",
       "context": "教育部重編國語辭典「表」指「分格或分項以列記事物的件」，linked list 作為資料結構，不具備任何「表」的意涵 (@seealso 鏈結)",
       "english": "linked list"
+    },
+    {
+      "from": "鏈路",
+      "to": ["流程", "鏈"],
+      "type": "cross_strait",
+      "context": "@domain IT。auth chain → 認證流程、bootstrap chain → 啟動鏈；網路層的「鏈路」(link) 是正確 tw 術語，故以流程語境詞為條件，並排除電信語境",
+      "english": "chain",
+      "context_clues": ["認證", "授權", "驗證", "啟動", "呼叫", "信任", "登入"],
+      "negative_context_clues": ["光纖", "實體層", "鏈路層", "頻寬", "位址", "協商", "交換器", "路由", "基地台", "訊號", "雙工", "網卡", "封包", "乙太"],
+      "exceptions": ["鏈路層", "資料鏈路", "鏈路狀態", "無線鏈路", "實體鏈路", "通訊鏈路", "上行鏈路", "下行鏈路", "鏈路預算"]
     },
     {
       "from": "鏡像",
