@@ -22,7 +22,6 @@ use super::types::{
 };
 use crate::audit::Trace;
 use crate::engine::disambig::{disambiguate_batch, DisambigConfig, DisambigStats};
-use crate::engine::excluded::ByteRange;
 use crate::engine::s2t::S2TConverter;
 use crate::engine::scan::{is_spaced_acronym_issue, ContentType, Scanner};
 #[cfg(feature = "translate")]
@@ -31,6 +30,7 @@ use crate::engine::zhtype::{detect_chinese_type, ChineseType};
 use crate::fixer::{
     apply_fixes_with_context, remap_to_post_fix, suppress_convergent_issues, FixMode,
 };
+use crate::rules::ignore::apply_ignore_set;
 use crate::rules::loader::compute_ruleset_hash;
 use crate::rules::ruleset::Ruleset;
 use crate::rules::ruleset::{Issue, IssueType, PoliticalStance, Profile, ResolutionTier, Severity};
@@ -380,17 +380,10 @@ impl Server {
 
         // Build the exclusion ranges once: the fix path reuses them for the
         // fixer and the post-fix remap.
-        let md_opts = crate::engine::markdown::MdScanOptions::new(
-            matches!(
-                content_type,
-                crate::engine::scan::ContentType::MarkdownScanCode
-            ),
-            cfg.exempt_blockquotes,
-        );
-        let excluded = crate::engine::scan::build_exclusions_for_content_type_with_options(
+        let excluded = crate::engine::scan::build_exclusions_for_content_type_with_config(
             text,
             content_type,
-            md_opts,
+            &cfg,
         );
         let mut scan =
             self.scanner
@@ -775,12 +768,11 @@ impl Server {
                     None => issues.clone(),
                 };
 
-                let excluded_pairs = to_offset_pairs(&excluded);
                 let fix_result = apply_fixes_with_context(
                     text,
                     &fix_issues,
                     mode,
-                    &excluded_pairs,
+                    &excluded,
                     Some(self.scanner.segmenter()),
                 );
 
@@ -1018,12 +1010,6 @@ fn json_response(
             JsonRpcResponse::error(id, INTERNAL_ERROR, "internal server error".into())
         }
     }
-}
-
-/// Convert excluded byte ranges to the (start, end) pairs expected by
-/// apply_fixes.
-fn to_offset_pairs(ranges: &[ByteRange]) -> Vec<(usize, usize)> {
-    ranges.iter().map(|r| (r.start, r.end)).collect()
 }
 
 /// Result of parsing a request or tool argument: the error side carries a
@@ -1612,18 +1598,6 @@ fn filter_by_stance(issues: &mut Vec<Issue>, stance: PoliticalStance) {
     issues.retain(|issue| {
         issue.rule_type != IssueType::PoliticalColoring || stance.allows_rule(&issue.found)
     });
-}
-
-/// Downgrade issues whose found term matches a pre-built ignore set to Info.
-fn apply_ignore_set(issues: &mut [Issue], ignore_set: &std::collections::HashSet<&str>) {
-    if ignore_set.is_empty() {
-        return;
-    }
-    for issue in issues {
-        if ignore_set.contains(issue.found.as_str()) {
-            issue.severity = Severity::Info;
-        }
-    }
 }
 
 /// Issue severity summary counts.

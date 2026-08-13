@@ -21,6 +21,7 @@
 #[cfg(test)]
 use std::sync::Arc;
 
+use crate::engine::excluded::{is_excluded, ByteRange};
 use crate::engine::segment::Segmenter;
 use crate::rules::ruleset::{Issue, IssueType, Tier2Outcome};
 
@@ -83,9 +84,9 @@ pub fn apply_fixes(
     text: &str,
     issues: &[Issue],
     mode: FixMode,
-    excluded_offsets: &[(usize, usize)],
+    excluded: &[ByteRange],
 ) -> FixResult {
-    apply_fixes_with_context(text, issues, mode, excluded_offsets, None)
+    apply_fixes_with_context(text, issues, mode, excluded, None)
 }
 
 /// Apply fixes to text using an optional segmenter for context-clue analysis.
@@ -110,7 +111,7 @@ pub fn apply_fixes_with_context(
     text: &str,
     issues: &[Issue],
     mode: FixMode,
-    excluded_offsets: &[(usize, usize)],
+    excluded: &[ByteRange],
     segmenter: Option<&Segmenter>,
 ) -> FixResult {
     let started = std::time::Instant::now();
@@ -140,16 +141,28 @@ pub fn apply_fixes_with_context(
     let mut out = String::with_capacity(text.len());
     let mut applied = 0usize;
     let mut skipped = 0usize;
+    // "is_excluded" switches to binary search past ten ranges, which assumes
+    // the slice is sorted by start and non-overlapping.  Every in-tree caller
+    // satisfies that, because the builders all end in "merge_ranges_pub", but
+    // this is a public entry point on a write path: an unsorted slice would
+    // silently let a fix through into bytes the caller marked protected.  The
+    // check is one linear pass, and the normalization it guards runs only for
+    // callers that got it wrong.
+    let normalized;
+    let excluded = if excluded.windows(2).all(|w| w[0].end <= w[1].start) {
+        excluded
+    } else {
+        normalized = crate::engine::excluded::merge_ranges_pub(excluded.to_vec());
+        &normalized[..]
+    };
+
     let mut applied_fixes = Vec::new();
     // Byte position up to which we have already copied into `out`.
     let mut cursor: usize = 0;
 
-    // Pre-compute excluded ranges for context-clue window lookups (hoisted
-    // out of the per-issue loop to avoid redundant allocations).
-    let excluded_ranges: Vec<crate::engine::excluded::ByteRange> = excluded_offsets
-        .iter()
-        .map(|&(start, end)| crate::engine::excluded::ByteRange { start, end })
-        .collect();
+    // Byte position up to which grammar issues are declined because an
+    // enclosing grammar span was declined. See the barrier check below.
+    let mut skip_until: usize = 0;
 
     // Issues are already sorted ascending by offset and non-overlapping
     // (scanner's resolve_overlaps guarantees this).  Iterate forward,
@@ -167,34 +180,57 @@ pub fn apply_fixes_with_context(
         // Skip overlapping issues: grammar issues are appended after
         // overlap resolution and may overlap each other (e.g. 對X進行Y
         // overlaps the inner 進行Y).  The fixer must not apply both.
-        if issue.offset < cursor {
+        //
+        // skip_until extends the same barrier to a span that was declined
+        // rather than applied. Without it, declining the outer 對X進行Y because
+        // it crosses an excluded region still lets the inner 進行Y fire, which
+        // strips 進行 and leaves the fronted 對 dangling: prose nobody wrote,
+        // from a span the mask said not to touch.
+        if issue.offset < cursor
+            || (issue.rule_type == IssueType::Grammar && issue.offset < skip_until)
+        {
             skipped += 1;
             continue;
         }
 
-        // Skip if the issue span overlaps any excluded region.
-        if excluded_offsets
-            .iter()
-            .any(|&(s, e)| issue.offset < e && end > s)
-        {
+        // Skip if the issue writes into any excluded region.  For a non-empty
+        // span that is the scanner's own overlap test, including its
+        // binary-search path once the range list grows past a handful.
+        //
+        // Zero-length insertions need their own check: a zero-width span
+        // overlaps nothing, so the generic test reports it as outside every
+        // range.  Spacing rules emit exactly that shape, and an insertion
+        // strictly inside a range corrupts protected bytes just as a
+        // replacement would.  The bounds are strict on purpose: inserting at a
+        // range edge writes outside it, which is how a missing space before an
+        // inline code span gets fixed.
+        let writes_into_excluded = if issue.length == 0 {
+            excluded
+                .iter()
+                .any(|r| issue.offset > r.start && issue.offset < r.end)
+        } else {
+            is_excluded(issue.offset, end, excluded)
+        };
+        if writes_into_excluded {
             skipped += 1;
+            skip_until = skip_until.max(end);
             continue;
         }
 
         // Tier-based fix eligibility.
         //
         // Orthographic issue types can be fixed mechanically (no lexical
-        // ambiguity).  Lexical types (CrossStrait, Typo, PoliticalColoring,
-        // Confusable) need progressively higher fix tiers.
-        // AiStyle zero-width artifact removal (empty suggestion on invisible
-        // chars only) is safe for orthographic tier -- deletes invisible junk.
-        // The found-content check prevents future AiStyle rules with empty
-        // suggestions from being misclassified as orthographic.
-        // Narrower check than ai_score::is_zero_width: only ZWSP (U+200B)
-        // and mid-text BOM (U+FEFF) are pure tokenizer junk safe to strip
-        // unconditionally. ZWJ/ZWNJ/LRM/RLM have legitimate uses in bidi
-        // text and emoji sequences; the broader set in ai_score.rs is
-        // appropriate for detection/scoring but too aggressive for fixing.
+        // ambiguity). Lexical types (CrossStrait, Typo, PoliticalColoring,
+        // Confusable) need progressively higher fix tiers. AiStyle zero-width
+        // artifact removal (empty suggestion on invisible chars only) is safe
+        // for orthographic tier -- deletes invisible junk. The found-content
+        // check prevents future AiStyle rules with empty suggestions from being
+        // misclassified as orthographic. Narrower check than
+        // ai_score::is_zero_width: only ZWSP (U+200B) and mid-text BOM (U+FEFF)
+        // are pure tokenizer junk safe to strip unconditionally.
+        // ZWJ/ZWNJ/LRM/RLM have legitimate uses in bidi text and emoji
+        // sequences; the broader set in ai_score.rs is appropriate for
+        // detection/scoring but too aggressive for fixing.
         let ai_zero_width_removal = issue.rule_type == IssueType::AiStyle
             && crate::rules::ruleset::is_delete_suggestion(&issue.suggestions)
             && !issue.found.is_empty()
@@ -257,7 +293,7 @@ pub fn apply_fixes_with_context(
                     text,
                     issue.offset,
                     end,
-                    &excluded_ranges,
+                    excluded,
                 );
                 let clue_strs: Vec<&str> = issue
                     .context_clues
@@ -513,9 +549,139 @@ mod tests {
     fn excluded_offset_skipped() {
         let text = "這個軟件很好用";
         let issues = vec![make_issue(6, "軟件", vec!["軟體"])];
-        let result = apply_fixes(text, &issues, FixMode::LexicalSafe, &[(0, 21)]);
+        let result = apply_fixes(
+            text,
+            &issues,
+            FixMode::LexicalSafe,
+            &[ByteRange { start: 0, end: 21 }],
+        );
         assert_eq!(result.text, text);
         assert_eq!(result.skipped, 1);
+    }
+
+    #[test]
+    fn unsorted_excluded_ranges_still_protect() {
+        // Past ten ranges is_excluded binary-searches, which needs sorted,
+        // non-overlapping input. A caller that hands over ranges in any other
+        // order must still get its protected bytes back untouched rather than
+        // a silent rewrite.
+        let text = "這個軟件很好用";
+        let offset = text.find("軟件").unwrap();
+
+        // Twelve ranges, descending, with the one covering the issue last so a
+        // binary search over the unsorted slice cannot find it.
+        let mut excluded: Vec<ByteRange> = (0..11)
+            .map(|i| ByteRange {
+                start: 100 + i * 10,
+                end: 100 + i * 10 + 5,
+            })
+            .rev()
+            .collect();
+        excluded.push(ByteRange {
+            start: offset,
+            end: offset + "軟件".len(),
+        });
+
+        let issues = vec![make_issue(offset, "軟件", vec!["軟體"])];
+        let result = apply_fixes(text, &issues, FixMode::LexicalSafe, &excluded);
+        assert_eq!(result.text, text, "protected span was rewritten");
+        assert_eq!(result.skipped, 1);
+
+        // Sorted but overlapping is the other way the binary search breaks: it
+        // assumes only the immediately preceding range can overlap, so a wide
+        // early range that covers the issue is missed once narrower ranges sort
+        // between them.
+        let mut nested = vec![ByteRange {
+            start: 0,
+            end: text.len(),
+        }];
+        nested.extend((0..11).map(|i| ByteRange {
+            start: 100 + i * 10,
+            end: 100 + i * 10 + 5,
+        }));
+        let result = apply_fixes(text, &issues, FixMode::LexicalSafe, &nested);
+        assert_eq!(
+            result.text, text,
+            "range covering the whole text was missed"
+        );
+        assert_eq!(result.skipped, 1);
+    }
+
+    #[test]
+    fn zero_length_insertion_inside_excluded_is_skipped() {
+        // Spacing rules emit zero-length insertions (missing_space_issue in
+        // src/engine/scan/spacing.rs). A zero-width span overlaps nothing, so
+        // the generic overlap test reports it as outside every range. The mask
+        // still has to stop it: writing a space into the middle of a code span
+        // corrupts the code exactly as a replacement would.
+        let text = "這是 `中文abc` 的說明";
+        let code_start = text.find('`').unwrap();
+        let code_end = text[code_start + 1..].find('`').unwrap() + code_start + 2;
+        let boundary = text.find("abc").unwrap();
+        assert!(boundary > code_start && boundary < code_end);
+
+        let insertion = Issue::new(
+            boundary,
+            0,
+            "",
+            vec![" ".into()],
+            IssueType::Punctuation,
+            Severity::Info,
+        );
+        let result = apply_fixes(
+            text,
+            &[insertion],
+            FixMode::Orthographic,
+            &[ByteRange {
+                start: code_start,
+                end: code_end,
+            }],
+        );
+        assert_eq!(result.text, text, "must not write inside the code span");
+        assert_eq!(result.skipped, 1);
+    }
+
+    #[test]
+    fn declined_excluded_grammar_span_does_not_block_lexical_fix() {
+        let text = "我們對`x`進行軟件處理。";
+        let outer = text.find('對').unwrap();
+        let inner = text.find("進行").unwrap();
+        let lexical = text.find("軟件").unwrap();
+        let code = text.find('`').unwrap();
+        let code_end = text[code + 1..].find('`').unwrap() + code + 2;
+        let issues = vec![
+            Issue::new(
+                outer,
+                "對`x`進行軟件處理".len(),
+                "對`x`進行軟件處理",
+                vec!["處理`x`".into()],
+                IssueType::Grammar,
+                Severity::Info,
+            ),
+            Issue::new(
+                inner,
+                "進行軟件處理".len(),
+                "進行軟件處理",
+                vec!["軟件處理".into()],
+                IssueType::Grammar,
+                Severity::Info,
+            ),
+            make_issue(lexical, "軟件", vec!["軟體"]),
+        ];
+
+        let result = apply_fixes(
+            text,
+            &issues,
+            FixMode::LexicalContextual,
+            &[ByteRange {
+                start: code,
+                end: code_end,
+            }],
+        );
+
+        assert_eq!(result.text, "我們對`x`進行軟體處理。");
+        assert_eq!(result.applied, 1);
+        assert_eq!(result.skipped, 2);
     }
 
     #[test]

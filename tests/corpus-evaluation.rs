@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use zhtw_mcp::engine::s2t::S2TConverter;
-use zhtw_mcp::engine::scan::{ContentType, Scanner};
+use zhtw_mcp::engine::scan::{build_exclusions_for_content_type, ContentType, Scanner};
 use zhtw_mcp::engine::segment::Segmenter;
 use zhtw_mcp::fixer::{apply_fixes_with_context, FixMode};
 use zhtw_mcp::rules::ruleset::{Issue, IssueType, Profile, ProfileConfig, Ruleset};
@@ -249,7 +249,7 @@ fn evaluate_positive_corpus(
             scan_text,
             &issues,
             FixMode::LexicalSafe,
-            &[],
+            &build_exclusions_for_content_type(scan_text, ContentType::Plain),
             Some(segmenter),
         );
 
@@ -284,7 +284,7 @@ fn evaluate_native_corpus(
             &case.input,
             &issues,
             FixMode::LexicalSafe,
-            &[],
+            &build_exclusions_for_content_type(&case.input, ContentType::Plain),
             Some(segmenter),
         );
 
