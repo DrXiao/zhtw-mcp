@@ -604,7 +604,16 @@ fn parse_cache(rest: &[String]) -> Result<usize> {
     }
 }
 
-fn main() -> Result<()> {
+/// Text failed a gate: too many errors or warnings.  The input was linted
+/// successfully; the answer is "no".
+const EXIT_GATE: i32 = 1;
+
+/// The tool could not do its job: bad arguments, unreadable config, a file it
+/// could not process.  Distinct from [EXIT_GATE] so CI can tell "your prose
+/// needs work" from "this run is meaningless".
+const EXIT_FAILURE: i32 = 2;
+
+fn main() {
     let args: Vec<String> = std::env::args().collect();
     let default_log = if args.iter().any(|a| a == "--debug") {
         "debug"
@@ -615,7 +624,16 @@ fn main() -> Result<()> {
     };
     zhtw_mcp::trace::init(default_log);
 
-    run(parse_args(&args)?)
+    // Debug formatting rather than alternate Display: that is what anyhow's
+    // own Termination impl used before this function stopped returning
+    // Result, so the multi-line
+    // "Caused by:" chain users are reading in CI logs stays as it was.  The
+    // only thing that changed is the exit code.
+    let result = parse_args(&args).and_then(run);
+    if let Err(e) = result {
+        eprintln!("Error: {e:?}");
+        process::exit(EXIT_FAILURE);
+    }
 }
 
 /// Execute a parsed command line.  Everything that reads the environment, the
@@ -663,7 +681,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Tm(tm) => {
             let cwd = std::env::current_dir().unwrap_or_default();
             let project_cfg = match &config_path {
-                Some(p) => zhtw_mcp::config::ProjectConfig::from_file(p).ok(),
+                Some(p) => Some(zhtw_mcp::config::ProjectConfig::from_file(p)?),
                 None => zhtw_mcp::config::ProjectConfig::discover(&cwd),
             };
             let tm_path = project_cfg
@@ -690,12 +708,36 @@ fn run(cli: Cli) -> Result<()> {
         }
 
         Command::Server => {
-            // Server mode: open override store, then run MCP over stdio.
-            let overrides_path =
-                overrides_path.unwrap_or_else(zhtw_mcp::rules::store::default_overrides_path);
-            let suppressions_path =
-                suppressions_path.unwrap_or_else(zhtw_mcp::rules::store::default_suppressions_path);
-            run_server(&overrides_path, &suppressions_path, packs_dir, active_packs)
+            // Server mode: open the stores, then run MCP over stdio.
+            //
+            // All three store paths fall back to .zhtw-mcp.toml, the same
+            // discovery the tm subcommand uses, so a project can point the
+            // server at its own stores without every MCP client passing flags.
+            // Wiring only some of them would be worse than wiring none: the
+            // server would answer from the project's overrides while recording
+            // decisions into a different translation memory than lint reads.
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let project_cfg = match &config_path {
+                Some(p) => Some(zhtw_mcp::config::ProjectConfig::from_file(p)?),
+                None => zhtw_mcp::config::ProjectConfig::discover(&cwd),
+            };
+            let cfg_ref = project_cfg.as_ref();
+            let overrides_path = overrides_path
+                .or_else(|| cfg_ref.and_then(|c| c.overrides.as_ref().map(PathBuf::from)))
+                .unwrap_or_else(zhtw_mcp::rules::store::default_overrides_path);
+            let suppressions_path = suppressions_path
+                .or_else(|| cfg_ref.and_then(|c| c.suppressions.as_ref().map(PathBuf::from)))
+                .unwrap_or_else(zhtw_mcp::rules::store::default_suppressions_path);
+            let tm_path = cfg_ref
+                .and_then(|c| c.translation_memory.as_ref().map(PathBuf::from))
+                .unwrap_or_else(|| zhtw_mcp::rules::store::discover_tm_path(&cwd));
+            run_server(
+                &overrides_path,
+                &suppressions_path,
+                &tm_path,
+                packs_dir,
+                active_packs,
+            )
         }
     }
 }
@@ -783,6 +825,12 @@ fn run_lint(
         })
         .unwrap_or_default();
 
+    // ignore_terms is config-only: there is no CLI flag for it, matching the
+    // documented field list in docs/cli.md.
+    let eff_ignore_terms: Vec<String> = cfg_ref
+        .and_then(|c| c.ignore_terms.clone())
+        .unwrap_or_default();
+
     run_lint_batch(&LintBatchParams {
         file_args: &lint.files,
         format: lint.format,
@@ -811,6 +859,7 @@ fn run_lint(
         ai_threshold_multiplier: lint.ai_threshold_multiplier,
         tm_path: Some(eff_tm_path),
         glossary: eff_glossary,
+        ignore_terms: &eff_ignore_terms,
         consistency: lint.consistency,
         telemetry: lint.telemetry,
     })
@@ -820,6 +869,7 @@ fn run_lint(
 fn run_server(
     overrides_path: &Path,
     suppressions_path: &Path,
+    tm_path: &Path,
     packs_dir: PathBuf,
     active_packs: Vec<String>,
 ) -> Result<()> {
@@ -827,19 +877,18 @@ fn run_server(
     let suppression_store = zhtw_mcp::rules::store::SuppressionStore::open(suppressions_path)?;
     let pack_store = zhtw_mcp::rules::store::PackStore::new(packs_dir);
 
-    // Discover translation memory in project root.
-    let tm_store = {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let tm_path = zhtw_mcp::rules::store::discover_tm_path(&cwd);
-        match zhtw_mcp::rules::store::TranslationMemoryStore::open(&tm_path) {
-            Ok(store) => Some(store),
-            Err(e) => {
-                tracing::warn!(
-                    "failed to open translation memory at {}: {e}",
-                    tm_path.display()
-                );
-                None
-            }
+    // Translation memory: the caller resolved the path, from translation_memory
+    // in the project config or by walking up from cwd.  A missing or unreadable
+    // TM degrades to none with a warning, the same as on the lint path, because
+    // it is an optional store rather than a precondition.
+    let tm_store = match zhtw_mcp::rules::store::TranslationMemoryStore::open(tm_path) {
+        Ok(store) => Some(store),
+        Err(e) => {
+            tracing::warn!(
+                "failed to open translation memory at {}: {e}",
+                tm_path.display()
+            );
+            None
         }
     };
 
@@ -1024,6 +1073,11 @@ struct LintBatchParams<'a> {
     /// issues, `banned` injects synthetic Error issues for any
     /// occurrence the embedded ruleset missed.
     glossary: zhtw_mcp::rules::glossary::ProjectGlossary,
+    /// Terms the project has declared uninteresting (`ignore_terms` in
+    /// `.zhtw-mcp.toml`).  Still reported, but downgraded to Info so they
+    /// stop failing the error and warning gates.  Same semantics as the
+    /// MCP tool's `ignore_terms` argument.
+    ignore_terms: &'a [String],
     /// When true, append a `consistency` block to JSON output (35.1):
     /// per-equivalence-class diagnostic when both the calque and the
     /// canonical TW form appear in the same document.
@@ -1591,6 +1645,7 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             Some("markdown") => zhtw_mcp::engine::scan::ContentType::Markdown,
             Some("markdown-scan-code") => zhtw_mcp::engine::scan::ContentType::MarkdownScanCode,
             Some("yaml") => zhtw_mcp::engine::scan::ContentType::Yaml,
+            Some("plain") => zhtw_mcp::engine::scan::ContentType::Plain,
             Some(_) | None => {
                 let lower = file_arg.to_ascii_lowercase();
                 if lower.ends_with(".md") || lower.ends_with(".markdown") {
@@ -1769,7 +1824,18 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
         multi,
     };
     for (file_arg, scan_result) in resolved.iter().zip(scan_results) {
-        process_scanned_file(&ctx, file_arg, scan_result, &mut state)?;
+        // A file that cannot be read is reported and skipped, not fatal. One
+        // latin-1 document in a directory used to abort the whole run and
+        // discard the findings for every file already processed, which in JSON
+        // mode meant empty output after doing all the work.
+        if let Err(e) = process_scanned_file(&ctx, file_arg, scan_result, &mut state) {
+            // No file prefix: every error on this path already carries the
+            // path in its context, and prefixing printed it twice.  Alternate
+            // Display keeps one file to one line, which is what the rest of
+            // the per-file output does.
+            eprintln!("{}{:#}{}", c.bold, e, c.reset);
+            state.failed_files += 1;
+        }
     }
 
     // Multi-file JSON: emit array of per-file results.
@@ -1832,14 +1898,24 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
         state.totals.report_telemetry(resolved.len());
     }
 
-    // Exit 1 if total error-severity or warning-severity issues exceed
-    // thresholds.
+    // Exit codes are a contract with CI (see docs/cli.md): 1 means the text
+    // failed a gate, 2 means the tool could not do its job. A skipped file
+    // outranks a gate result, because the gate was computed over an incomplete
+    // set and a clean verdict would be a lie.
+    if state.failed_files > 0 {
+        eprintln!(
+            "{}{} file(s) could not be processed{}",
+            c.dim, state.failed_files, c.reset
+        );
+        process::exit(EXIT_FAILURE);
+    }
+
     let errors_exceeded = state.totals.errors > params.max_errors;
     let warnings_exceeded = params
         .max_warnings
         .is_some_and(|limit| state.totals.warnings > limit);
     if errors_exceeded || warnings_exceeded {
-        process::exit(1);
+        process::exit(EXIT_GATE);
     }
 
     Ok(())
@@ -1876,6 +1952,10 @@ struct BatchState {
     baseline: zhtw_mcp::baseline::Baseline,
     baseline_count: usize,
     tabular_header_printed: bool,
+    /// Files that could not be processed at all: unreadable, oversized, or not
+    /// UTF-8.  Counted rather than propagated, so one bad file in a directory
+    /// does not throw away the findings for every other file.
+    failed_files: usize,
 }
 
 /// Fix, rescan, verify, and report one already-scanned file.
@@ -1940,11 +2020,33 @@ fn process_scanned_file(
         } else {
             issues.clone()
         };
+
+        // Write-side structure guard: the same exclusion ranges the MCP fix
+        // path passes (src/mcp/tools.rs), built with the same options so the
+        // two front ends cannot disagree about which bytes --fix may touch.
+        // Scan-time exclusion is not enough, because a multi-part grammar match
+        // can span an excluded region sitting between its parts, e.g.
+        // a fronted object written as inline code sits between the parts.
+        //
+        // Rebuilt here rather than carried out of the scan because the scan
+        // builds its ranges on the NFC-normalized text while the issues
+        // reaching the fixer have been remapped back to original coordinates.
+        // Nothing to fix means nothing to mask, and the Markdown build is a
+        // second full parse of the document, so skip it on clean files.
+        let excluded = if fix_issues.is_empty() {
+            Vec::new()
+        } else {
+            zhtw_mcp::engine::scan::build_exclusions_for_content_type_with_config(
+                &text,
+                content_type,
+                &cfg,
+            )
+        };
         Some(zhtw_mcp::fixer::apply_fixes_with_context(
             &text,
             &fix_issues,
             params.fix_mode,
-            &[],
+            &excluded,
             Some(scanner.segmenter()),
         ))
     } else {
@@ -1987,7 +2089,7 @@ fn process_scanned_file(
             let file_path = Path::new(file_arg);
             let parent = file_path.parent().unwrap_or(Path::new("."));
             let mut tmp = tempfile::NamedTempFile::new_in(parent)
-                .with_context(|| format!("create tempfile in {}", parent.display()))?;
+                .with_context(|| format!("{file_arg}: create tempfile in {}", parent.display()))?;
             std::io::Write::write_all(&mut tmp, current_text.as_bytes())
                 .with_context(|| format!("write tempfile for {file_arg}"))?;
 
@@ -2071,6 +2173,15 @@ fn process_scanned_file(
     let tm_suppressed = tm_store
         .as_ref()
         .map_or(0, |tm| tm.suppress_issues(&mut report_issues));
+
+    // Project ignore_terms, applied after TM for the same reason and through
+    // the same function the MCP tool calls: the term stays visible but drops to
+    // Info, so it counts against neither gate.
+    if !params.ignore_terms.is_empty() {
+        let ignore_set: std::collections::HashSet<&str> =
+            params.ignore_terms.iter().map(String::as_str).collect();
+        zhtw_mcp::rules::ignore::apply_ignore_set(&mut report_issues, &ignore_set);
+    }
 
     // --update-baseline: add all issues to the baseline.
     if params.update_baseline {
@@ -2260,13 +2371,11 @@ fn run_convert(
             break;
         }
 
-        let excluded_pairs: Vec<(usize, usize)> =
-            excluded.iter().map(|r| (r.start, r.end)).collect();
         let fix_result = apply_fixes_with_context(
             &text,
             &issues,
             FixMode::LexicalContextual,
-            &excluded_pairs,
+            &excluded,
             Some(scanner.segmenter()),
         );
 

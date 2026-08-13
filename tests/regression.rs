@@ -118,12 +118,11 @@ fn scan_and_fix(
     // Apply fixes.
     let excluded =
         zhtw_mcp::engine::scan::build_exclusions_for_content_type(work_text, content_type);
-    let excluded_pairs: Vec<(usize, usize)> = excluded.iter().map(|r| (r.start, r.end)).collect();
     let fix_result = apply_fixes_with_context(
         work_text,
         &issues,
         FixMode::LexicalContextual,
-        &excluded_pairs,
+        &excluded,
         Some(scanner.segmenter()),
     );
 

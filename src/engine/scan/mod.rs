@@ -763,6 +763,31 @@ pub fn build_exclusions_for_content_type_with_options(
     merge_ranges_pub(excluded)
 }
 
+/// Markdown options implied by a content type plus profile config.  One
+/// definition so scan, glossary, CLI fix and MCP fix cannot drift apart on
+/// which bytes count as structure.
+fn md_scan_options(content_type: ContentType, cfg: &ProfileConfig) -> MdScanOptions {
+    MdScanOptions::new(
+        matches!(content_type, ContentType::MarkdownScanCode),
+        cfg.exempt_blockquotes,
+    )
+}
+
+/// Build exclusion ranges for the content type, deriving the Markdown
+/// options from the profile config.  This is what every pipeline stage that
+/// needs a structure mask should call.
+pub fn build_exclusions_for_content_type_with_config(
+    text: &str,
+    content_type: ContentType,
+    cfg: &ProfileConfig,
+) -> Vec<ByteRange> {
+    build_exclusions_for_content_type_with_options(
+        text,
+        content_type,
+        md_scan_options(content_type, cfg),
+    )
+}
+
 // Scanner struct and public API
 
 /// Compiled scanner, reusable across multiple scan calls.
@@ -1112,18 +1137,11 @@ impl Scanner {
         let scan_text = &norm.text;
         let nfc_changed = !norm.offset_map.is_empty();
 
-        let md_opts = MdScanOptions::new(
-            matches!(content_type, ContentType::MarkdownScanCode),
-            cfg.exempt_blockquotes,
-        );
         let mut output = match prebuilt_excluded {
             Some(excl) if !nfc_changed => self.scan_with_config(scan_text, excl, cfg),
             _ => {
-                let excl = build_exclusions_for_content_type_with_options(
-                    scan_text,
-                    content_type,
-                    md_opts,
-                );
+                let excl =
+                    build_exclusions_for_content_type_with_config(scan_text, content_type, &cfg);
                 self.scan_with_config(scan_text, &excl, cfg)
             }
         };

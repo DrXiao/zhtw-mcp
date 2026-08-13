@@ -64,14 +64,7 @@ fn run_tier(
     let scan_out = scanner.scan(text);
     let issues_detected = scan_out.issues.len();
 
-    let excluded_pairs: Vec<(usize, usize)> = Vec::new();
-    let fix_result = apply_fixes_with_context(
-        text,
-        &scan_out.issues,
-        mode,
-        &excluded_pairs,
-        Some(segmenter),
-    );
+    let fix_result = apply_fixes_with_context(text, &scan_out.issues, mode, &[], Some(segmenter));
 
     // Re-scan fixed text to count residual issues.
     let rescan = scanner.scan(&fix_result.text);

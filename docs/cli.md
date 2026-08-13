@@ -114,6 +114,20 @@ zhtw-mcp lint docs/ --baseline baseline.json
 zhtw-mcp lint --diff-from main
 ```
 
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Linting completed and the text stayed within `--max-errors` and `--max-warnings`. |
+| 1 | Linting completed and the text failed a gate. The findings are on stdout. |
+| 2 | The run failed: bad arguments, unreadable config, or a file that could not be processed. Any findings printed are incomplete. |
+
+A file that cannot be read (not UTF-8, over the 16 MiB limit, permission denied)
+is reported on stderr and skipped; the rest of the batch is still linted and
+still reported. Because the gate was then computed over an incomplete set, the
+run exits 2 rather than 0 or 1, so a green build cannot come from a file nobody
+managed to read.
+
 ## Project config file
 
 Create `.zhtw-mcp.toml` at your project root for team-wide settings:
@@ -126,7 +140,9 @@ exclude = ["vendor/**", "*.bak"]
 packs = ["medical"]
 ```
 
-Discovered by walking from cwd upward to the `.git` root. CLI flags override config values. Supported fields: `profile`, `content_type`, `max_errors`, `max_warnings`, `ignore_terms`, `exclude`, `overrides`, `suppressions`, `packs`.
+Discovered by walking from cwd upward to the `.git` root. CLI flags override config values. Supported fields: `profile`, `relaxed`, `content_type`, `max_errors`, `max_warnings`, `ignore_terms`, `exclude`, `overrides`, `suppressions`, `packs`, `translation_memory`, plus the `[markdown]` and `[glossary]` sections.
+
+`ignore_terms` keeps matching issues in the output but drops them to `info`, so they count against neither `max_errors` nor `max_warnings`. `overrides`, `suppressions` and `translation_memory` name the store files; all three are also read in server mode, so an MCP client needs no flags and the server answers from the same stores `lint` reads.
 
 ## Converting Simplified Chinese to Traditional
 

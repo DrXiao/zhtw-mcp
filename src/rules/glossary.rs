@@ -51,18 +51,8 @@ pub fn apply_glossary_with_coordinates(
     if glossary.is_empty() {
         return issues;
     }
-    let md_opts = crate::engine::markdown::MdScanOptions::new(
-        matches!(
-            content_type,
-            crate::engine::scan::ContentType::MarkdownScanCode
-        ),
-        cfg.exempt_blockquotes,
-    );
-    let excluded = crate::engine::scan::build_exclusions_for_content_type_with_options(
-        text,
-        content_type,
-        md_opts,
-    );
+    let excluded =
+        crate::engine::scan::build_exclusions_for_content_type_with_config(text, content_type, cfg);
     let mut issues = apply_glossary(text, &excluded, issues, glossary);
     let line_index = crate::engine::lineindex::LineIndex::new(text);
     line_index.fill_line_col_sorted(&mut issues, crate::engine::lineindex::ColumnEncoding::Utf16);

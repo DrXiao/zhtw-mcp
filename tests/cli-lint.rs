@@ -159,34 +159,102 @@ fn cli_lint_content_type_markdown() {
 
 #[test]
 fn cli_lint_content_type_plain_overrides_md_extension() {
-    // When --content-type plain is explicit, even .md content is treated as plain text
+    // --content-type plain must beat the .md extension. A 4-space-indented line
+    // is an indented code block in Markdown and ordinary prose in plain text,
+    // so the same file reports differently under each.
     let dir = tempfile::tempdir().unwrap();
     let md_file = dir.path().join("test.md");
-    std::fs::write(&md_file, "```\n軟件\n```\n").unwrap();
+    std::fs::write(&md_file, "    這個軟件很好用\n").unwrap();
 
-    let bin = binary_path();
-    let output = Command::new(&bin)
-        .args([
-            "lint",
-            md_file.to_str().unwrap(),
-            "--format",
-            "json",
-            "--content-type",
-            "plain",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
-    // In plain mode, backtick exclusion still applies, so 軟件 in triple-backtick
-    // block is excluded by the regex-based backtick patterns.
-    // The test verifies --content-type plain is accepted and doesn't crash.
-    assert!(parsed.get("issues").is_some());
+    let count = |args: &[&str]| -> u64 {
+        let output = run_lint_args(args);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+        parsed["total"].as_u64().unwrap()
+    };
+
+    let path = md_file.to_str().unwrap();
+    assert_eq!(
+        count(&[path, "--format", "json"]),
+        0,
+        "as markdown, the indented line is a code block"
+    );
+    assert_eq!(
+        count(&[path, "--format", "json", "--content-type", "plain"]),
+        1,
+        "--content-type plain must override the .md extension"
+    );
 }
 
 // -- max_warnings tests (TODO 14.5) ----------------------------------------
+
+#[test]
+fn cli_lint_unreadable_file_skips_rather_than_aborting() {
+    // One file that is not UTF-8 must not discard the findings for its
+    // neighbours. Sorted last on purpose: in JSON mode the array is emitted
+    // after the loop, so an abort here used to throw away work already done.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.md"), "這個軟件很好用\n").unwrap();
+    std::fs::write(dir.path().join("b.md"), "這個內存很大\n").unwrap();
+    std::fs::write(dir.path().join("zz.md"), [0xff, 0xfe, 0x00, 0x28]).unwrap();
+
+    let output = run_lint_args(&[dir.path().to_str().unwrap(), "--format", "json"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let files = parsed.as_array().expect("multi-file JSON array");
+    assert_eq!(files.len(), 2, "both readable files should be reported");
+    assert!(
+        files.iter().all(|f| f["total"].as_u64().unwrap() > 0),
+        "readable files should still carry their issues: {stdout}"
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "an unprocessable file is an operational failure, not a gate result"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("zz.md"),
+        "the skipped file must be named: {stderr}"
+    );
+}
+
+#[test]
+fn cli_lint_exit_codes_separate_gate_from_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.md");
+    std::fs::write(&file, "這個軟件很好用\n").unwrap();
+    let path = file.to_str().unwrap();
+
+    assert_eq!(
+        run_lint_args(&[path]).status.code(),
+        Some(0),
+        "warnings within budget exit 0"
+    );
+    assert_eq!(
+        run_lint_args(&[path, "--max-warnings", "0"]).status.code(),
+        Some(1),
+        "a gate violation is exit 1"
+    );
+    assert_eq!(
+        run_lint_args(&["/nonexistent/nope.md"]).status.code(),
+        Some(2),
+        "a missing file is exit 2"
+    );
+    assert_eq!(
+        run_bin_args(&["--config", "/nonexistent/nope.toml", "lint", path])
+            .status
+            .code(),
+        Some(2),
+        "an unreadable config is exit 2"
+    );
+    assert_eq!(
+        run_lint_args(&["--fix=bogus", path]).status.code(),
+        Some(2),
+        "an invalid flag value is exit 2"
+    );
+}
 
 #[test]
 fn cli_lint_max_warnings_gate_exit_1_when_exceeded() {
@@ -292,6 +360,24 @@ fn cli_cache_clear_rejects_trailing_args() {
     assert!(
         stderr.contains("cache clear does not accept additional arguments"),
         "stderr should explain invalid trailing args: {stderr}"
+    );
+}
+
+#[test]
+fn cli_server_explicit_missing_config_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing.toml");
+    let missing = missing.to_str().unwrap();
+
+    let output = run_bin_args(&["--config", missing]);
+    assert!(
+        !output.status.success(),
+        "server should fail on bad --config"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!("read config {missing}")),
+        "stderr should report config read error: {stderr}"
     );
 }
 
@@ -448,6 +534,48 @@ fn cli_lint_config_cli_overrides_config() {
 }
 
 #[test]
+fn cli_lint_config_ignore_terms_downgrades_to_info() {
+    // ignore_terms in .zhtw-mcp.toml keeps the term visible but drops it to
+    // Info, so it stops failing the warning gate. Same semantics as the MCP
+    // tool's ignore_terms argument.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join(".zhtw-mcp.toml");
+    let file = dir.path().join("t.md");
+    std::fs::write(&file, "這個軟件很好用\n").unwrap();
+
+    let run = |cfg_body: &str| -> serde_json::Value {
+        std::fs::write(&cfg, cfg_body).unwrap();
+        let output = run_bin_args(&[
+            "--config",
+            cfg.to_str().unwrap(),
+            "lint",
+            file.to_str().unwrap(),
+            "--format",
+            "json",
+        ]);
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("valid JSON")
+    };
+
+    // Control: the same config without ignore_terms, proving the file is read
+    // and that 軟件 is a warning by default.
+    let baseline = run("max_warnings = 10\n");
+    assert_eq!(baseline["total"].as_u64().unwrap(), 1);
+    assert_eq!(baseline["warnings"].as_u64().unwrap(), 1);
+
+    let ignored = run("max_warnings = 10\nignore_terms = [\"軟件\"]\n");
+    assert_eq!(
+        ignored["total"].as_u64().unwrap(),
+        1,
+        "ignored terms stay visible"
+    );
+    assert_eq!(
+        ignored["warnings"].as_u64().unwrap(),
+        0,
+        "ignored term must not count as a warning: {ignored}"
+    );
+}
+
+#[test]
 fn cli_lint_fix_rewrites_file() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("test.md");
@@ -463,6 +591,54 @@ fn cli_lint_fix_rewrites_file() {
     assert!(
         !content.contains("軟件"),
         "original term should be gone: {content}"
+    );
+}
+
+#[test]
+fn cli_lint_fix_preserves_markdown_structure() {
+    // --fix must not rewrite bytes inside YAML frontmatter delimiters, fenced
+    // code, inline code, URLs or HTML tags, matching the MCP fix path.
+    //
+    // Scan-time exclusion already carries most of that: no issue is emitted in
+    // those regions, so they survive even with an empty fixer mask. The line
+    // that needs the mask is the fronted-object clause: the grammar match
+    // spans the inline code sitting between its two parts, and the whole
+    // clause must be left alone rather than half-rewritten.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("test.md");
+    let src = "---\ntitle: \"測試\"\nlang: zh-TW\n---\n\n我們對`x`進行處理，這個軟件很好用。\n\n\
+        ```rust\nlet quality = \"這個軟件的內存\";\n```\n\n\
+        <span data-note=\"軟件\">HTML</span>\n\nhttps://example.com/軟件/內存.html\n";
+    std::fs::write(&file, src).unwrap();
+
+    let output = run_lint_args(&[file.to_str().unwrap(), "--fix=lexical_contextual"]);
+    assert!(output.status.success(), "fix should exit 0");
+    let out = std::fs::read_to_string(&file).unwrap();
+
+    for preserved in [
+        "我們對`x`進行處理，",
+        "---\ntitle: \"測試\"\nlang: zh-TW\n---",
+        "let quality = \"這個軟件的內存\";",
+        "<span data-note=\"軟件\">HTML</span>",
+        "https://example.com/軟件/內存.html",
+    ] {
+        assert!(
+            out.contains(preserved),
+            "--fix rewrote protected structure {preserved:?}: {out}"
+        );
+    }
+
+    // Two rules match that clause: the outer one crosses the mask and would
+    // relocate the code span, and the inner one does not cross it but would
+    // strip 進行 and leave the fronted 對 dangling. Declining the outer span
+    // declines both.
+    assert!(
+        !out.contains("處理`x`"),
+        "--fix applied a fix spanning the inline-code mask: {out}"
+    );
+    assert!(
+        out.contains("軟體很好用"),
+        "prose should still be fixed: {out}"
     );
 }
 

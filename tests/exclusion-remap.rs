@@ -190,20 +190,16 @@ fn remap_exclusions_produces_identical_rescan_output() {
         initial_count
     );
 
-    // Build exclusions for the original text (we need these for the remap path).
+    // Build exclusions for the original text (we need these for the remap
+    // path).
     let original_exclusions = build_exclusions_for_content_type(&document, content_type);
 
     // -- Step 2: Apply fixes --
-    let excluded_offsets: Vec<(usize, usize)> = original_exclusions
-        .iter()
-        .map(|r| (r.start, r.end))
-        .collect();
-
     let fix_result = apply_fixes_with_context(
         &document,
         &initial_output.issues,
         FixMode::LexicalSafe,
-        &excluded_offsets,
+        &original_exclusions,
         None, // no segmenter needed for non-clue rules
     );
     assert!(

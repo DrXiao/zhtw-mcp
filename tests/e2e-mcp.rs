@@ -2212,6 +2212,118 @@ fn e2e_invalid_profile_structured_error_data() {
 }
 
 #[test]
+fn e2e_server_reads_store_paths_from_config() {
+    // The server takes all three store paths from .zhtw-mcp.toml when the flags
+    // are absent, so a project can point it at its own stores without every MCP
+    // client passing flags. Wiring only some of them would be worse than none:
+    // the server would answer from the project's overrides while recording into
+    // a different translation memory than lint reads.
+    //
+    // Two observable proofs, one per store: a suppressed term and a
+    // TM-rejected term both come back as Info instead of Warning.
+    let bin = binary_path();
+    let tmp_dir = tempfile::tempdir().expect("create temp dir");
+    let suppressions_path = tmp_dir.path().join("suppressions.json");
+    std::fs::write(
+        &suppressions_path,
+        format!(
+            r#"{{"schema_version":{},"terms":["軟件"]}}"#,
+            zhtw_mcp::rules::store::SCHEMA_VERSION
+        ),
+    )
+    .unwrap();
+    // A TM entry whose user_chose equals found is a rejection: the user kept
+    // the flagged term, so it must stop being a warning.
+    let tm_path = tmp_dir.path().join("project-tm.json");
+    std::fs::write(
+        &tm_path,
+        format!(
+            r#"{{"schema_version":{},"entries":[{{"found":"內存","scanner_suggested":"記憶體","user_chose":"內存","timestamp":"2026-01-01T00:00:00Z"}}]}}"#,
+            zhtw_mcp::rules::store::TM_SCHEMA_VERSION
+        ),
+    )
+    .unwrap();
+    let cfg_path = tmp_dir.path().join(".zhtw-mcp.toml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "overrides = {:?}\nsuppressions = {:?}\ntranslation_memory = {:?}\n",
+            tmp_dir.path().join("overrides.json").to_str().unwrap(),
+            suppressions_path.to_str().unwrap(),
+            tm_path.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(&bin)
+        .args(["--config", cfg_path.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn zhtw-mcp");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    let _ = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "id": 1,
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
+    );
+    send_notification(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    );
+
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 2,
+            "params": {
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件很好用，這個內存很大" }
+            }
+        }),
+    );
+    let content_text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let output: Value = serde_json::from_str(content_text).unwrap();
+    let severity_of = |term: &str| -> String {
+        output["issues"]
+            .as_array()
+            .and_then(|a| a.iter().find(|i| i["found"] == term))
+            .unwrap_or_else(|| panic!("{term} should still be reported: {output}"))["severity"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(
+        severity_of("軟件"),
+        "info",
+        "suppressions path from config should downgrade the term: {output}"
+    );
+    assert_eq!(
+        severity_of("內存"),
+        "info",
+        "translation_memory path from config should downgrade the term: {output}"
+    );
+
+    send_notification(&mut stdin, &json!({ "jsonrpc": "2.0", "method": "exit" }));
+    let _ = child.wait().unwrap();
+}
+
+#[test]
 fn e2e_notifications_cancelled_with_id_rejected() {
     let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
 
