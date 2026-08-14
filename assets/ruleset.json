@@ -11880,7 +11880,7 @@
       "type": "cross_strait",
       "context": "@domain IT。tw「通過」= pass (通過考試)；僅 via/through 義改「透過」",
       "english": "through/via",
-      "negative_context_clues": ["考試", "審核", "法案", "檢驗", "投票"]
+      "negative_context_clues": ["考試", "審核", "法案", "檢驗", "投票", "測試"]
     },
     {
       "from": "通配符",
