@@ -5,13 +5,15 @@
 //   - Orthographic: punctuation, spacing, character forms, case, variant,
 //     ellipsis, grammar only.  Lexical term substitutions are skipped.
 //   - LexicalSafe: orthographic + deterministic term substitutions
-//     (exactly one suggestion, no context_clues).  When --verify
-//     calibration has run, issues with anchor_match == Some(false)
-//     are skipped; anchor_match == None applies unconditionally.
-//   - LexicalContextual: all above + context-clue-gated terms.  For
-//     rules with context_clues, apply only when a segmenter confirms
-//     enough clue words in surrounding text.  Non-clue lexical issues
-//     use the same single-suggestion constraint as LexicalSafe.
+//     (exactly one suggestion, no context_clues, not annotated
+//     editorial_confidence low).  When --verify calibration has run,
+//     issues with anchor_match == Some(false) are skipped;
+//     anchor_match == None applies unconditionally.
+//   - LexicalContextual: all above + context-clue-gated terms and terms
+//     annotated editorial_confidence low (both are judgment calls this
+//     tier opts into).  For rules with context_clues, apply only when a
+//     segmenter confirms enough clue words in surrounding text.  Non-clue
+//     lexical issues use the same single-suggestion constraint as LexicalSafe.
 //     Anchor rejection (Some(false)) is respected for non-clue issues
 //     but overridden for clue-gated issues (segmenter provides
 //     independent confirmation).
@@ -23,12 +25,18 @@ use std::sync::Arc;
 
 use crate::engine::excluded::{is_excluded, ByteRange};
 use crate::engine::segment::Segmenter;
-use crate::rules::ruleset::{Issue, IssueType, Tier2Outcome};
+use crate::rules::ruleset::{EditorialConfidence, Issue, IssueType, Tier2Outcome};
 
-/// Fix mode controlling which issue types are eligible for automatic correction.
+/// Fix mode controlling which issue types are eligible for automatic
+/// correction.
 ///
-/// Each tier is a strict superset: None < Orthographic < LexicalSafe < LexicalContextual.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Each tier is a strict superset: None < Orthographic < LexicalSafe <
+/// LexicalContextual.
+/// The variants are declared in that order and derive Ord, so tier tests read
+/// as
+/// comparisons ("mode < LexicalContextual") instead of negated variant
+/// equality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FixMode {
     /// Lint only -- no fixes applied.
     None,
@@ -36,10 +44,12 @@ pub enum FixMode {
     /// variant, ellipsis, grammar.  Lexical term substitutions are skipped.
     Orthographic,
     /// Orthographic + deterministic term substitutions (exactly one suggestion,
-    /// no context_clues).  Equivalent to old 'safe' mode.
+    /// no context_clues, not annotated editorial_confidence low).  Equivalent
+    /// to old 'safe' mode.
     LexicalSafe,
-    /// All above + context-clue-gated terms.  For rules with context_clues,
-    /// apply only when segmenter confirms enough clue words nearby.
+    /// All above + context-clue-gated terms and terms annotated
+    /// editorial_confidence low.  For rules with context_clues, apply only when
+    /// segmenter confirms enough clue words nearby.
     LexicalContextual,
 }
 
@@ -61,8 +71,20 @@ pub struct FixResult {
     pub text: String,
     /// Number of fixes applied.
     pub applied: usize,
-    /// Number of issues skipped (ineligible for the chosen fix tier, or in excluded regions).
+    /// Number of issues skipped (ineligible for the chosen fix tier, or in
+    /// excluded regions).
     pub skipped: usize,
+    /// Subset of `skipped` the fixer judged on the issue's own merits: tier-2
+    /// suppression, anchor rejection, an unconfirmed clue gate, a
+    /// low-confidence annotation, or several candidate replacements.
+    ///
+    /// Separate from `skipped` because the two answer different questions. A
+    /// lexical issue under `--fix=orthographic` was never in scope, and so are
+    /// issues dropped for overlapping an earlier fix or landing in an excluded
+    /// region; lumping those in makes `--fix=orthographic` on ordinary prose
+    /// report every cross-strait term as "declined", which reads as a verdict
+    /// the fixer never reached.
+    pub declined: usize,
     /// Detailed record of each applied fix, stored in ascending offset
     /// order (forward pass). Used for position-based convergence
     /// suppression and exact offset remapping after re-scan.
@@ -134,18 +156,24 @@ pub fn apply_fixes_with_context(
             text: text.to_string(),
             applied: 0,
             skipped: 0,
+            declined: 0,
             applied_fixes: Vec::new(),
         };
     }
 
     let mut out = String::with_capacity(text.len());
     let mut applied = 0usize;
-    let mut skipped = 0usize;
+
+    // Only the interesting counter is kept. Every path through the loop ends in
+    // exactly one of applied or a skip, so the skip total is arithmetic, and a
+    // site that forgets to bump it cannot exist.
+    let mut declined = 0usize;
+
     // "is_excluded" switches to binary search past ten ranges, which assumes
-    // the slice is sorted by start and non-overlapping.  Every in-tree caller
+    // the slice is sorted by start and non-overlapping. Every in-tree caller
     // satisfies that, because the builders all end in "merge_ranges_pub", but
     // this is a public entry point on a write path: an unsorted slice would
-    // silently let a fix through into bytes the caller marked protected.  The
+    // silently let a fix through into bytes the caller marked protected. The
     // check is one linear pass, and the normalization it guards runs only for
     // callers that got it wrong.
     let normalized;
@@ -165,21 +193,30 @@ pub fn apply_fixes_with_context(
     let mut skip_until: usize = 0;
 
     // Issues are already sorted ascending by offset and non-overlapping
-    // (scanner's resolve_overlaps guarantees this).  Iterate forward,
-    // copying unchanged gaps and appending replacements.
+    // (scanner's resolve_overlaps guarantees this). Iterate forward, copying
+    // unchanged gaps and appending replacements.
     for issue in issues {
-        let Some(end) = issue.offset.checked_add(issue.length) else {
+        // Reject an unusable span before anything else looks at it. Two reasons
+        // it has to be first, not merely early. It is not a judgment, so it
+        // must not reach a gate that records a decline. And the clue gate below
+        // slices `surrounding_window`, whose forward walk stops at `text.len()`
+        // without clamping `byte_end`, so an out-of-range `end` reaching it
+        // panics on a public entry point.
+        let Some(end) = issue
+            .offset
+            .checked_add(issue.length)
+            .filter(|e| *e <= text.len())
+        else {
             tracing::warn!(
-                "skipping malformed issue at offset {}: length overflow",
+                "skipping malformed issue at offset {}: span past end of text",
                 issue.offset
             );
-            skipped += 1;
             continue;
         };
 
-        // Skip overlapping issues: grammar issues are appended after
-        // overlap resolution and may overlap each other (e.g. 對X進行Y
-        // overlaps the inner 進行Y).  The fixer must not apply both.
+        // Skip overlapping issues: grammar issues are appended after overlap
+        // resolution and may overlap each other (e.g. 對X進行Y overlaps the
+        // inner 進行Y). The fixer must not apply both.
         //
         // skip_until extends the same barrier to a span that was declined
         // rather than applied. Without it, declining the outer 對X進行Y because
@@ -189,19 +226,18 @@ pub fn apply_fixes_with_context(
         if issue.offset < cursor
             || (issue.rule_type == IssueType::Grammar && issue.offset < skip_until)
         {
-            skipped += 1;
             continue;
         }
 
-        // Skip if the issue writes into any excluded region.  For a non-empty
+        // Skip if the issue writes into any excluded region. For a non-empty
         // span that is the scanner's own overlap test, including its
         // binary-search path once the range list grows past a handful.
         //
         // Zero-length insertions need their own check: a zero-width span
         // overlaps nothing, so the generic test reports it as outside every
-        // range.  Spacing rules emit exactly that shape, and an insertion
+        // range. Spacing rules emit exactly that shape, and an insertion
         // strictly inside a range corrupts protected bytes just as a
-        // replacement would.  The bounds are strict on purpose: inserting at a
+        // replacement would. The bounds are strict on purpose: inserting at a
         // range edge writes outside it, which is how a missing space before an
         // inline code span gets fixed.
         let writes_into_excluded = if issue.length == 0 {
@@ -212,7 +248,6 @@ pub fn apply_fixes_with_context(
             is_excluded(issue.offset, end, excluded)
         };
         if writes_into_excluded {
-            skipped += 1;
             skip_until = skip_until.max(end);
             continue;
         }
@@ -237,48 +272,73 @@ pub fn apply_fixes_with_context(
             && issue.found.chars().all(|ch| {
                 ch == '\u{200B}' || (ch == '\u{FEFF}' && issue.offset > 0) // preserve file-start BOM
             });
-        let orthographic = matches!(
-            issue.rule_type,
-            IssueType::Punctuation | IssueType::Case | IssueType::Variant | IssueType::Grammar
-        ) || ai_zero_width_removal;
+        let orthographic = issue.rule_type.is_orthographic() || ai_zero_width_removal;
 
         // Orthographic tier: skip all lexical issues.
         if mode == FixMode::Orthographic && !orthographic {
-            skipped += 1;
             continue;
         }
 
-        // Tier 2 can suppress lexical issues as likely false positives.
-        // Respect that suppression during auto-fix so we do not rewrite
-        // general prose like "學習的進程" into OS terminology.
+        // Tier 2 can suppress lexical issues as likely false positives. Respect
+        // that suppression during auto-fix so we do not rewrite general prose
+        // like "學習的進程" into OS terminology.
         if !orthographic && issue.tier2_outcome == Tier2Outcome::Suppressed {
-            skipped += 1;
+            declined += 1;
             continue;
         }
 
         // Pre-compute context-clue presence for gating decisions below.
         let has_clues = issue.context_clues.as_ref().is_some_and(|c| !c.is_empty());
 
-        // Anchor-match gating for lexical issues: when calibration has
-        // run (--verify), anchor_match carries the verdict.  If calibration
-        // explicitly rejected the term (Some(false)), skip the fix —
-        // both LexicalSafe and LexicalContextual respect anchor rejection
-        // for non-clue issues (no independent disambiguation available).
-        // Context-clue-gated issues in LexicalContextual can override
-        // rejection because the segmenter provides independent confirmation.
-        // When anchor_match is None (no calibration), apply unconditionally.
+        // Judgment calls belong to the top tier. A clue-gated term needs the
+        // segmenter to confirm its domain, and a rule the ruleset annotates
+        // editorial_confidence low stays valid zh-TW in some senses, so every
+        // tier below LexicalContextual leaves both alone.
+        //
+        // Only the explicit annotation counts here. The MCP explain path
+        // (heuristic_editorial_confidence in mcp/tools.rs) falls back to a
+        // heuristic that calls every Translationese, AiStyle, Grammar,
+        // Severity::Info and anchor-rejected issue low. That fallback exists to
+        // decide what to tell a human reviewer, not what to write to a file:
+        // applying it here would key the write path on a severity field that
+        // suppression mutates, and would duplicate the anchor gate below
+        // without its clue-gated escape hatch.
+        if !orthographic && mode < FixMode::LexicalContextual {
+            // A clue-gated term below the top tier is out of scope, not turned
+            // down: the segmenter never ran, so nothing about this issue was
+            // weighed, and the tier that handles the class exists one step up.
+            // Structurally the same as the orthographic-tier gate above, and
+            // counted the same way. 349 shipped rules carry context_clues, so
+            // calling these declines would make the count the CLI prints mean
+            // "wrong tier" again on ordinary technical prose.
+            if has_clues {
+                continue;
+            }
+
+            // A low-confidence annotation is the opposite: the ruleset already
+            // reached a verdict on the term, and this tier is honoring it.
+            if issue.editorial_confidence == Some(EditorialConfidence::Low) {
+                declined += 1;
+                continue;
+            }
+        }
+
+        // Anchor-match gating for lexical issues: when calibration has run
+        // (--verify), anchor_match carries the verdict. If calibration
+        // explicitly rejected the term (Some(false)), skip the fix — both
+        // LexicalSafe and LexicalContextual respect anchor rejection for
+        // non-clue issues (no independent disambiguation available).
+        // Context-clue-gated issues in LexicalContextual can override rejection
+        // because the segmenter provides independent confirmation. When
+        // anchor_match is None (no calibration), apply unconditionally.
         if !orthographic && issue.anchor_match == Some(false) && !has_clues {
-            skipped += 1;
+            declined += 1;
             continue;
         }
 
-        // Context-clue gating for lexical issues.
+        // Context-clue gating for lexical issues. Only LexicalContextual
+        // reaches here with clues; the merged tier gate above skipped the rest.
         if has_clues && !orthographic {
-            // Only LexicalContextual can handle context-clue-gated terms.
-            if mode != FixMode::LexicalContextual {
-                skipped += 1;
-                continue;
-            }
             // Threshold is type-aware: confusable rules (both forms valid in
             // different contexts) need 2 clues for confidence; cross-strait and
             // other rules need only 1 (the match itself is a strong regional
@@ -305,24 +365,38 @@ pub fn apply_fixes_with_context(
                 seg.count_context_clues(window, &clue_strs) >= min_clues
             });
             if !confirmed {
-                skipped += 1;
+                declined += 1;
                 continue;
             }
         }
 
-        // Suggestion selection.
-        //   - Orthographic issues: always pick first suggestion (mechanical,
-        //     no lexical ambiguity).
-        //   - Lexical issues (both clue-gated and non-clue): single suggestion
-        //     only.  The segmenter confirms domain context but does not
-        //     disambiguate between multiple replacement candidates.
-        let rep = match mode {
-            _ if orthographic => issue.suggestions.first(),
-            _ if issue.suggestions.len() == 1 => Some(&issue.suggestions[0]),
-            _ => None,
-        };
-        let Some(rep) = rep.filter(|_| end <= text.len()) else {
-            skipped += 1;
+        // Suggestion selection: exactly one candidate, for every issue type.
+        //
+        // Orthographic issues used to take the first of however many were
+        // offered, on the reasoning that punctuation and case are mechanical.
+        // The premise is true of the issues the engine builds (punctuation,
+        // grammar and case all construct a single-element vec) but not of the
+        // rules a user can load: a variant rule with "to": ["a", "b"] in a pack
+        // or an overrides file reached that arm and wrote "a" at
+        // --fix=orthographic, the most conservative tier there is.
+        //
+        // So the arity test is the write condition and the orthographic split
+        // governs only tier eligibility, which is what it was ever about. One
+        // candidate means the answer is determined; more than one is a judgment
+        // call regardless of which pass produced it.
+        let rep = (issue.suggestions.len() == 1).then(|| &issue.suggestions[0]);
+        let Some(rep) = rep else {
+            // Several candidates and no way to choose: a judgment call left to
+            // the author, not an out-of-scope issue.
+            //
+            // An empty suggestion list is the other way to land here, and it is
+            // not a judgment call: the rule had nothing to offer, so there was
+            // no verdict to reach. Counting it would report a decline for a
+            // malformed rule, which only a pack can carry since
+            // check-ruleset.py rejects the shape in the shipped ruleset.
+            if issue.suggestions.len() > 1 {
+                declined += 1;
+            }
             continue;
         };
 
@@ -337,9 +411,14 @@ pub fn apply_fixes_with_context(
         applied += 1;
     }
 
-    // Copy the remaining tail after the last fix (or the entire text if
-    // no fixes were applied).
+    // Copy the remaining tail after the last fix (or the entire text if no
+    // fixes were applied).
     out.push_str(&text[cursor..]);
+
+    // Every issue is either applied or skipped, and the loop has no early exit,
+    // so this is the total rather than a running tally nobody can forget to
+    // keep.
+    let skipped = issues.len() - applied;
 
     tracing::info!(
         fix_count = applied as u64,
@@ -351,6 +430,7 @@ pub fn apply_fixes_with_context(
         text: out,
         applied,
         skipped,
+        declined,
         applied_fixes,
     }
 }
@@ -372,7 +452,8 @@ pub fn remap_to_post_fix(orig_offset: usize, applied_fixes: &[AppliedFix]) -> us
     result.max(0) as usize
 }
 
-/// Remap exclusion zones from original-text coordinates to post-fix coordinates.
+/// Remap exclusion zones from original-text coordinates to post-fix
+/// coordinates.
 ///
 /// The fixer never applies fixes inside excluded regions, so exclusion zones
 /// remain structurally intact -- only their byte offsets shift due to
@@ -396,10 +477,10 @@ pub fn remap_exclusions(
         .iter()
         .map(|&ByteRange { start, end }| {
             // Advance past all fixes whose span ends at or before this
-            // exclusion zone.  The end-of-span check (offset + old_len)
-            // is critical for zero-length insertions (e.g. spacing fixes
-            // with old_len == 0): an insertion at the exclusion boundary
-            // must shift the zone right.
+            // exclusion zone. The end-of-span check (offset + old_len) is
+            // critical for zero-length insertions (e.g. spacing fixes with
+            // old_len == 0): an insertion at the exclusion boundary must shift
+            // the zone right.
             while fix_idx < applied_fixes.len() {
                 let fix = &applied_fixes[fix_idx];
                 let fix_end = fix.offset.saturating_add(fix.old_len);
@@ -419,7 +500,8 @@ pub fn remap_exclusions(
         .collect()
 }
 
-/// Remove re-scan issues whose byte range overlaps a region written by the fixer.
+/// Remove re-scan issues whose byte range overlaps a region written by the
+/// fixer.
 ///
 /// After applying fixes and re-scanning, the fixer may have introduced new
 /// text that triggers rules (convergent chain).  These are noise: the fixer
@@ -430,10 +512,11 @@ pub fn suppress_convergent_issues(issues: &mut Vec<Issue>, applied_fixes: &[Appl
     if applied_fixes.is_empty() {
         return;
     }
-    // Build post-fix ranges in a single forward pass (O(n)) instead of
-    // calling remap_to_post_fix per fix (O(n) each, O(n^2) total).
-    // Applied fixes are sorted by offset and non-overlapping, so a running
-    // delta accumulator gives the correct remapped position for each fix.
+
+    // Build post-fix ranges in a single forward pass (O(n)) instead of calling
+    // remap_to_post_fix per fix (O(n) each, O(n^2) total). Applied fixes are
+    // sorted by offset and non-overlapping, so a running delta accumulator
+    // gives the correct remapped position for each fix.
     let mut delta: isize = 0;
     let fix_ranges: Vec<(usize, usize)> = applied_fixes
         .iter()
@@ -563,8 +646,8 @@ mod tests {
     fn unsorted_excluded_ranges_still_protect() {
         // Past ten ranges is_excluded binary-searches, which needs sorted,
         // non-overlapping input. A caller that hands over ranges in any other
-        // order must still get its protected bytes back untouched rather than
-        // a silent rewrite.
+        // order must still get its protected bytes back untouched rather than a
+        // silent rewrite.
         let text = "這個軟件很好用";
         let offset = text.find("軟件").unwrap();
 
@@ -746,6 +829,69 @@ mod tests {
     }
 
     #[test]
+    fn fix_modes_are_ordered_by_tier() {
+        // The tier gate compares with "<", so its meaning rides on variant
+        // declaration order. Reordering the enum compiles clean and passes
+        // clippy while silently inverting the gate; this pins it.
+        assert!(FixMode::None < FixMode::Orthographic);
+        assert!(FixMode::Orthographic < FixMode::LexicalSafe);
+        assert!(FixMode::LexicalSafe < FixMode::LexicalContextual);
+    }
+
+    #[test]
+    fn lexical_safe_skips_low_editorial_confidence() {
+        let text = "需要優化性能";
+        let mut issue = make_issue(6, "優化", vec!["最佳化"]);
+        issue.editorial_confidence = Some(EditorialConfidence::Low);
+
+        let safe = apply_fixes(text, &[issue.clone()], FixMode::LexicalSafe, &[]);
+        assert_eq!(safe.text, text);
+        assert_eq!(safe.skipped, 1);
+        assert_eq!(safe.declined, 1, "the annotation is a judgment call");
+
+        let contextual = apply_fixes(text, &[issue], FixMode::LexicalContextual, &[]);
+        assert_eq!(contextual.text, "需要最佳化性能");
+        assert_eq!(contextual.applied, 1);
+    }
+
+    #[test]
+    fn out_of_tier_issues_are_skipped_but_not_declined() {
+        // "declined" is what the CLI prints, so it has to mean the fixer
+        // weighed the issue and said no. A lexical issue under
+        // --fix=orthographic was never in scope; counting it would make
+        // orthographic runs on ordinary prose report every cross-strait term as
+        // a verdict the fixer never reached.
+        let text = "這個軟件很好用";
+        let issues = vec![make_issue(6, "軟件", vec!["軟體"])];
+
+        let ortho = apply_fixes(text, &issues, FixMode::Orthographic, &[]);
+        assert_eq!(ortho.text, text);
+        assert_eq!(ortho.skipped, 1);
+        assert_eq!(ortho.declined, 0);
+
+        // Same issue, same decision to leave it alone, but now on its merits.
+        let ambiguous = vec![make_issue(6, "視頻", vec!["影片", "影音"])];
+        let safe = apply_fixes("這個視頻很好看", &ambiguous, FixMode::LexicalSafe, &[]);
+        assert_eq!(safe.skipped, 1);
+        assert_eq!(safe.declined, 1);
+    }
+
+    #[test]
+    fn orthographic_ignores_low_editorial_confidence() {
+        // The gate is guarded by !orthographic: editorial confidence is a
+        // lexical-judgment signal, so an orthographic issue carrying the
+        // annotation is still fixed at every tier.
+        let text = "他說,好";
+        let mut issue = make_punctuation_issue(6, ",", vec!["，"]);
+        issue.editorial_confidence = Some(EditorialConfidence::Low);
+
+        let fixed = apply_fixes(text, &[issue], FixMode::Orthographic, &[]);
+        assert_eq!(fixed.text, "他說，好");
+        assert_eq!(fixed.applied, 1);
+        assert_eq!(fixed.skipped, 0);
+    }
+
+    #[test]
     fn lexical_contextual_respects_anchor_rejection_for_non_clue() {
         // Non-clue lexical issue with anchor rejection: LexicalContextual
         // respects it because there is no independent disambiguation signal.
@@ -773,8 +919,8 @@ mod tests {
 
     #[test]
     fn lexical_safe_skips_clue_rule_even_with_anchor_confirmed() {
-        // anchor_match == Some(true) but has context_clues → LexicalSafe
-        // still refuses because context-clue rules need LexicalContextual.
+        // anchor_match == Some(true) but has context_clues → LexicalSafe still
+        // refuses because context-clue rules need LexicalContextual.
         let text = "我需要編寫一個程序來執行";
         let offset = text.find("程序").unwrap();
         let mut issue = make_issue_with_clues(
@@ -792,8 +938,8 @@ mod tests {
     #[test]
     fn lexical_contextual_applies_clue_rule_despite_anchor_rejection() {
         // anchor_match == Some(false) + context_clues present.
-        // LexicalContextual overrides anchor rejection and applies if
-        // segmenter confirms clues.
+        // LexicalContextual overrides anchor rejection and applies if segmenter
+        // confirms clues.
         let text = "我需要編寫一個程序來執行";
         let offset = text.find("程序").unwrap();
         let mut issue = make_issue_with_clues(
@@ -913,8 +1059,8 @@ mod tests {
 
     #[test]
     fn lexical_safe_applies_single_suggestion_ai_style() {
-        // Semantic safety words (意味著→表示) have a single suggestion
-        // and are eligible for lexical_safe auto-fix.
+        // Semantic safety words (意味著→表示) have a single suggestion and are
+        // eligible for lexical_safe auto-fix.
         let text = "這個定義意味著所有值";
         let offset = text.find("意味著").unwrap();
         let issues = vec![make_ai_style_issue(offset, "意味著", vec!["表示"])];
@@ -970,8 +1116,8 @@ mod tests {
 
     #[test]
     fn suppress_convergent_o_n_matches_o_n2() {
-        // Verify the O(n) forward-pass remap produces identical fix_ranges
-        // to the old per-fix remap_to_post_fix approach.
+        // Verify the O(n) forward-pass remap produces identical fix_ranges to
+        // the old per-fix remap_to_post_fix approach.
         let cases: Vec<Vec<AppliedFix>> = vec![
             // Empty
             vec![],
@@ -1098,8 +1244,8 @@ mod tests {
 
     #[test]
     fn suppress_convergent_deletion_suppresses_touching_issue() {
-        // A deletion (replacement is empty) should suppress issues that
-        // touch the deletion point.
+        // A deletion (replacement is empty) should suppress issues that touch
+        // the deletion point.
         let fixes = vec![AppliedFix {
             offset: 6,
             old_len: 6,
@@ -1139,7 +1285,7 @@ mod tests {
         assert_eq!(result.applied, 1);
     }
 
-    // --- remap_exclusions tests ---
+    // remap_exclusions tests
 
     use crate::engine::excluded::ByteRange;
 
@@ -1156,8 +1302,8 @@ mod tests {
 
     #[test]
     fn remap_exclusions_fix_before_exclusion_grows() {
-        // Fix at offset 5 replaces 2 bytes with 4 bytes (+2 delta).
-        // Exclusion at (10, 20) should shift to (12, 22).
+        // Fix at offset 5 replaces 2 bytes with 4 bytes (+2 delta). Exclusion
+        // at (10, 20) should shift to (12, 22).
         let excl = vec![br(10, 20)];
         let fixes = vec![AppliedFix {
             offset: 5,
@@ -1170,8 +1316,8 @@ mod tests {
 
     #[test]
     fn remap_exclusions_fix_before_exclusion_shrinks() {
-        // Fix at offset 2 replaces 4 bytes with 1 byte (-3 delta).
-        // Exclusion at (10, 20) should shift to (7, 17).
+        // Fix at offset 2 replaces 4 bytes with 1 byte (-3 delta). Exclusion at
+        // (10, 20) should shift to (7, 17).
         let excl = vec![br(10, 20)];
         let fixes = vec![AppliedFix {
             offset: 2,
@@ -1197,9 +1343,8 @@ mod tests {
 
     #[test]
     fn remap_exclusions_multiple_fixes_multiple_zones() {
-        // Fix at 5: 2->4 (+2), fix at 25: 3->1 (-2).
-        // Exclusion (10,20) shifts by +2 -> (12,22).
-        // Exclusion (30,40) shifts by +2-2=0 -> (30,40).
+        // Fix at 5: 2->4 (+2), fix at 25: 3->1 (-2). Exclusion (10,20) shifts
+        // by +2 -> (12,22). Exclusion (30,40) shifts by +2-2=0 -> (30,40).
         let excl = vec![br(10, 20), br(30, 40)];
         let fixes = vec![
             AppliedFix {
@@ -1219,9 +1364,9 @@ mod tests {
 
     #[test]
     fn remap_exclusions_zero_length_insertion_at_boundary() {
-        // Spacing fix: zero-length insertion (old_len=0) at offset 10,
-        // which is exactly the exclusion start. The insertion should
-        // shift the exclusion right by the replacement length.
+        // Spacing fix: zero-length insertion (old_len=0) at offset 10, which is
+        // exactly the exclusion start. The insertion should shift the exclusion
+        // right by the replacement length.
         let excl = vec![br(10, 20)];
         let fixes = vec![AppliedFix {
             offset: 10,

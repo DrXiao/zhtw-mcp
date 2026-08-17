@@ -74,7 +74,7 @@ impl Server {
         let base_ruleset = crate::rules::loader::load_embedded_ruleset()?;
 
         let (scanner, ruleset_hash) =
-            Self::build_scanner(&base_ruleset, &store, &pack_store, &active_packs)?;
+            Self::build_scanner(&base_ruleset, &store, &pack_store, &active_packs);
 
         let judgment_cache = crate::rules::judgment_cache::JudgmentCache::open_default();
 
@@ -98,7 +98,7 @@ impl Server {
         store: &OverrideStore,
         pack_store: &PackStore,
         active_packs: &[String],
-    ) -> anyhow::Result<(Scanner, String)> {
+    ) -> (Scanner, String) {
         let (merged_spelling, merged_case) = crate::rules::store::build_merged_rules(
             &base_ruleset.spelling_rules,
             &base_ruleset.case_rules,
@@ -110,7 +110,7 @@ impl Server {
         let ruleset_hash = compute_ruleset_hash(&merged_spelling, &merged_case);
         let scanner = Scanner::new(merged_spelling, merged_case);
 
-        Ok((scanner, ruleset_hash))
+        (scanner, ruleset_hash)
     }
 
     /// Whether the client declared sampling support during initialization.
@@ -273,7 +273,8 @@ impl Server {
         };
         let _span = tracing::info_span!("mcp_request", method = "initialize").entered();
 
-        // Note: This warning is deliberately emitted to stderr only (and not forwarded to the client).
+        // Note: This warning is deliberately emitted to stderr only (and not
+        // forwarded to the client).
         if params.protocol_version != MCP_PROTOCOL_VERSION {
             tracing::warn!(
                 client_version = %params.protocol_version,
@@ -475,69 +476,39 @@ impl Server {
         };
         let text = s2t_converted.as_deref().unwrap_or(text);
 
-        let fix_mode = parse_fix_mode(args, &id)?;
-        let profile = parse_profile(args, &id)?;
-        let content_type = parse_content_type(args, &id)?;
-        let stance = parse_political_stance(args, &id)?;
-        let max_errors = args.get("max_errors").and_then(|v| v.as_u64());
-        let max_warnings = args.get("max_warnings").and_then(|v| v.as_u64());
-        let ignore_terms = parse_ignore_terms(args);
+        // One call, then straight back into the same locals. The body below is
+        // long enough that ninety lines of flat argument parsing in front of it
+        // buried what the function actually does.
+        let CheckParams {
+            fix_mode,
+            profile,
+            content_type,
+            stance,
+            max_errors,
+            max_warnings,
+            ignore_terms,
+            explain,
+            output_mode,
+            fix_output,
+            #[cfg(feature = "translate")]
+            verify,
+            detect_ai_opt,
+            detect_translationese_opt,
+            detect_style,
+            translationese_domain_opt,
+            ai_threshold,
+            relaxed,
+            exempt_blockquotes,
+            glossary,
+            consistency_requested,
+            include_telemetry,
+            include_stats,
+        } = CheckParams::parse(args, &id, default_output_mode(self.client_name.as_deref()))?;
+
         let ignore_set: std::collections::HashSet<&str> =
             ignore_terms.iter().map(String::as_str).collect();
-        let explain = parse_explain(args);
-        let output_mode =
-            parse_output_mode(args, default_output_mode(self.client_name.as_deref()), &id)?;
-        let fix_output = parse_fix_output(args, &id)?;
-        #[cfg(feature = "translate")]
-        let verify = parse_verify(args);
-
         let stance_name = stance.unwrap_or(PoliticalStance::RocCentric).name();
 
-        // Explicit bool overrides default; absent means inherit profile
-        // default. Default profile enables both ai_filler_detection and
-        // translationese_detection.
-        let detect_ai_opt = args.get("detect_ai").and_then(|v| v.as_bool());
-        let detect_translationese_opt = args.get("detect_translationese").and_then(|v| v.as_bool());
-
-        // Explicit opt-in for the composite three-axis scorecard — mirrors the
-        // CLI `--detect-style` shorthand, off-by-default to keep the standard
-        // payload lean.
-        let detect_style = args
-            .get("detect_style")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let translationese_domain_opt = args
-            .get("translationese_domain")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let ai_threshold = optional_str_validated(args, "ai_threshold", &id)?;
-
-        let relaxed = args
-            .get("relaxed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let exempt_blockquotes = args
-            .get("exempt_blockquotes")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let glossary = parse_glossary(args);
-
-        let consistency_requested = args
-            .get("consistency")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let include_telemetry = args
-            .get("include_telemetry")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let include_stats = args
-            .get("include_stats")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
         let _span = tracing::info_span!(
             "tool_check",
             content_length = text.len() as u64,
@@ -1207,6 +1178,90 @@ fn json_type_name(v: &Value) -> &'static str {
     }
 }
 
+/// Everything `tool_check` reads out of its JSON arguments.
+///
+/// Exists to give the parsing a name and a home, not to be passed around: the
+/// caller destructures it immediately, so the body works with the same locals
+/// it always did.  That is deliberate.  A struct threaded through four hundred
+/// lines would have meant renaming every use, which is a lot of silent risk for
+/// a change whose whole point is legibility.
+struct CheckParams<'a> {
+    fix_mode: FixMode,
+    profile: Profile,
+    content_type: ContentType,
+    stance: Option<PoliticalStance>,
+    max_errors: Option<u64>,
+    max_warnings: Option<u64>,
+    ignore_terms: Vec<String>,
+    explain: bool,
+    output_mode: OutputMode,
+    fix_output: FixOutputMode,
+    #[cfg(feature = "translate")]
+    verify: bool,
+    /// Explicit bool overrides the profile default; absent means inherit.  The
+    /// default profile enables both AI-filler and translationese detection.
+    detect_ai_opt: Option<bool>,
+    detect_translationese_opt: Option<bool>,
+    /// Composite three-axis scorecard, opt-in.  Mirrors the CLI
+    /// `--detect-style` shorthand; off by default to keep the payload lean.
+    detect_style: bool,
+    translationese_domain_opt: Option<String>,
+    ai_threshold: Option<&'a str>,
+    relaxed: bool,
+    exempt_blockquotes: bool,
+    glossary: crate::rules::glossary::ProjectGlossary,
+    consistency_requested: bool,
+    include_telemetry: bool,
+    include_stats: bool,
+}
+
+impl<'a> CheckParams<'a> {
+    fn parse(
+        args: &'a Value,
+        id: &Option<super::types::RequestId>,
+        default_output: OutputMode,
+    ) -> ParamResult<Self> {
+        Ok(Self {
+            fix_mode: parse_fix_mode(args, id)?,
+            profile: parse_profile(args, id)?,
+            content_type: parse_content_type(args, id)?,
+            stance: parse_political_stance(args, id)?,
+            max_errors: args.get("max_errors").and_then(|v| v.as_u64()),
+            max_warnings: args.get("max_warnings").and_then(|v| v.as_u64()),
+            ignore_terms: parse_ignore_terms(args),
+            explain: parse_explain(args),
+            output_mode: parse_output_mode(args, default_output, id)?,
+            fix_output: parse_fix_output(args, id)?,
+            #[cfg(feature = "translate")]
+            verify: parse_verify(args),
+            detect_ai_opt: parse_flag_opt(args, "detect_ai"),
+            detect_translationese_opt: parse_flag_opt(args, "detect_translationese"),
+            detect_style: parse_flag(args, "detect_style"),
+            translationese_domain_opt: args
+                .get("translationese_domain")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            ai_threshold: optional_str_validated(args, "ai_threshold", id)?,
+            relaxed: parse_flag(args, "relaxed"),
+            exempt_blockquotes: parse_flag(args, "exempt_blockquotes"),
+            glossary: parse_glossary(args),
+            consistency_requested: parse_flag(args, "consistency"),
+            include_telemetry: parse_flag(args, "include_telemetry"),
+            include_stats: parse_flag(args, "include_stats"),
+        })
+    }
+}
+
+/// An optional boolean argument, absent meaning "inherit the default".
+fn parse_flag_opt(args: &Value, field: &str) -> Option<bool> {
+    args.get(field).and_then(|v| v.as_bool())
+}
+
+/// A boolean argument that defaults to false when absent or malformed.
+fn parse_flag(args: &Value, field: &str) -> bool {
+    parse_flag_opt(args, field).unwrap_or(false)
+}
+
 /// Parse the optional "fix_mode" field from tool arguments.
 /// Returns an INVALID_PARAMS error for unrecognized values.
 fn parse_fix_mode(args: &Value, id: &Option<super::types::RequestId>) -> ParamResult<FixMode> {
@@ -1740,8 +1795,9 @@ struct ExplainMeta<'a> {
     /// Whether the suggestion benefits from manual review.
     needs_review: bool,
     /// Per-issue editorial confidence — distinguishes binary corrections
-    /// from style preferences (e.g. 優化, 算法 are valid zh-TW general
-    /// vocabulary; 演算法 is the canonical computing form).
+    /// from style preferences (e.g. 場景 is correct zh-TW for a film or
+    /// stage scene, so rewriting it to 情境 is an IT-context judgment call,
+    /// whereas 線程 to 執行緒 is simply the zh-TW term).
     editorial_confidence: EditorialConfidence,
 }
 

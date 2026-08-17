@@ -13,25 +13,10 @@ use zhtw_mcp::engine::scan::{build_exclusions_for_content_type, ContentType, Sca
 use zhtw_mcp::fixer::{apply_fixes_with_context, remap_exclusions, FixMode};
 use zhtw_mcp::rules::ruleset::{Profile, RuleType, SpellingRule};
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 fn cross_strait(from: &str, to: &str) -> SpellingRule {
-    SpellingRule {
-        from: from.into(),
-        to: vec![to.into()],
-        rule_type: RuleType::CrossStrait,
-        disabled: false,
-        context: None,
-        english: None,
-        exceptions: None,
-        context_clues: None,
-        negative_context_clues: None,
-        positional_clues: None,
-        tags: None,
-        editorial_confidence: None,
-    }
+    SpellingRule::new(from, vec![to.into()], RuleType::CrossStrait)
 }
 
 /// Build a ~50KB Markdown document with URLs, code blocks, and fixable terms.
@@ -48,8 +33,8 @@ fn build_test_document(rules: &[(&str, &str)]) -> String {
     // Header.
     doc.push_str("# 排除區域重映射驗證\n\n");
 
-    // Prose paragraph template with a URL and a fixable term per iteration.
-    // We cycle through rules to get at least 20 distinct fixable terms.
+    // Prose paragraph template with a URL and a fixable term per iteration. We
+    // cycle through rules to get at least 20 distinct fixable terms.
     let filler_sentences = [
         "在現代作業系統中，記憶體管理是關鍵議題。",
         "程式設計師需要理解各種資料結構的優缺點。",
@@ -74,8 +59,8 @@ fn build_test_document(rules: &[(&str, &str)]) -> String {
         "```json\n{\"key\": \"value\", \"count\": 42}\n```",
     ];
 
-    // Generate enough paragraphs to reach ~50KB.
-    // Each paragraph is roughly 500-800 bytes of UTF-8 CJK text.
+    // Generate enough paragraphs to reach ~50KB. Each paragraph is roughly
+    // 500-800 bytes of UTF-8 CJK text.
     let mut para_count = 0;
     while doc.len() < 50_000 {
         let rule_idx = para_count % rules.len();
@@ -128,9 +113,7 @@ fn build_test_document(rules: &[(&str, &str)]) -> String {
     doc
 }
 
-// ---------------------------------------------------------------------------
 // Test
-// ---------------------------------------------------------------------------
 
 #[test]
 fn remap_exclusions_produces_identical_rescan_output() {
@@ -302,8 +285,8 @@ fn remap_exclusions_shifts_after_shorter_replacement() {
     use zhtw_mcp::fixer::AppliedFix;
 
     // Original text: "AAAA軟件BBBB" where 軟件 is at offset 4, length 6 bytes.
-    // Fix: 軟件 (6 bytes) -> 軟體 (6 bytes) -- same length, no shift.
-    // But if replacement is shorter: e.g. "XX" (2 bytes), delta = -4.
+    // Fix: 軟件 (6 bytes) -> 軟體 (6 bytes) -- same length, no shift. But if
+    // replacement is shorter: e.g. "XX" (2 bytes), delta = -4.
     let exclusions = vec![ByteRange { start: 20, end: 30 }];
 
     let fixes = vec![AppliedFix {

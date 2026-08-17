@@ -1,6 +1,6 @@
-// Spelling rule scan using Aho-Corasick (charwise daachorse primary,
-// bytewise fallback).  Context-clue checking uses a windowed AC scan
-// over bounded slices rather than full-document pre-scan.
+// Spelling rule scan using Aho-Corasick (charwise daachorse primary, bytewise
+// fallback). Context-clue checking uses a windowed AC scan over bounded slices
+// rather than full-document pre-scan.
 
 use crate::engine::excluded::{is_excluded, ByteRange};
 use crate::engine::segment::BoundaryBitmap;
@@ -13,8 +13,8 @@ use super::{
 };
 
 // Per-rule bitflags gating optional filter stages in process_spelling_match.
-// Most rules have flags == 0 (no optional stages), skipping all guarded
-// blocks at near-zero cost.
+// Most rules have flags == 0 (no optional stages), skipping all guarded blocks
+// at near-zero cost.
 pub(crate) const FILTER_HAS_SUPERSTRING: u8 = 1 << 0;
 pub(crate) const FILTER_HAS_EXCEPTIONS: u8 = 1 << 1;
 pub(crate) const FILTER_HAS_POS_CLUES: u8 = 1 << 2;
@@ -94,9 +94,9 @@ impl Scanner {
                     clue_index_built = true;
                 }
 
-                // Document-level fast path: if the clue index is empty and
-                // this rule requires positive clue matches, it will always
-                // be rejected.  Skip MatchContext construction entirely.
+                // Document-level fast path: if the clue index is empty and this
+                // rule requires positive clue matches, it will always be
+                // rejected. Skip MatchContext construction entirely.
                 if clue_index_built
                     && clue_buf.is_empty()
                     && self.spelling_db.rule_pos_clue_ids[idx].is_some()
@@ -137,9 +137,9 @@ impl Scanner {
                         ));
                     }
                 } else if class == CLASS_SIMPLE {
-                    // CLASS_SIMPLE: has superstring/exception/deletion but
-                    // no clue checks.  Avoids clue_index build and passes
-                    // empty clue slice to skip clue-related branches.
+                    // CLASS_SIMPLE: has superstring/exception/deletion but no
+                    // clue checks. Avoids clue_index build and passes empty
+                    // clue slice to skip clue-related branches.
                     let mut ctx = MatchContext {
                         text,
                         excluded,
@@ -384,7 +384,8 @@ fn positional_bounds_after(text: &str, match_end: usize, excluded: &[ByteRange])
     (match_end, byte_end)
 }
 
-/// Positional window BEFORE the match, clamped at paragraph/excluded boundaries.
+/// Positional window BEFORE the match, clamped at paragraph/excluded
+/// boundaries.
 fn positional_bounds_before(
     text: &str,
     match_start: usize,
@@ -503,6 +504,7 @@ mod tests {
         assert_eq!(scanner.spelling_db.spelling_contexts.len(), n);
         assert_eq!(scanner.spelling_db.spelling_english.len(), n);
         assert_eq!(scanner.spelling_db.spelling_context_clues.len(), n);
+        assert_eq!(scanner.spelling_db.spelling_context_suggestions.len(), n);
     }
 
     #[test]
@@ -530,8 +532,8 @@ mod tests {
 
     #[test]
     fn rule_class_distribution() {
-        // Sanity check: majority of rules should be CLASS_SIMPLE (the 79%
-        // from PR #49 analysis).  At least 60% to guard against drift.
+        // Sanity check: majority of rules should be CLASS_SIMPLE (the 79% from
+        // PR #49 analysis). At least 60% to guard against drift.
         let scanner = make_scanner();
         let total = scanner.spelling_db.rule_classes.len();
         let truly_simple = scanner
@@ -604,8 +606,8 @@ mod tests {
 
     #[test]
     fn oral_density_no_double_count() {
-        // "就是說" contains both the "就是" and "就是說" markers.
-        // The merged-span approach must not double-count the overlap.
+        // "就是說" contains both the "就是" and "就是說" markers. The
+        // merged-span approach must not double-count the overlap.
         let scanner = make_scanner();
         let text = "就是說就是說就是說就是說就是說就是說就是說就是說就是說就是說";
         let output = scanner.scan(text);
@@ -778,7 +780,8 @@ mod tests {
         );
     }
 
-    // -- mixed context: math compound "函數" must survive near programming clues
+    // -- mixed context: math compound "函數" must survive near programming
+    // clues
 
     #[test]
     fn math_compound_survives_mixed_context() {
@@ -794,8 +797,8 @@ mod tests {
 
     #[test]
     fn hanshu_diaoyon_fires_in_programming() {
-        // "函數調用→函式呼叫" only in programming context.
-        // Math evaluates (代入/求值), never calls (呼叫).
+        // "函數調用→函式呼叫" only in programming context. Math evaluates
+        // (代入/求值), never calls (呼叫).
         let scanner = make_scanner();
         let text = "編譯器的函數調用機制很重要";
         let issues = scanner.scan(text).issues;
@@ -830,8 +833,8 @@ mod tests {
 
     #[test]
     fn ambiguous_context_math_vetoes_standalone_hanshu() {
-        // When both programming and math clues coexist, negative clues
-        // veto the 函數->函式 rule for standalone 函數.
+        // When both programming and math clues coexist, negative clues veto the
+        // 函數->函式 rule for standalone 函數.
         let scanner = make_scanner();
         let text = "用程式碼呼叫函數來求解微積分";
         let issues = scanner.scan(text).issues;

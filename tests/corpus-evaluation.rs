@@ -428,9 +428,39 @@ fn corpus_evaluation_suite() {
         native_counts.flagged_docs,
         native_counts.total_docs
     );
+
+    // All three safe-fix rates are gated. Leaving cn_fix and native_fix
+    // computed but unasserted meant a fix-tier behavior change could sit in the
+    // printed output indefinitely: gating editorial_confidence low terms once
+    // drove cn_to_tw to exactly 85.0% while the suite still passed.
+    //
+    // The two rates added here gate at 99.0, not 85.0, because 85.0 is too
+    // loose to catch what it is meant to catch. cn_to_tw carries 900 weighted
+    // docs, so 85.0% tolerates 135 of them regressing, roughly two whole
+    // fixture cases, and ">= 85.0" admits the exact 85.0% case cited above.
+    //
+    // 99.0 is a suite-level tripwire, not a per-fixture one: it catches a heavy
+    // fixture, or a systematic change spread across several light ones, but not
+    // a single light fixture on its own. Per-fixture coverage is the job of the
+    // fixtures' own expected_fixed assertions.
+    //
+    // ai_fix stays at the historical 85.0 on purpose: it is the gate CLAUDE.md
+    // documents as the project contract. Raising it to 99.0 is worth doing and
+    // would cost nothing today, but that is a deliberate contract change, not a
+    // side effect of adding two sibling gates.
     assert!(
         fix_success_rate(&ai_fix) >= 85.0,
         "AI-generated safe-fix gate failed: {:.1}%",
         fix_success_rate(&ai_fix)
+    );
+    assert!(
+        fix_success_rate(&cn_fix) >= 99.0,
+        "zh-CN conversion safe-fix gate failed: {:.1}% (expected 100.0%)",
+        fix_success_rate(&cn_fix)
+    );
+    assert!(
+        fix_success_rate(&native_fix) >= 99.0,
+        "native zh-TW safe-fix gate failed: {:.1}% (expected 100.0%)",
+        fix_success_rate(&native_fix)
     );
 }

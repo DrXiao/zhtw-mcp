@@ -19,7 +19,7 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 
 def dedup_sort(
@@ -54,32 +54,92 @@ def dedup_sort(
     return sorted(out, key=lambda r: r[key]), space_warnings
 
 
-# Valid rule types (must match RuleType enum in src/rules/ruleset.rs).
-VALID_RULE_TYPES = {
-    "cross_strait",
-    "variant",
-    "typo",
-    "confusable",
-    "political_coloring",
-    "ai_filler",
-    "translationese",
-}
+# Schema facts generated from the Rust types (see schema_facts_file_is_current
+# in src/rules/ruleset.rs). Read rather than copied: these lists used to be
+# hand-maintained here and kept in step by regexes over schema.rs in one
+# direction and a Rust test parsing this file in the other. Serde already knows
+# every one of these facts, so it writes them down and this reads them.
+SCHEMA_FACTS = Path(__file__).resolve().parent / "schema-facts.json"
 
-# All known spelling rule fields (anything else is an unknown key warning).
-KNOWN_SPELLING_FIELDS = {
-    "from",
-    "to",
-    "type",
-    "disabled",
-    "context",
-    "english",
-    "exceptions",
-    "context_clues",
-    "negative_context_clues",
-    "positional_clues",
-    "tags",
-    "editorial_confidence",
-}
+
+def _load_schema_facts() -> dict[str, list[str]]:
+    """Generated schema facts, or a hard failure.
+
+    No fallback to hand-written defaults: a missing file must stop the lint,
+    not silently downgrade it to checks that cannot see a renamed field.
+    """
+    try:
+        return json.loads(SCHEMA_FACTS.read_text())
+    except (OSError, ValueError) as e:
+        sys.exit(
+            f"error: cannot read {SCHEMA_FACTS.name}: {e}\n"
+            "regenerate with: UPDATE_SCHEMA_FACTS=1 cargo test schema_facts_file_is_current"
+        )
+
+
+_FACTS = _load_schema_facts()
+
+VALID_RULE_TYPES = set(_FACTS["rule_types"])
+VALID_EDITORIAL_CONFIDENCE = set(_FACTS["editorial_confidence"])
+
+# Rule types the fixer applies at every tier (IssueType::is_orthographic).
+# editorial_confidence is meaningless on these: the fixer's gate is guarded on
+# lexical issues, so the annotation would be silently ignored.
+ORTHOGRAPHIC_RULE_TYPES = set(_FACTS["orthographic_rule_types"])
+
+
+class ClueList(NamedTuple):
+    """One clue list belonging to a rule, with what a check needs to know.
+
+    "label" is for warning messages only. Filter on "positive" and "group",
+    never on the label text: two callers used to re-parse it, which made the
+    message format load-bearing, so renaming a message would have silently
+    switched checks off.
+    """
+
+    label: str
+    clues: list[Any]
+    positive: bool
+    group: bool
+
+
+def _clue_lists(rule: dict[str, Any]) -> list[ClueList]:
+    """Every clue list on a rule, including per-group ones.
+
+    The numbered checks below used to walk only "context_clues" and
+    "negative_context_clues", so a clue that reached the scanner through
+    context_suggestions escaped the blank-entry, length-budget and
+    substring checks entirely. Same data, same failure modes; the only
+    difference was which key it arrived under.
+    """
+    out: list[ClueList] = []
+    for field in ("context_clues", "negative_context_clues"):
+        clues = rule.get(field)
+        if isinstance(clues, list):
+            out.append(ClueList(field, clues, field == "context_clues", False))
+    groups = rule.get("context_suggestions")
+    if isinstance(groups, list):
+        for gi, group in enumerate(groups):
+            if isinstance(group, dict) and isinstance(group.get("clues"), list):
+                out.append(
+                    ClueList(
+                        f"context_suggestions[{gi}].clues", group["clues"], True, True
+                    )
+                )
+    return out
+
+
+def _string_set(value: object) -> set[str]:
+    """Hashable string entries of a JSON list, ignoring any other shape.
+
+    Set operations on hand-edited data have to survive the edit that broke the
+    shape: a nested list is unhashable and would abort the whole lint run with
+    a TypeError before the shape warning ever reached the author.
+    """
+    if not isinstance(value, list):
+        return set()
+    return {s for s in value if isinstance(s, str)}
+
 
 # Field order for spelling rules (stable, human-scannable output).
 SPELLING_FIELD_ORDER = [
@@ -93,11 +153,39 @@ SPELLING_FIELD_ORDER = [
     "negative_context_clues",
     "positional_clues",
     "exceptions",
+    "context_suggestions",
     "tags",
     "editorial_confidence",
 ]
 
 CASE_FIELD_ORDER = ["term", "alternatives", "disabled"]
+
+# Anything outside this is an unknown-key warning. Derived, not spelled twice:
+# the order list already enumerates every field.
+KNOWN_SPELLING_FIELDS = set(SPELLING_FIELD_ORDER)
+
+
+def check_schema_parity() -> list[str]:
+    """Warn when this script's field-order lists no longer match the schema.
+
+    Only the order lists are checked here; the name sets above are loaded from
+    the same generated file and cannot drift by construction. A field added to
+    the Rust types without being taught to format_ruleset would otherwise be
+    silently appended to the end of every rule that used it.
+    """
+    problems = []
+    for struct, order, key in (
+        ("SpellingRule", SPELLING_FIELD_ORDER, "spelling_fields"),
+        ("CaseRule", CASE_FIELD_ORDER, "case_fields"),
+    ):
+        rust = set(_FACTS[key])
+        if rust != set(order):
+            problems.append(
+                f"schema: {struct} fields drifted from {SCHEMA_FACTS.name}: "
+                f"only in Rust {sorted(rust - set(order))}, "
+                f"only in this script {sorted(set(order) - rust)}"
+            )
+    return problems
 
 
 def ordered_rule(rule: dict[str, Any], order: list[str]) -> dict[str, Any]:
@@ -924,6 +1012,124 @@ def detect_conflicts(
         unknown = set(rule.keys()) - KNOWN_SPELLING_FIELDS
         if unknown:
             warnings.append(f'schema: "{frm}" has unknown fields: {sorted(unknown)}')
+        # editorial_confidence gates lexical judgment calls, so it only has
+        # meaning on lexical rule types. The fixer guards its gate with
+        # !orthographic, and variant rules classify as orthographic, so an
+        # annotation there would be silently ignored and fixed at every tier.
+        ec = rule.get("editorial_confidence")
+        if ec is not None:
+            # isinstance first: an unhashable hand-edit such as ["low"] would
+            # raise TypeError from the set membership test instead of warning.
+            if not isinstance(ec, str) or ec not in VALID_EDITORIAL_CONFIDENCE:
+                warnings.append(
+                    f'schema: "{frm}" has unknown editorial_confidence "{ec}" '
+                    f"(valid: {', '.join(sorted(VALID_EDITORIAL_CONFIDENCE))})"
+                )
+            if rule.get("type") in ORTHOGRAPHIC_RULE_TYPES:
+                warnings.append(
+                    f'schema: "{frm}" sets editorial_confidence on type '
+                    f"\"{rule['type']}\", which the fixer treats as orthographic "
+                    "and applies at every tier; the annotation has no effect"
+                )
+        # Validate context_suggestions: a list of {clues, to} groups, both
+        # non-empty lists of strings.  The compiler drops malformed groups
+        # silently, so catching them here is the only signal an author gets.
+        cs = rule.get("context_suggestions")
+        if cs is not None:
+            if not isinstance(cs, list):
+                warnings.append(
+                    f'schema: "{frm}" context_suggestions must be a list, '
+                    f"got {type(cs).__name__}"
+                )
+                cs = []
+            # A rule whose own "to" is the deletion sentinel reports a span
+            # derived from that default, so a group offering a real replacement
+            # would report a shorter span than it rewrites. Dropped too.
+            to = rule.get("to")
+            if not isinstance(to, list) or not to or to[0] == "":
+                warnings.append(
+                    f'schema: "{frm}" sets context_suggestions on a deletion '
+                    "rule; the groups are dropped at compile time"
+                )
+            for gi, group in enumerate(cs):
+                where = f'"{frm}" context_suggestions[{gi}]'
+                if not isinstance(group, dict):
+                    warnings.append(f"schema: {where} must be an object")
+                    continue
+                unknown_g = set(group.keys()) - {"clues", "to"}
+                if unknown_g:
+                    warnings.append(
+                        f"schema: {where} has unknown fields: {sorted(unknown_g)}"
+                    )
+                for key in ("clues", "to"):
+                    val = group.get(key)
+                    if not isinstance(val, list) or not val:
+                        warnings.append(
+                            f"schema: {where} needs a non-empty {key} list "
+                            "(the group is dropped at compile time otherwise)"
+                        )
+                    elif not all(isinstance(s, str) and s for s in val):
+                        warnings.append(
+                            f"schema: {where} {key} entries must be non-empty strings"
+                        )
+                # A clue that is also a negative clue can never select the
+                # group: the negative clue vetoes the whole match first.
+                # Restricted to string entries: the shape warnings above have
+                # already reported anything else, and an unhashable hand-edit
+                # such as [["流程"]] would otherwise raise TypeError here
+                # instead of finishing the lint.
+                dead = _string_set(group.get("clues")) & _string_set(
+                    rule.get("negative_context_clues")
+                )
+                if dead:
+                    warnings.append(
+                        f"schema: {where} clues {sorted(dead)} are also "
+                        "negative_context_clues, so the group can never select"
+                    )
+                # The selection window spans the match itself, so a clue found
+                # inside "from" is present for every match of the rule and the
+                # group becomes unconditional. Same shape as the empty-string
+                # clue the compiler drops, but this one looks deliberate.
+                always = sorted(c for c in _string_set(group.get("clues")) if c in frm)
+                if always:
+                    warnings.append(
+                        f"schema: {where} clues {always} occur inside the "
+                        f'"from" term "{frm}", so the group selects on every match'
+                    )
+                # Check 10 applies to a group's "to" for the same reason it
+                # applies to the rule's own: a single-entry group offering the
+                # source term back is auto-fixable, so the fixer rewrites the
+                # match to itself and the convergence pass has to absorb it.
+                if frm in _string_set(group.get("to")):
+                    warnings.append(
+                        f'self-ref: {where} to contains "{frm}" '
+                        "(identity suggestion)"
+                    )
+            # Group order is precedence, and a clue matches inside longer words,
+            # so an earlier group's clue that occurs inside a later group's clue
+            # means the later group can never fire on that compound. That is the
+            # mechanism the 優化 rule relies on deliberately, which is exactly
+            # why getting it backwards has to be caught: write the specific
+            # group first, or the general one silently swallows it.
+            groups = cs if isinstance(cs, list) else []
+            for later in range(len(groups)):
+                for earlier in range(later):
+                    a, b = groups[earlier], groups[later]
+                    if not isinstance(a, dict) or not isinstance(b, dict):
+                        continue
+                    shadowed = sorted(
+                        lc
+                        for lc in _string_set(b.get("clues"))
+                        for ec in _string_set(a.get("clues"))
+                        if ec in lc
+                    )
+                    if shadowed:
+                        warnings.append(
+                            f'schema: "{frm}" context_suggestions[{later}] clues '
+                            f"{shadowed} contain a clue from group {earlier}, "
+                            "which is tried first, so these can never select"
+                        )
+
         # Validate positional_clues syntax (operator:term).
         VALID_POSITIONAL_OPS = (
             "before:",
@@ -1014,6 +1220,8 @@ def detect_conflicts(
     # 9. context_clues / negative_context_clues validation.
     for rule in from_set.values():
         frm = rule["from"]
+        # Shape checks apply only to the rule's own lists; a malformed group
+        # never reaches _clue_lists, and check 7 reports it instead.
         for field in ("context_clues", "negative_context_clues"):
             clues = rule.get(field)
             if clues is None:
@@ -1023,18 +1231,30 @@ def detect_conflicts(
                 continue
             if not clues:
                 warnings.append(f'clue-empty: "{frm}" has empty {field} list')
-            for clue in clues:
-                if not clue or not clue.strip():
-                    warnings.append(f'clue-blank: "{frm}" has blank entry in {field}')
-        # Overlap: same term in both positive and negative clues.
-        pos = set(rule.get("context_clues") or [])
-        neg = set(rule.get("negative_context_clues") or [])
-        overlap = pos & neg
-        if overlap:
-            warnings.append(
-                f'clue-overlap: "{frm}" has terms in both context_clues '
-                f"and negative_context_clues: {sorted(overlap)}"
-            )
+        # One blank test over every clue list. Group clues reach the same
+        # scanner path, and a blank one is worse there: an empty string matches
+        # every window, so the group would select on every match of the rule.
+        # The isinstance guard is what keeps a non-string clue a warning rather
+        # than an AttributeError that aborts the whole run.
+        for entry in _clue_lists(rule):
+            for clue in entry.clues:
+                if not isinstance(clue, str) or not clue.strip():
+                    warnings.append(
+                        f'clue-blank: "{frm}" has blank entry in {entry.label}'
+                    )
+        # Overlap: a positive clue that is also a negative clue can never fire,
+        # because the negative vetoes the whole match first. Same test for a
+        # group clue as for a rule-level one; it used to be written twice.
+        neg = _string_set(rule.get("negative_context_clues"))
+        for entry in _clue_lists(rule):
+            if not entry.positive:
+                continue
+            overlap = _string_set(entry.clues) & neg
+            if overlap:
+                warnings.append(
+                    f'clue-overlap: "{frm}" has terms in both {entry.label} '
+                    f"and negative_context_clues: {sorted(overlap)}"
+                )
         # Self-suppression: negative clue equals the from term exactly.
         # Compound negative clues that merely contain from as substring
         # (e.g. from="搜索", neg="搜索令") are intentional — they suppress
@@ -1235,21 +1455,26 @@ def detect_conflicts(
     #     should suppress the broader positive trigger.
     for rule in from_set.values():
         frm = rule["from"]
-        pos = rule.get("context_clues") or []
-        neg = rule.get("negative_context_clues") or []
-        if not isinstance(pos, list) or not isinstance(neg, list):
+        # Group clues are checked too. A negative clue vetoes the whole match
+        # before any group can select, so a group clue containing one can never
+        # fire, exactly as for a rule-level positive clue.
+        neg = [n for n in _string_set(rule.get("negative_context_clues"))]
+        if not neg:
             continue
-        for n in neg:
-            for p in pos:
-                if not isinstance(n, str) or not isinstance(p, str):
+        for entry in _clue_lists(rule):
+            if not entry.positive:
+                continue
+            for p in entry.clues:
+                if not isinstance(p, str):
                     continue
-                if n in p:
-                    # neg is substring of pos: pos match always triggers neg
-                    warnings.append(
-                        f'clue-neg-in-pos: "{frm}" neg_clue "{n}" is '
-                        f'substring of pos_clue "{p}" (pos is always '
-                        f"suppressed)"
-                    )
+                for n in neg:
+                    if n in p:
+                        # neg is substring of pos: pos match always triggers neg
+                        warnings.append(
+                            f'clue-neg-in-pos: "{frm}" neg_clue "{n}" is '
+                            f'substring of {entry.label} entry "{p}" (the '
+                            f"positive clue is always suppressed)"
+                        )
 
     # 19. Exception validity: each exception string must contain the rule's
     #     from as a substring (otherwise the exception can never match).
@@ -1295,10 +1520,8 @@ def detect_conflicts(
     MAX_CLUE_CHARS = 6
     for rule in from_set.values():
         frm = rule["from"]
-        for field in ("context_clues", "negative_context_clues"):
-            clues = rule.get(field)
-            if not isinstance(clues, list):
-                continue  # malformed; already caught by check 9
+        for entry in _clue_lists(rule):
+            field, clues = entry.label, entry.clues
             for clue in clues:
                 if not isinstance(clue, str):
                     continue  # malformed; already caught by check 9
@@ -1538,6 +1761,7 @@ def main() -> int:
     # Detect semantic conflicts in spelling rules.
     conflicts, advisories = detect_conflicts(data["spelling_rules"])
     conflicts.extend(space_warnings)
+    conflicts.extend(check_schema_parity())
     if conflicts:
         print(f"conflicts ({len(conflicts)}):", file=sys.stderr)
         for w in conflicts:

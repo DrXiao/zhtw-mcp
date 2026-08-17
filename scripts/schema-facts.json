@@ -1,0 +1,40 @@
+{
+  "_comment": "Generated from the Rust types by schema_facts_file_is_current in src/rules/ruleset.rs. Do not edit; regenerate with UPDATE_SCHEMA_FACTS=1 cargo test schema_facts_file_is_current.",
+  "case_fields": [
+    "alternatives",
+    "disabled",
+    "term"
+  ],
+  "editorial_confidence": [
+    "high",
+    "medium",
+    "low"
+  ],
+  "orthographic_rule_types": [
+    "variant"
+  ],
+  "rule_types": [
+    "political_coloring",
+    "cross_strait",
+    "typo",
+    "confusable",
+    "variant",
+    "ai_filler",
+    "translationese"
+  ],
+  "spelling_fields": [
+    "context",
+    "context_clues",
+    "context_suggestions",
+    "disabled",
+    "editorial_confidence",
+    "english",
+    "exceptions",
+    "from",
+    "negative_context_clues",
+    "positional_clues",
+    "tags",
+    "to",
+    "type"
+  ]
+}

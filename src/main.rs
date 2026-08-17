@@ -624,11 +624,10 @@ fn main() {
     };
     zhtw_mcp::trace::init(default_log);
 
-    // Debug formatting rather than alternate Display: that is what anyhow's
-    // own Termination impl used before this function stopped returning
-    // Result, so the multi-line
-    // "Caused by:" chain users are reading in CI logs stays as it was.  The
-    // only thing that changed is the exit code.
+    // Debug formatting rather than alternate Display: that is what anyhow's own
+    // Termination impl used before this function stopped returning Result, so
+    // the multi-line "Caused by:" chain users are reading in CI logs stays as
+    // it was. The only thing that changed is the exit code.
     let result = parse_args(&args).and_then(run);
     if let Err(e) = result {
         eprintln!("Error: {e:?}");
@@ -878,7 +877,7 @@ fn run_server(
     let pack_store = zhtw_mcp::rules::store::PackStore::new(packs_dir);
 
     // Translation memory: the caller resolved the path, from translation_memory
-    // in the project config or by walking up from cwd.  A missing or unreadable
+    // in the project config or by walking up from cwd. A missing or unreadable
     // TM degrades to none with a warning, the same as on the lint path, because
     // it is an optional store rather than a precondition.
     let tm_store = match zhtw_mcp::rules::store::TranslationMemoryStore::open(tm_path) {
@@ -918,6 +917,23 @@ enum LintFormat {
     Tabular,
 }
 
+impl LintFormat {
+    /// True when the report claims stdout, so a fixed document cannot also go
+    /// there.  Human output goes to stderr; every other renderer prints.
+    ///
+    /// An exhaustive match, not a negated `matches!`: a sixth format then has
+    /// to answer the question at compile time instead of defaulting into the
+    /// passthrough branch and truncating a piped document.
+    fn report_owns_stdout(self) -> bool {
+        match self {
+            LintFormat::Human => false,
+            LintFormat::Json | LintFormat::Sarif | LintFormat::Compact | LintFormat::Tabular => {
+                true
+            }
+        }
+    }
+}
+
 // Typed output structs for direct serialization (no Value tree allocation).
 
 #[derive(serde::Serialize)]
@@ -934,6 +950,11 @@ struct CliFileOutput {
     fixes_applied: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fixes_skipped: Option<usize>,
+    /// Subset of fixes_skipped the fixer judged on the issue's own merits.
+    /// fixes_skipped also counts issues that were never in scope for the tier,
+    /// overlapped an earlier fix, or landed in an excluded region.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fixes_declined: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ai_signature: Option<zhtw_mcp::engine::ai_score::AiSignatureReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1123,6 +1144,7 @@ struct FileReport<'a> {
     tm_suppressed: usize,
     fixes_applied: Option<usize>,
     fixes_skipped: Option<usize>,
+    fixes_declined: Option<usize>,
     ai_signature: Option<&'a zhtw_mcp::engine::ai_score::AiSignatureReport>,
     translationese_signature:
         Option<&'a zhtw_mcp::engine::translationese_score::TranslationeseReport>,
@@ -1145,6 +1167,7 @@ fn render_json(r: &FileReport<'_>, params: &LintBatchParams<'_>) -> CliFileOutpu
         tm_suppressed: (r.tm_suppressed > 0).then_some(r.tm_suppressed),
         fixes_applied: r.fixes_applied,
         fixes_skipped: r.fixes_skipped,
+        fixes_declined: r.fixes_declined,
         ai_signature: r.ai_signature.cloned(),
         translationese_signature: r.translationese_signature.cloned(),
         style_scorecard: params.detect_style.then(|| {
@@ -1829,10 +1852,10 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
         // discard the findings for every file already processed, which in JSON
         // mode meant empty output after doing all the work.
         if let Err(e) = process_scanned_file(&ctx, file_arg, scan_result, &mut state) {
-            // No file prefix: every error on this path already carries the
-            // path in its context, and prefixing printed it twice.  Alternate
-            // Display keeps one file to one line, which is what the rest of
-            // the per-file output does.
+            // No file prefix: every error on this path already carries the path
+            // in its context, and prefixing printed it twice. Alternate Display
+            // keeps one file to one line, which is what the rest of the
+            // per-file output does.
             eprintln!("{}{:#}{}", c.bold, e, c.reset);
             state.failed_files += 1;
         }
@@ -1958,6 +1981,169 @@ struct BatchState {
     failed_files: usize,
 }
 
+/// What `emit_fix_result` left behind for the phases that follow it.
+struct FixEmission<'a> {
+    /// The buffer every later phase reads: the fixer's output when it ran, the
+    /// original otherwise.
+    text: &'a str,
+    /// True when the document on disk (or on stdout) now differs from the
+    /// input, so reporting has to run against the rewritten text.
+    wrote_changes: bool,
+}
+
+/// Write the fixed document and report what happened to it.
+///
+/// Split out of `process_scanned_file` because the two halves are easy to get
+/// out of step: stdout carries the document for a stdin filter and the report
+/// for every machine format, while status lines always belong on stderr.
+/// Keeping the decision in one place means there is one answer to "where does
+/// this text go", not one per branch.
+fn emit_fix_result<'a>(
+    file_arg: &str,
+    text: &'a str,
+    fix_result: Option<&'a zhtw_mcp::fixer::FixResult>,
+    input_was_sc: bool,
+    params: &LintBatchParams<'_>,
+    c: &Colors,
+) -> Result<FixEmission<'a>> {
+    // Write fixed text (unless --dry-run). Text is written when either S2T
+    // conversion was applied or ruleset fixes were made.
+    let fix_applied = fix_result.map_or(0, |f| f.applied);
+    let fix_declined = fix_result.map_or(0, |f| f.declined);
+    let has_text_changes = input_was_sc || fix_applied > 0;
+
+    // Declined fixes are the only signal that --fix looked at an issue and
+    // chose not to rewrite it. Without this the count reaches JSON consumers
+    // only, and a file where every issue is declined prints no fix line at all.
+    //
+    // Reports f.declined, not f.skipped: the latter also counts issues that
+    // were never in scope, so "--fix=orthographic" on ordinary prose would
+    // report every cross-strait term as declined. Deliberately does not name a
+    // tier that would apply them either: declines come from several gates
+    // (multiple suggestions, anchor rejection, tier-2 suppression, editorial
+    // confidence) and only some are tier-liftable.
+    let declined = if fix_declined > 0 {
+        format!(", {}{fix_declined} declined{}", c.dim, c.reset)
+    } else {
+        String::new()
+    };
+
+    // The buffer every later phase reads: the fixer's output when it ran, the
+    // original otherwise.
+    let current_text = fix_result.map_or(text, |f| f.text.as_str());
+
+    // stdin with --fix is a filter, so stdout carries the document whether or
+    // not anything changed. Gating this on has_text_changes made "lint -- --fix
+    // > out.md" emit nothing for a clean document, which truncates the user's
+    // content on the one input that has no copy on disk to fall back to. A dry
+    // run still emits nothing: it reports what would happen and leaves the text
+    // alone.
+    //
+    // S2T conversion counts too, with or without --fix. It rewrites the
+    // document exactly as a fix does, and the file branch below writes it back
+    // unconditionally, so withholding it on stdin loses the converted text with
+    // nothing on disk to recover it.
+    //
+    // Human format only, because stdout can carry one product. Every other
+    // format puts its report there, and a document printed ahead of it made
+    // "--fix --format json" unparseable. That combination asks for the report,
+    // so the report is what stdout gets; the fixed text is reachable by
+    // rerunning without --format, or by fixing a file instead.
+    let stdin_emits_document =
+        file_arg == "--" && (fix_result.is_some() || input_was_sc) && !params.dry_run;
+    if stdin_emits_document && !params.format.report_owns_stdout() {
+        print!("{}", current_text);
+    } else if stdin_emits_document {
+        // Say what was dropped. Silence here is how "--fix --format compact"
+        // over a pipe emptied a document with nothing on either stream and an
+        // exit code of 0: compact and tabular print nothing at all for a clean
+        // file, so the discard was indistinguishable from success.
+        eprintln!(
+            "{}--{}: rewritten text not emitted: --format owns stdout; \
+             rerun without --format, or process a file",
+            c.bold, c.reset
+        );
+    }
+
+    // A dry run computes the fixes but emits nothing, so reporting has to stay
+    // on the text the user still has.
+    let wrote_changes = has_text_changes && !params.dry_run;
+    if has_text_changes {
+        let s2t_label = if input_was_sc && fix_applied == 0 {
+            " (S2T only)"
+        } else {
+            ""
+        };
+        if params.dry_run {
+            eprintln!(
+                "{}{}{}: {} fix(es) would be applied{s2t_label}{declined} {}(dry run){}",
+                c.bold, file_arg, c.reset, fix_applied, c.dim, c.reset
+            );
+        } else if file_arg == "--" {
+            // The document already went to stdout above, once, for every stdin
+            // path that rewrites it rather than only the one where --fix
+            // changed something.
+            //
+            // Unconditional, like the file branch. Gating it on a nonzero
+            // decline count meant stdin reported a fix only when something was
+            // also turned down, which is the opposite of what a file does.
+            // stdout stays reserved for the document.
+            eprintln!(
+                "{}--{}: {} fix(es) applied{s2t_label}{declined}",
+                c.bold, c.reset, fix_applied
+            );
+        } else {
+            // Atomic write: tempfile + rename in the same directory. Worth the
+            // rename semantics here, unlike the baseline: this is the user's
+            // source file, and a torn write loses their content rather than a
+            // regenerable artifact.
+            let file_path = Path::new(file_arg);
+            let parent = file_path.parent().unwrap_or(Path::new("."));
+            let mut tmp = tempfile::NamedTempFile::new_in(parent)
+                .with_context(|| format!("{file_arg}: create tempfile in {}", parent.display()))?;
+            std::io::Write::write_all(&mut tmp, current_text.as_bytes())
+                .with_context(|| format!("write tempfile for {file_arg}"))?;
+
+            // A temp file is created 0600. Carry over the mode of the file
+            // being replaced, or --fix silently turns every source file it
+            // touches into 0600 and git reports a mode change on each one. The
+            // file was just read, so metadata is expected to succeed; a
+            // cosmetic mode bit is not worth failing the write over.
+            #[cfg(unix)]
+            if let Ok(meta) = std::fs::metadata(file_path) {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = meta.permissions().mode() & 0o7777;
+                let _ = tmp
+                    .as_file()
+                    .set_permissions(std::fs::Permissions::from_mode(mode));
+            }
+            tmp.persist(file_path)
+                .with_context(|| format!("rename tempfile to {file_arg}"))?;
+            eprintln!(
+                "{}{}{}: {} fix(es) applied{s2t_label}{declined}",
+                c.bold, file_arg, c.reset, fix_applied
+            );
+        }
+    } else if fix_declined > 0 {
+        // --fix ran but rewrote nothing. Say so, or the run is
+        // indistinguishable from one where --fix was never passed.
+        let dry = if params.dry_run {
+            format!(" {}(dry run){}", c.dim, c.reset)
+        } else {
+            String::new()
+        };
+        eprintln!(
+            "{}{}{}: no fixes applied{declined}{dry}",
+            c.bold, file_arg, c.reset
+        );
+    }
+
+    Ok(FixEmission {
+        text: current_text,
+        wrote_changes,
+    })
+}
+
 /// Fix, rescan, verify, and report one already-scanned file.
 ///
 /// Split out of `run_lint_batch` so the per-file pipeline can be read
@@ -2025,8 +2211,8 @@ fn process_scanned_file(
         // path passes (src/mcp/tools.rs), built with the same options so the
         // two front ends cannot disagree about which bytes --fix may touch.
         // Scan-time exclusion is not enough, because a multi-part grammar match
-        // can span an excluded region sitting between its parts, e.g.
-        // a fronted object written as inline code sits between the parts.
+        // can span an excluded region sitting between its parts, e.g. a fronted
+        // object written as inline code sits between the parts.
         //
         // Rebuilt here rather than carried out of the scan because the scan
         // builds its ranges on the NFC-normalized text while the issues
@@ -2053,67 +2239,21 @@ fn process_scanned_file(
         None
     };
 
-    // Write fixed text (unless --dry-run). Text is written when either S2T
-    // conversion was applied or ruleset fixes were made.
-    let fix_applied = fix_result.as_ref().map_or(0, |f| f.applied);
-    let has_text_changes = input_was_sc || fix_applied > 0;
-
-    // The buffer every later phase reads: the fixer's output when it ran, the
-    // original otherwise.
-    let current_text = fix_result
-        .as_ref()
-        .map_or(text.as_str(), |f| f.text.as_str());
-
-    // A dry run computes the fixes but emits nothing, so reporting has to stay
-    // on the text the user still has.
-    let wrote_changes = has_text_changes && !params.dry_run;
-    if has_text_changes {
-        let s2t_label = if input_was_sc && fix_applied == 0 {
-            " (S2T only)"
-        } else {
-            ""
-        };
-        if params.dry_run {
-            eprintln!(
-                "{}{}{}: {} fix(es) would be applied{s2t_label} {}(dry run){}",
-                c.bold, file_arg, c.reset, fix_applied, c.dim, c.reset
-            );
-        } else if file_arg == "--" {
-            // stdin: emit fixed text to stdout.
-            print!("{}", current_text);
-        } else {
-            // Atomic write: tempfile + rename in the same directory. Worth the
-            // rename semantics here, unlike the baseline: this is the user's
-            // source file, and a torn write loses their content rather than a
-            // regenerable artifact.
-            let file_path = Path::new(file_arg);
-            let parent = file_path.parent().unwrap_or(Path::new("."));
-            let mut tmp = tempfile::NamedTempFile::new_in(parent)
-                .with_context(|| format!("{file_arg}: create tempfile in {}", parent.display()))?;
-            std::io::Write::write_all(&mut tmp, current_text.as_bytes())
-                .with_context(|| format!("write tempfile for {file_arg}"))?;
-
-            // A temp file is created 0600. Carry over the mode of the file
-            // being replaced, or --fix silently turns every source file it
-            // touches into 0600 and git reports a mode change on each one. The
-            // file was just read, so metadata is expected to succeed; a
-            // cosmetic mode bit is not worth failing the write over.
-            #[cfg(unix)]
-            if let Ok(meta) = std::fs::metadata(file_path) {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = meta.permissions().mode() & 0o7777;
-                let _ = tmp
-                    .as_file()
-                    .set_permissions(std::fs::Permissions::from_mode(mode));
-            }
-            tmp.persist(file_path)
-                .with_context(|| format!("rename tempfile to {file_arg}"))?;
-            eprintln!(
-                "{}{}{}: {} fix(es) applied{s2t_label}",
-                c.bold, file_arg, c.reset, fix_applied
-            );
-        }
-    }
+    // Writing the document and reporting on it are one step, kept in one
+    // function. They used to be inline here, and the seam between "put the text
+    // somewhere" and "tell the user what happened" is where the stdin
+    // passthrough went wrong twice: once emitting nothing for an unchanged
+    // document, once emitting it on top of a JSON report.
+    let emitted = emit_fix_result(
+        file_arg,
+        &text,
+        fix_result.as_ref(),
+        input_was_sc,
+        params,
+        c,
+    )?;
+    let current_text = emitted.text;
+    let wrote_changes = emitted.wrote_changes;
 
     // Count remaining issues after fix/S2T (rescan converted text). Single
     // rescan serves both issue reporting and AI signature refresh.
@@ -2249,6 +2389,7 @@ fn process_scanned_file(
         tm_suppressed,
         fixes_applied: fix_result.as_ref().map(|f| f.applied),
         fixes_skipped: fix_result.as_ref().map(|f| f.skipped),
+        fixes_declined: fix_result.as_ref().map(|f| f.declined),
         ai_signature: ai_signature.as_ref(),
         translationese_signature: translationese_signature.as_ref(),
         consistency_text: if wrote_changes {

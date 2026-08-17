@@ -10,7 +10,7 @@ homepage = "https://github.com/sysprog21/zhtw-mcp"
 categories = ["command-line-utilities", "text-processing", "internationalization"]
 keywords = ["mcp", "chinese", "linting", "traditional-chinese", "zh-tw"]
 readme = "README.md"
-include = ["src/**/*", "assets/ruleset.json", "Cargo.toml", "LICENSE", "README.md", "rust-toolchain.toml"]
+include = ["src/**/*", "assets/ruleset.json", "scripts/schema-facts.json", "Cargo.toml", "LICENSE", "README.md", "rust-toolchain.toml"]
 
 [features]
 default = ["native", "translate"]

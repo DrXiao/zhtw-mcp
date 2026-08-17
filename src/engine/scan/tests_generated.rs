@@ -1,38 +1,14 @@
+    // Included by mod.rs inside its "mod tests" block, which is why everything
+    // here sits at one extra indent level. Despite the filename nothing
+    // generates it; edit it like any other test file.
+
     #[test]
     fn compound_term_takes_priority_over_shorter() {
-        // When both "數據" and "數據庫" are patterns, "數據庫" should match
-        // as a single compound via leftmost-longest, not as bare "數據".
+        // When both "數據" and "數據庫" are patterns, "數據庫" should match as
+        // a single compound via leftmost-longest, not as bare "數據".
         let rules = vec![
-            SpellingRule {
-                from: "數據".into(),
-                to: vec!["資料".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
-                english: None,
-                context_clues: None,
-                negative_context_clues: None,
-                exceptions: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
-            },
-            SpellingRule {
-                from: "數據庫".into(),
-                to: vec!["資料庫".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
-                english: None,
-                context_clues: None,
-                negative_context_clues: None,
-                exceptions: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
-            },
+            SpellingRule::new("數據", vec!["資料".into()], RuleType::CrossStrait),
+            SpellingRule::new("數據庫", vec!["資料庫".into()], RuleType::CrossStrait),
         ];
         let scanner = Scanner::new(rules, vec![]);
 
@@ -53,35 +29,10 @@
         let ctx = "token: 驗證=權杖；加密貨幣=代幣；NLP=詞元";
         let rules = vec![
             SpellingRule {
-                from: "令牌".into(),
-                to: vec!["權杖".into(), "代幣".into(), "詞元".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
                 context: Some(ctx.into()),
-                english: None,
-                context_clues: None,
-                negative_context_clues: None,
-                exceptions: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
+                ..SpellingRule::new("令牌", vec!["權杖".into(), "代幣".into(), "詞元".into()], RuleType::CrossStrait)
             },
-            SpellingRule {
-                from: "軟件".into(),
-                to: vec!["軟體".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
-                english: None,
-                context_clues: None,
-                negative_context_clues: None,
-                exceptions: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
-            },
+            SpellingRule::new("軟件", vec!["軟體".into()], RuleType::CrossStrait),
         ];
         let scanner = Scanner::new(rules, vec![]);
 
@@ -96,20 +47,7 @@
     }
 
     fn algorithm_rule() -> Vec<SpellingRule> {
-        vec![SpellingRule {
-            from: "算法".into(),
-            to: vec!["演算法".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }]
+        vec![SpellingRule::new("算法", vec!["演算法".into()], RuleType::CrossStrait)]
     }
 
     #[test]
@@ -142,34 +80,12 @@
     fn quote_rules() -> Vec<SpellingRule> {
         vec![
             SpellingRule {
-                from: "\u{201c}".into(),
-                to: vec!["\u{300c}".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
                 english: Some("left double quotation mark".into()),
-                context_clues: None,
-                negative_context_clues: None,
-                exceptions: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
+                ..SpellingRule::new("\u{201c}", vec!["\u{300c}".into()], RuleType::CrossStrait)
             },
             SpellingRule {
-                from: "\u{201d}".into(),
-                to: vec!["\u{300d}".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
                 english: Some("right double quotation mark".into()),
-                context_clues: None,
-                negative_context_clues: None,
-                exceptions: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
+                ..SpellingRule::new("\u{201d}", vec!["\u{300d}".into()], RuleType::CrossStrait)
             },
         ]
     }
@@ -187,8 +103,8 @@
 
     #[test]
     fn cn_quotes_all_opening_fixed_by_pairing() {
-        // Both quotes are \u{201c} (opening) — pairing fix should make
-        // the second one a closing 」.
+        // Both quotes are \u{201c} (opening) — pairing fix should make the
+        // second one a closing 」.
         let scanner = Scanner::new(quote_rules(), vec![]);
         let issues = scanner.scan("他說\u{201c}你好\u{201c}").issues;
         assert_eq!(issues.len(), 2);
@@ -198,8 +114,8 @@
 
     #[test]
     fn cn_quotes_all_closing_fixed_by_pairing() {
-        // Both quotes are \u{201d} (closing) — pairing fix should make
-        // the first one an opening 「.
+        // Both quotes are \u{201d} (closing) — pairing fix should make the
+        // first one an opening 「.
         let scanner = Scanner::new(quote_rules(), vec![]);
         let issues = scanner.scan("他說\u{201d}你好\u{201d}").issues;
         assert_eq!(issues.len(), 2);
@@ -218,8 +134,8 @@
 
     #[test]
     fn cn_quotes_reversed_pair_fixed() {
-        // Closing before opening: \u{201d}...\u{201c} — balanced count
-        // but wrong order.  Pairing fix should correct to 「...」.
+        // Closing before opening: \u{201d}...\u{201c} — balanced count but
+        // wrong order. Pairing fix should correct to 「...」.
         let scanner = Scanner::new(quote_rules(), vec![]);
         let issues = scanner.scan("他說\u{201d}你好\u{201c}").issues;
         assert_eq!(issues.len(), 2);
@@ -236,22 +152,9 @@
 
     #[test]
     fn wrong_repeated_in_correct_form() {
-        // wrong="A" appears twice in correct="ABA" (at index 0 and 2).
-        // Text "ABA" is the correct form — neither "A" should be flagged.
-        let rules = vec![SpellingRule {
-            from: "A".into(),
-            to: vec!["ABA".into()],
-            rule_type: RuleType::Typo,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }];
+        // wrong="A" appears twice in correct="ABA" (at index 0 and 2). Text
+        // "ABA" is the correct form — neither "A" should be flagged.
+        let rules = vec![SpellingRule::new("A", vec!["ABA".into()], RuleType::Typo)];
         let scanner = Scanner::new(rules, vec![]);
         let issues = scanner.scan("ABA").issues;
         assert!(
@@ -313,9 +216,9 @@
     fn overlap_ghost_suppression() {
         // A=(0,1) and C=(1,3) are non-overlapping. Under the old forward greedy
         // scan: B=(0,2) beats A, C=(1,3) beats B, yet A stays discarded even
-        // though A and C never overlapped. The priority-based algorithm processes
-        // C first (longest), accepts it, then accepts A (non-overlapping with C),
-        // and rejects B (overlaps C).
+        // though A and C never overlapped. The priority-based algorithm
+        // processes C first (longest), accepts it, then accepts A
+        // (non-overlapping with C), and rejects B (overlaps C).
         let mut issues = vec![
             overlap_issue(0, 1, Severity::Warning), // A: [0,1)
             overlap_issue(0, 2, Severity::Warning), // B: [0,2)
@@ -536,10 +439,10 @@
 
     #[test]
     fn punct_edge_period_at_position_zero() {
-        // Period at byte 0 with CJK after.  The period rule requires the
-        // PRECEDING non-whitespace char to be CJK.  At position 0 there is
-        // nothing before, so adjacent_cjk(text, 0, true) returns false.
-        // No issue expected.
+        // Period at byte 0 with CJK after. The period rule requires the
+        // PRECEDING non-whitespace char to be CJK. At position 0 there is
+        // nothing before, so adjacent_cjk(text, 0, true) returns false. No
+        // issue expected.
         let scanner = empty_scanner();
         let issues = scanner.scan(".你好").issues;
         assert!(
@@ -550,10 +453,9 @@
 
     #[test]
     fn punct_edge_comma_at_position_zero() {
-        // Comma at byte 0 with CJK after.  The comma rule fires when at
-        // least one adjacent non-whitespace char is CJK.  adjacent_cjk
-        // forward from byte 1 finds '你' (CJK ideograph), so the comma
-        // should be flagged.
+        // Comma at byte 0 with CJK after. The comma rule fires when at least
+        // one adjacent non-whitespace char is CJK. adjacent_cjk forward from
+        // byte 1 finds '你' (CJK ideograph), so the comma should be flagged.
         let scanner = empty_scanner();
         let issues = scanner.scan(",你好").issues;
         assert_eq!(issues.len(), 1);
@@ -564,9 +466,9 @@
 
     #[test]
     fn punct_edge_comma_at_end_of_string() {
-        // Comma at end of string.  CJK before ('好') satisfies the
-        // "at least one adjacent CJK" requirement.  Forward check finds
-        // nothing (empty tail), which is not CJK, but one side is enough.
+        // Comma at end of string. CJK before ('好') satisfies the "at least one
+        // adjacent CJK" requirement. Forward check finds nothing (empty tail),
+        // which is not CJK, but one side is enough.
         let scanner = empty_scanner();
         let issues = scanner.scan("你好,").issues;
         assert_eq!(issues.len(), 1);
@@ -575,9 +477,9 @@
 
     #[test]
     fn punct_edge_period_at_end_of_string() {
-        // Period at end of string.  CJK before ('好') satisfies the
-        // preceding-CJK requirement.  Nothing follows, so the
-        // "followed by alphanumeric" guard does not trigger.
+        // Period at end of string. CJK before ('好') satisfies the
+        // preceding-CJK requirement. Nothing follows, so the "followed by
+        // alphanumeric" guard does not trigger.
         let scanner = empty_scanner();
         let issues = scanner.scan("你好.").issues;
         assert_eq!(issues.len(), 1);
@@ -598,8 +500,8 @@
     #[test]
     fn punct_edge_period_followed_by_open_paren() {
         // Period followed by '(' -- not ASCII alphanumeric, so the
-        // extension/decimal guard does not trigger.  CJK before ('好')
-        // satisfies the preceding-CJK check.
+        // extension/decimal guard does not trigger. CJK before ('好') satisfies
+        // the preceding-CJK check.
         let scanner = empty_scanner();
         let issues = scanner.scan("你好.(").issues;
         assert_eq!(issues.len(), 1);
@@ -609,7 +511,7 @@
 
     #[test]
     fn punct_edge_period_followed_by_close_paren() {
-        // Period followed by ')' -- same logic as open paren.  Not ASCII
+        // Period followed by ')' -- same logic as open paren. Not ASCII
         // alphanumeric, CJK before, period should flag.
         let scanner = empty_scanner();
         let issues = scanner.scan("你好.)").issues;
@@ -623,9 +525,9 @@
         // UTF-8, so bytes[i-1] and bytes[i+1] are NOT ASCII digits -- the
         // thousands separator guard does not trigger.
         //
-        // is_cjk_context('１') returns true because U+FF11 is in the
-        // FF01..FF60 fullwidth forms range.  So adjacent_cjk backward
-        // finds '１' as CJK context and the comma IS flagged.
+        // is_cjk_context('１') returns true because U+FF11 is in the FF01..FF60
+        // fullwidth forms range. So adjacent_cjk backward finds '１' as CJK
+        // context and the comma IS flagged.
         let scanner = empty_scanner();
         let issues = scanner.scan("１,２").issues;
         // 3 issues: fullwidth digit １, half-width comma, fullwidth digit ２.
@@ -637,9 +539,9 @@
 
     #[test]
     fn punct_edge_whitespace_only_context_no_flag() {
-        // Comma surrounded by whitespace only -- no CJK context on either
-        // side.  adjacent_cjk skips whitespace and finds nothing, so both
-        // backward and forward checks return false.  No issue expected.
+        // Comma surrounded by whitespace only -- no CJK context on either side.
+        // adjacent_cjk skips whitespace and finds nothing, so both backward and
+        // forward checks return false. No issue expected.
         let scanner = empty_scanner();
         let issues = scanner.scan("  ,  ").issues;
         assert!(
@@ -651,8 +553,8 @@
     #[test]
     fn punct_edge_fullwidth_comma_before_halfwidth_period() {
         // '，' (U+FF0C) is in the FF01..FF60 fullwidth forms range, so
-        // is_cjk_context returns true.  The period's preceding-CJK check
-        // (adjacent_cjk backward) finds '，' and returns true.  No adjacent
+        // is_cjk_context returns true. The period's preceding-CJK check
+        // (adjacent_cjk backward) finds '，' and returns true. No adjacent
         // period, nothing follows, so the period should be flagged.
         let scanner = empty_scanner();
         let issues = scanner.scan("，.").issues;
@@ -663,27 +565,15 @@
 
     #[test]
     fn punct_edge_spelling_rule_with_comma_overlap_resolution() {
-        // A spelling rule whose matched text sits next to punctuation.  The
-        // spelling issue and punctuation issue have different byte offsets
-        // and lengths, so overlap resolution keeps both.
-        let rules = vec![SpellingRule {
-            from: "軟件".into(),
-            to: vec!["軟體".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }];
+        // A spelling rule whose matched text sits next to punctuation. The
+        // spelling issue and punctuation issue have different byte offsets and
+        // lengths, so overlap resolution keeps both.
+        let rules = vec![SpellingRule::new("軟件", vec!["軟體".into()], RuleType::CrossStrait)];
         let scanner = Scanner::new(rules, vec![]);
         let issues = scanner.scan("軟件,好用").issues;
-        // "軟件" is a spelling issue; "," is a punctuation issue.
-        // They don't overlap (軟件 = 6 bytes at offset 0, comma at offset 6).
+
+        // "軟件" is a spelling issue; "," is a punctuation issue. They don't
+        // overlap (軟件 = 6 bytes at offset 0, comma at offset 6).
         assert_eq!(issues.len(), 2);
         assert_eq!(issues[0].found, "軟件");
         assert_eq!(issues[0].rule_type, IssueType::CrossStrait);
@@ -693,9 +583,9 @@
 
     #[test]
     fn punct_edge_period_followed_by_newline() {
-        // Period followed by newline '\n'.  Newline (0x0A) is not ASCII
-        // alphanumeric, so the extension/decimal guard does not trigger.
-        // CJK before ('好') satisfies the preceding check.
+        // Period followed by newline '\n'. Newline (0x0A) is not ASCII
+        // alphanumeric, so the extension/decimal guard does not trigger. CJK
+        // before ('好') satisfies the preceding check.
         let scanner = empty_scanner();
         let issues = scanner.scan("你好.\n再見").issues;
         assert_eq!(issues.len(), 1);
@@ -705,11 +595,11 @@
 
     #[test]
     fn punct_edge_consecutive_commas_both_flagged() {
-        // Two consecutive commas between CJK text.  First comma: CJK
-        // before ('好'), forward finds ',' which is not CJK -- but
-        // one CJK side is enough.  Second comma: backward finds ','
-        // which is not CJK, but forward finds '世' which IS CJK.
-        // Both commas should be flagged independently.
+        // Two consecutive commas between CJK text. First comma: CJK before
+        // ('好'), forward finds ',' which is not CJK -- but one CJK side is
+        // enough. Second comma: backward finds ',' which is not CJK, but
+        // forward finds '世' which IS CJK. Both commas should be flagged
+        // independently.
         let scanner = empty_scanner();
         let issues = scanner.scan("你好,,世界").issues;
         assert_eq!(issues.len(), 2);
@@ -742,8 +632,7 @@
     #[test]
     fn line_col_mixed_ascii_cjk() {
         let scanner = Scanner::new(sample_spelling_rules(), vec![]);
-        // Line 1: "Hello 你好\n"
-        // Line 2: "The 軟件 is good"
+        // Line 1: "Hello 你好\n" Line 2: "The 軟件 is good"
         let issues = scanner.scan("Hello 你好\nThe 軟件 is good").issues;
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].line, 2);
@@ -774,22 +663,9 @@
 
     #[test]
     fn deterministic_ordering_mixed_types() {
-        // Spelling issue and punctuation issue at different offsets:
-        // output must be sorted by offset ascending.
-        let rules = vec![SpellingRule {
-            from: "軟件".into(),
-            to: vec!["軟體".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }];
+        // Spelling issue and punctuation issue at different offsets: output
+        // must be sorted by offset ascending.
+        let rules = vec![SpellingRule::new("軟件", vec!["軟體".into()], RuleType::CrossStrait)];
         let scanner = Scanner::new(rules, vec![]);
         let issues = scanner.scan("軟件, 好用.").issues;
         assert_eq!(issues.len(), 3);
@@ -800,7 +676,7 @@
         assert!(issues[1].offset < issues[2].offset);
     }
 
-    // -- Markdown exclusion tests (pulldown-cmark handles both plain & md) -----
+    // -- Markdown exclusion tests (pulldown-cmark handles both plain & md)
 
     #[test]
     fn markdown_code_block_excluded() {
@@ -837,8 +713,8 @@
     #[test]
     fn markdown_frontmatter_values_are_scanned() {
         // Frontmatter VALUES are now scanned (key+colon and `---` fences are
-        // still excluded).  This catches lint issues in title/description
-        // that were previously hidden.
+        // still excluded). This catches lint issues in title/description that
+        // were previously hidden.
         let scanner = Scanner::new(sample_spelling_rules(), vec![]);
         let md = "---\ntitle: 軟件測試\n---\n這是正文\n";
         let issues = scanner
@@ -851,8 +727,8 @@
 
     #[test]
     fn markdown_table_cell_coordinates_attached() {
-        // Issues inside a Markdown table cell get (row, col) coordinates
-        // for editor integration / SARIF region output.
+        // Issues inside a Markdown table cell get (row, col) coordinates for
+        // editor integration / SARIF region output.
         let scanner = Scanner::new(sample_spelling_rules(), vec![]);
         let md = "| 標題 A | 標題 B |\n|---|---|\n| 正文 | 軟件 |\n";
         let issues = scanner
@@ -865,7 +741,9 @@
         let cell = cell_issue
             .table_cell
             .expect("issue inside table cell should have table_cell metadata");
-        // The body row is row index 1 (header is 0).  Column 1 is the second cell.
+
+        // The body row is row index 1 (header is 0). Column 1 is the second
+        // cell.
         assert_eq!(cell.row, 1, "expected body row 1, got {cell:?}");
         assert_eq!(cell.col, 1, "expected column 1, got {cell:?}");
     }
@@ -873,8 +751,8 @@
     #[test]
     fn heading_boost_preserves_sort_contract() {
         // cubic review: mutating severity post-sort can leave issues out of
-        // (offset asc, severity desc) order.  Ensure the output remains
-        // sorted after the heading boost promotes Warning → Error.
+        // (offset asc, severity desc) order. Ensure the output remains sorted
+        // after the heading boost promotes Warning → Error.
         let scanner = Scanner::new(sample_spelling_rules(), vec![]);
         let md = "# 軟件與硬盤管理\n\n軟件是正文的一部分。\n";
         let issues = scanner
@@ -921,7 +799,7 @@
     #[test]
     fn markdown_url_still_excluded() {
         // CJK text inside a URL path (IRI) is excluded; prose after the URL is
-        // still scanned.  [^\s「」『』《》]+ allows Unicode path segments but
+        // still scanned. [^\s「」『』《》]+ allows Unicode path segments but
         // stops at the six CJK quote/bracket characters.
         let scanner = Scanner::new(sample_spelling_rules(), vec![]);
         let md = "看 https://example.com/軟件/path 的資料\n";
@@ -939,6 +817,7 @@
         // Code block must start on its own line for pulldown-cmark.
         let md = "這個軟件, `內存` 問題\n\n```\n服務器\n```\n\n都有問題.\n";
         let issues = scanner.scan(md).issues;
+
         // "軟件" in plain text flagged; "內存" in inline code excluded;
         // "服務器" in code block excluded; comma and period flagged.
         let found: Vec<&str> = issues.iter().map(|i| i.found.as_str()).collect();
@@ -1247,38 +1126,11 @@
 
     #[test]
     fn quotes_converted_to_corner_brackets() {
-        // Quote conversion uses curly quotes (\u{201c}/\u{201d}) via spelling rules.
+        // Quote conversion uses curly quotes (\u{201c}/\u{201d}) via spelling
+        // rules.
         let rules = vec![
-            SpellingRule {
-                from: "\u{201c}".into(),
-                to: vec!["\u{300c}".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
-                english: None,
-                context_clues: None,
-                negative_context_clues: None,
-                exceptions: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
-            },
-            SpellingRule {
-                from: "\u{201d}".into(),
-                to: vec!["\u{300d}".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
-                english: None,
-                context_clues: None,
-                negative_context_clues: None,
-                exceptions: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
-            },
+            SpellingRule::new("\u{201c}", vec!["\u{300c}".into()], RuleType::CrossStrait),
+            SpellingRule::new("\u{201d}", vec!["\u{300d}".into()], RuleType::CrossStrait),
         ];
         let scanner = Scanner::new(rules, vec![]);
         let issues = scanner.scan("他說\u{201c}你好\u{201d}").issues;
@@ -1289,38 +1141,11 @@
 
     #[test]
     fn nested_quotes_use_secondary_brackets() {
-        // Outer: curly double quotes → 「」; inner: same quotes → 『』 (depth 1).
+        // Outer: curly double quotes → 「」; inner: same quotes → 『』 (depth
+        // 1).
         let rules = vec![
-            SpellingRule {
-                from: "\u{201c}".into(),
-                to: vec!["\u{300c}".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
-                english: None,
-                context_clues: None,
-                negative_context_clues: None,
-                exceptions: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
-            },
-            SpellingRule {
-                from: "\u{201d}".into(),
-                to: vec!["\u{300d}".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
-                english: None,
-                context_clues: None,
-                negative_context_clues: None,
-                exceptions: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
-            },
+            SpellingRule::new("\u{201c}", vec!["\u{300c}".into()], RuleType::CrossStrait),
+            SpellingRule::new("\u{201d}", vec!["\u{300d}".into()], RuleType::CrossStrait),
         ];
         let scanner = Scanner::new(rules, vec![]);
         // Nested: "outer "inner" outer"
@@ -1337,36 +1162,8 @@
     #[test]
     fn quotes_paragraph_break_resets_depth() {
         let rules = vec![
-            SpellingRule {
-                from: "\u{201c}".into(),
-                to: vec!["\u{300c}".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
-                english: None,
-                context_clues: None,
-                negative_context_clues: None,
-                exceptions: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
-            },
-            SpellingRule {
-                from: "\u{201d}".into(),
-                to: vec!["\u{300d}".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
-                english: None,
-                context_clues: None,
-                negative_context_clues: None,
-                exceptions: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
-            },
+            SpellingRule::new("\u{201c}", vec!["\u{300c}".into()], RuleType::CrossStrait),
+            SpellingRule::new("\u{201d}", vec!["\u{300d}".into()], RuleType::CrossStrait),
         ];
         let scanner = Scanner::new(rules, vec![]);
         // Unmatched open in first paragraph; paragraph break resets depth.
@@ -1460,8 +1257,8 @@
 
     #[test]
     fn cn_curly_single_quote_skip_english_apostrophe() {
-        // U+2019 is the standard typographic apostrophe in English.
-        // "it's", "don't" must NOT be flagged.
+        // U+2019 is the standard typographic apostrophe in English. "it's",
+        // "don't" must NOT be flagged.
         let scanner = Scanner::new(vec![], vec![]);
         let issues = scanner.scan("It\u{2019}s a test, don\u{2019}t worry.").issues;
         let quote_issues: Vec<_> = issues
@@ -1488,7 +1285,7 @@
     #[test]
     fn cn_curly_single_quote_skip_possessive_near_cjk() {
         // "Python's 語法" — the 's is an English possessive, NOT a CN quote,
-        // even though CJK text is nearby.  The ASCII letter guard must fire.
+        // even though CJK text is nearby. The ASCII letter guard must fire.
         let scanner = Scanner::new(vec![], vec![]);
         let issues = scanner.scan("Python\u{2019}s 語法").issues;
         let quote_issues: Vec<_> = issues
@@ -1530,9 +1327,9 @@
 
     #[test]
     fn char_based_ok_respects_paragraph_breaks() {
-        // Paragraph 1 has an unmatched open quote.  Paragraph 2 has a valid pair.
-        // The char_based_ok trial should reset at \n\n so paragraph 2 uses
-        // character-based mode (not positional fallback).
+        // Paragraph 1 has an unmatched open quote. Paragraph 2 has a valid
+        // pair. The char_based_ok trial should reset at \n\n so paragraph 2
+        // uses character-based mode (not positional fallback).
         let scanner = Scanner::new(vec![], vec![]);
         let text = "他說\u{201c}你好\n\n她說\u{201c}再見\u{201d}";
         let issues = scanner.scan(text).issues;
@@ -1615,36 +1412,13 @@
     // Character variant normalization
 
     fn variant_rule(from: &str, to: &str) -> SpellingRule {
-        SpellingRule {
-            from: from.into(),
-            to: vec![to.into()],
-            rule_type: RuleType::Variant,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }
+        SpellingRule::new(from, vec![to.into()], RuleType::Variant)
     }
 
     fn variant_rule_with_exceptions(from: &str, to: &str, exceptions: Vec<&str>) -> SpellingRule {
         SpellingRule {
-            from: from.into(),
-            to: vec![to.into()],
-            rule_type: RuleType::Variant,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
             exceptions: Some(exceptions.into_iter().map(String::from).collect()),
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new(from, vec![to.into()], RuleType::Variant)
         }
     }
 
@@ -1708,9 +1482,9 @@
 
     #[test]
     fn variant_exception_skips_phrase() {
-        // Rule: 着→著, but skip when inside "下着棋" (chess context).
-        // Include enough traditional-exclusive chars (國際學術) so text is
-        // detected as Traditional Chinese (variant rules skip Simplified).
+        // Rule: 着→著, but skip when inside "下着棋" (chess context). Include
+        // enough traditional-exclusive chars (國際學術) so text is detected as
+        // Traditional Chinese (variant rules skip Simplified).
         let rules = vec![variant_rule_with_exceptions("着", "著", vec!["下着棋"])];
         let scanner = Scanner::new(rules, vec![]);
         let text = "國際學術比賽中他下着棋，觀眾看着他";
@@ -1756,8 +1530,8 @@
 
     #[test]
     fn tai_exception_pingtai_not_flagged() {
-        // Phrase-level matching: only "台灣", "台北" etc. are patterns.
-        // "平台" does not match any variant rule, so it's never flagged.
+        // Phrase-level matching: only "台灣", "台北" etc. are patterns. "平台"
+        // does not match any variant rule, so it's never flagged.
         let rules = vec![variant_rule("台灣", "臺灣"), variant_rule("台北", "臺北")];
         let scanner = Scanner::new(rules, vec![]);
         let text = "這個平台很好用，台灣也有很多使用者";
@@ -1784,21 +1558,7 @@
     #[test]
     fn profile_strict_catches_variants_base_does_not() {
         let rules = vec![
-            SpellingRule {
-                from: "軟件".into(),
-                to: vec!["軟體".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
-                english: None,
-                context_clues: None,
-                negative_context_clues: None,
-                exceptions: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
-            },
+            SpellingRule::new("軟件", vec!["軟體".into()], RuleType::CrossStrait),
             variant_rule("裏", "裡"),
         ];
         let scanner = Scanner::new(rules, vec![]);
@@ -1971,7 +1731,8 @@
 
     #[test]
     fn toc_dot_leader_not_flagged() {
-        // 第一章........1 — dot leader before page number; must not fire ellipsis rule.
+        // 第一章........1 — dot leader before page number; must not fire
+        // ellipsis rule.
         let scanner = empty_scanner();
         assert!(
             scanner.scan("第一章........1").issues.is_empty(),
@@ -2139,8 +1900,8 @@
     fn quote_hierarchy_book_title_url_balanced() {
         // 《[title](url)》 — with the old \S+ URL regex the 》 was swallowed
         // into the excluded zone, causing a spurious "unclosed 《" diagnostic.
-        // The fix is RE_URL using [^\s「」『』《》]+, which stops before 》
-        // so the quote checker sees a balanced pair.
+        // The fix is RE_URL using [^\s「」『』《》]+, which stops before 》 so
+        // the quote checker sees a balanced pair.
         let scanner = empty_scanner();
         let issues = scanner
             .scan_profiled_md(
@@ -2229,9 +1990,7 @@
         );
     }
 
-    // -----------------------------------------------------------------------
     // Markdown false-positive guards: image syntax and bullet lists
-    // -----------------------------------------------------------------------
 
     #[test]
     fn markdown_image_exclamation_not_flagged() {
@@ -2248,7 +2007,8 @@
 
     #[test]
     fn markdown_bullet_dash_not_flagged() {
-        // - 項目 at line start is a Markdown list bullet, not a range indicator.
+        // - 項目 at line start is a Markdown list bullet, not a range
+        // indicator.
         let scanner = Scanner::new(vec![], vec![]);
         let md = "清單如下：\n\n- 第一項\n- 第二項\n- 第三項\n";
         let issues = scanner
@@ -2292,19 +2052,9 @@
     fn negative_clues_veto_fires_when_clue_present() {
         // Rule fires normally without a negative clue in the window.
         let rules = vec![SpellingRule {
-            from: "項目".into(),
-            to: vec!["專案".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: Some(vec!["的".into(), "等".into()]),
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }];
+    negative_context_clues: Some(vec!["的".into(), "等".into()]),
+    ..SpellingRule::new("項目", vec!["專案".into()], RuleType::CrossStrait)
+}];
         let scanner = Scanner::new(rules.clone(), vec![]);
 
         // No negative clue nearby → issue is emitted.
@@ -2328,19 +2078,9 @@
     fn negative_clues_do_not_block_when_absent() {
         // When none of the negative clues appear, the rule fires as normal.
         let rules = vec![SpellingRule {
-            from: "軟件".into(),
-            to: vec!["軟體".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: Some(vec!["獨家".into()]),
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }];
+    negative_context_clues: Some(vec!["獨家".into()]),
+    ..SpellingRule::new("軟件", vec!["軟體".into()], RuleType::CrossStrait)
+}];
         let scanner = Scanner::new(rules, vec![]);
         let issues = scanner.scan("這個軟件很好用").issues;
         assert_eq!(
@@ -2354,13 +2094,13 @@
 
     #[test]
     fn window_bounded_stops_at_code_block_boundary() {
-        // Layout: "項目 \n\n代碼\n\n 文字"
-        //  "項" = bytes 0-2, "目" = bytes 3-5 → match end = 6
-        //  "\n代碼\n" spans bytes 8-21 (fenced code block)
-        //  "代碼" is at bytes 12-17 (inside the code block)
+        // Layout: "項目 \n\n代碼\n\n 文字" "項" = bytes 0-2, "目" = bytes 3-5 →
+        // match end = 6 "\n代碼\n" spans bytes 8-21 (fenced code block) "代碼"
+        // is at bytes 12-17 (inside the code block)
         //
         // The bounded window must stop at byte 8 and therefore must NOT include
-        // "代碼".  The unbounded window reaches bytes 8-21+ and would include it.
+        // "代碼". The unbounded window reaches bytes 8-21+ and would include
+        // it.
         use crate::engine::excluded::ByteRange;
         let text = "項目 \n```\n代碼\n```\n 文字";
         let code_block = ByteRange { start: 8, end: 22 };
@@ -2371,7 +2111,9 @@
             "bounded window should not include text inside excluded code block, got: {:?}",
             window
         );
-        // Confirm the unbounded window does include it (showing the bug is real).
+
+        // Confirm the unbounded window does include it (showing the bug is
+        // real).
         let unbounded = surrounding_window(text, 0, 6);
         assert!(
             unbounded.contains("代碼"),
@@ -2382,9 +2124,9 @@
     #[test]
     fn window_bounded_empty_text_no_panic() {
         // surrounding_window() returned the static literal "" for empty input,
-        // causing pointer-arithmetic UB in surrounding_window_bounded().
-        // After fix, surrounding_window() returns &text[0..0] (a proper subslice)
-        // so pointer subtraction is always valid.
+        // causing pointer-arithmetic UB in surrounding_window_bounded(). After
+        // fix, surrounding_window() returns &text[0..0] (a proper subslice) so
+        // pointer subtraction is always valid.
         use crate::engine::excluded::ByteRange;
         // Even with a non-empty excluded list the function must not panic.
         let result = surrounding_window_bounded("", 0, 0, &[ByteRange { start: 0, end: 0 }]);
@@ -2394,11 +2136,11 @@
     #[test]
     fn window_bounded_inward_snap_does_not_expand_past_excluded() {
         // If clamped_start/end fall in the middle of a multi-byte char, inward
-        // snapping (ceil/floor) must not re-include the excluded region.
-        // Use a 3-byte CJK char "中" at bytes 3..6, excluded as [3..6].
-        // Match is at bytes 0..3 ("台").
-        // The right edge of the window would normally extend past byte 3, but
-        // the exclusion clamps it to 3. Ceil of 3 is still 3 (already on boundary).
+        // snapping (ceil/floor) must not re-include the excluded region. Use a
+        // 3-byte CJK char "中" at bytes 3..6, excluded as [3..6]. Match is at
+        // bytes 0..3 ("台"). The right edge of the window would normally extend
+        // past byte 3, but the exclusion clamps it to 3. Ceil of 3 is still 3
+        // (already on boundary).
         use crate::engine::excluded::ByteRange;
         let text = "台中南";
         assert_eq!(text.len(), 9); // 3 bytes per CJK char

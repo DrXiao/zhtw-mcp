@@ -909,7 +909,7 @@ impl Scanner {
 
     /// Inflate deferred spelling issues (for benchmarking).
     pub fn bench_inflate(&self, text: &str, issues: &mut [Issue]) {
-        rule_ir::inflate_spelling_issues(&self.spelling_db, text, issues);
+        rule_ir::inflate_spelling_issues(&self.spelling_db, text, &[], issues);
     }
 
     /// Build a scanner from loaded rules.
@@ -949,13 +949,13 @@ impl Scanner {
         // excluded from the AC automaton.
         let segmenter = Segmenter::from_rules(&spelling_rules);
 
-        let spelling_db = match rule_ir::compile_spelling_rules_filtered(spelling_rules, filter) {
-            Ok(db) => db,
-            Err(e) => {
-                tracing::warn!("spelling rule compilation failed: {e}");
-                rule_ir::CompiledSpellingDb::empty()
-            }
-        };
+        // Infallible: every automaton build inside logs and falls back to a
+        // working alternative rather than propagating. This used to be a match
+        // with an Err arm that substituted an empty database, which could never
+        // fire and would have been the wrong recovery if it had: a scanner with
+        // no spelling rules reports nothing, so the failure would have surfaced
+        // as a clean bill of health.
+        let spelling_db = rule_ir::compile_spelling_rules_filtered(spelling_rules, filter);
 
         let case_patterns: Vec<String> = case_rules.iter().map(|r| r.term.to_lowercase()).collect();
 
@@ -1390,9 +1390,9 @@ impl Scanner {
         };
 
         if cfg.offset_only {
-            rule_ir::inflate_spelling_issues_compact(&self.spelling_db, text, issues);
+            rule_ir::inflate_spelling_issues_compact(&self.spelling_db, text, excluded, issues);
         } else {
-            rule_ir::inflate_spelling_issues(&self.spelling_db, text, issues);
+            rule_ir::inflate_spelling_issues(&self.spelling_db, text, excluded, issues);
         }
 
         // Grammar checks run AFTER overlap resolution so broad grammar spans
@@ -1977,22 +1977,166 @@ mod tests {
         assert_eq!(spelling[1].found, "CPU使用率");
     }
 
+    /// Build a one-rule scanner whose rule carries context-selected groups.
+    fn context_suggestion_scanner(
+        groups: Option<Vec<crate::rules::ruleset::ContextSuggestion>>,
+    ) -> Scanner {
+        let rules = vec![SpellingRule {
+            context_suggestions: groups,
+            ..SpellingRule::new("優化", vec!["最佳化".into()], RuleType::CrossStrait)
+        }];
+        Scanner::new(rules, vec![])
+    }
+
+    fn only_suggestions(scanner: &Scanner, text: &str) -> Vec<String> {
+        let issues = scanner.scan_profiled(text, Profile::Base).issues;
+        assert_eq!(issues.len(), 1, "expected exactly one issue for {text:?}");
+        issues[0].suggestions.to_vec()
+    }
+
+    #[test]
+    fn context_suggestions_select_by_window() {
+        use crate::rules::ruleset::ContextSuggestion;
+        let scanner = context_suggestion_scanner(Some(vec![ContextSuggestion {
+            clues: vec!["流程".into(), "服務".into()],
+            to: vec!["改善".into(), "提升".into()],
+        }]));
+
+        // A clue in the window swaps the whole replacement set.
+        assert_eq!(only_suggestions(&scanner, "優化流程"), ["改善", "提升"]);
+        // Clue before the match counts too: the window spans both sides.
+        assert_eq!(only_suggestions(&scanner, "服務要優化"), ["改善", "提升"]);
+        // No clue nearby falls back to the rule default.
+        assert_eq!(only_suggestions(&scanner, "優化演算法"), ["最佳化"]);
+    }
+
+    #[test]
+    fn context_suggestions_first_matching_group_wins() {
+        use crate::rules::ruleset::ContextSuggestion;
+        // Both groups match "流程效能"; ruleset order decides.
+        let scanner = context_suggestion_scanner(Some(vec![
+            ContextSuggestion {
+                clues: vec!["流程".into()],
+                to: vec!["改善".into()],
+            },
+            ContextSuggestion {
+                clues: vec!["效能".into()],
+                to: vec!["最佳化".into()],
+            },
+        ]));
+        assert_eq!(only_suggestions(&scanner, "優化流程效能"), ["改善"]);
+    }
+
+    #[test]
+    fn context_suggestions_drop_unusable_groups() {
+        use crate::rules::ruleset::ContextSuggestion;
+
+        // An empty clue list can never select and an empty replacement list
+        // would erase the default, so both are dropped at compile time and the
+        // rule behaves as if it had no groups at all. A list holding an empty
+        // string is the same case: the empty string is the deletion sentinel,
+        // so keeping it would turn a substitution into a deletion.
+        //
+        // The last group is the one that matters. Filtering the empty entry out
+        // and keeping "改善" would leave a one-entry group, and one entry is
+        // auto-fixable, so a malformed group would quietly gain the write
+        // permission the author's two candidates were meant to deny. Drop the
+        // group instead of repairing it.
+        let scanner = context_suggestion_scanner(Some(vec![
+            ContextSuggestion {
+                clues: vec![],
+                to: vec!["改善".into()],
+            },
+            ContextSuggestion {
+                clues: vec!["流程".into()],
+                to: vec![],
+            },
+            ContextSuggestion {
+                clues: vec!["服務".into()],
+                to: vec![String::new()],
+            },
+            ContextSuggestion {
+                clues: vec!["品質".into()],
+                to: vec!["改善".into(), String::new()],
+            },
+            // An empty clue is the dangerous one: "window.contains(\"\")" is
+            // true for every window, so a single stray entry makes the group
+            // the answer for every match of the rule, anywhere, with no clue
+            // present at all. Dropped like the rest.
+            ContextSuggestion {
+                clues: vec![String::new()],
+                to: vec!["永遠".into()],
+            },
+        ]));
+        assert_eq!(only_suggestions(&scanner, "優化流程"), ["最佳化"]);
+        assert_eq!(only_suggestions(&scanner, "優化服務"), ["最佳化"]);
+        assert_eq!(only_suggestions(&scanner, "優化品質"), ["最佳化"]);
+        assert_eq!(
+            only_suggestions(&scanner, "完全無關的內容優化在這裡"),
+            ["最佳化"]
+        );
+        assert!(scanner
+            .spelling_db
+            .spelling_context_suggestions
+            .iter()
+            .all(Option::is_none));
+    }
+
+    #[test]
+    fn context_suggestions_dropped_on_deletion_rules() {
+        use crate::rules::ruleset::ContextSuggestion;
+
+        // Inflation derives the reported span from the rule's own "to": for a
+        // deletion rule it uses from.len() so the user sees the phrase to
+        // delete rather than any punctuation the span absorbed. A group
+        // offering a real replacement would therefore report a span shorter
+        // than the one it rewrites, so the combination is refused.
+        let rules = vec![SpellingRule {
+            context_suggestions: Some(vec![ContextSuggestion {
+                clues: vec!["流程".into()],
+                to: vec!["請注意".into()],
+            }]),
+            ..SpellingRule::new("值得注意的是", vec![String::new()], RuleType::AiFiller)
+        }];
+        let scanner = Scanner::new(rules, vec![]);
+        assert!(scanner
+            .spelling_db
+            .spelling_context_suggestions
+            .iter()
+            .all(Option::is_none));
+    }
+
+    #[test]
+    fn context_suggestions_stop_at_paragraph_breaks() {
+        use crate::rules::ruleset::ContextSuggestion;
+
+        // The selection window is the clue gate's window, which stops at a
+        // paragraph break. Without that clamp a heading or an adjacent
+        // paragraph within 40 chars silently swaps the replacement set, and
+        // because the business group carries two entries it also disables
+        // auto-fix for a match that is squarely in the IT sense.
+        let scanner = context_suggestion_scanner(Some(vec![ContextSuggestion {
+            clues: vec!["流程".into()],
+            to: vec!["改善".into(), "提升".into()],
+        }]));
+
+        assert_eq!(
+            only_suggestions(&scanner, "我們要優化演算法。\n\n流程改造報告"),
+            ["最佳化"]
+        );
+        // Same clue, same distance, no break: the group still selects.
+        assert_eq!(
+            only_suggestions(&scanner, "我們要優化演算法。流程改造報告"),
+            ["改善", "提升"]
+        );
+    }
+
     #[test]
     fn charwise_exception_phrase_respected() {
         // Exception phrases must work identically on both AC paths.
         let rules = vec![SpellingRule {
-            from: "著".into(),
-            to: vec!["著".into()],
-            rule_type: RuleType::Variant,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
             exceptions: Some(vec!["下著".into()]),
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new("著", vec!["著".into()], RuleType::Variant)
         }];
         let scanner = Scanner::new(rules, vec![]);
         assert!(scanner.spelling_db.ac_charwise.is_some());
@@ -2009,18 +2153,8 @@ mod tests {
     fn charwise_context_clues_gate() {
         // Context clues must gate correctly on the charwise path.
         let rules = vec![SpellingRule {
-            from: "支持".into(),
-            to: vec!["支援".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
             context_clues: Some(vec!["程式".into(), "軟體".into()]),
-            negative_context_clues: None,
-            exceptions: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new("支持", vec!["支援".into()], RuleType::CrossStrait)
         }];
         let scanner = Scanner::new(rules, vec![]);
         assert!(scanner.spelling_db.ac_charwise.is_some());
@@ -2042,18 +2176,8 @@ mod tests {
     fn charwise_negative_clues_veto() {
         // Negative context clues must veto correctly on the charwise path.
         let rules = vec![SpellingRule {
-            from: "卸載".into(),
-            to: vec!["解除安裝".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
             negative_context_clues: Some(vec!["掛載".into(), "mount".into()]),
-            exceptions: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new("卸載", vec!["解除安裝".into()], RuleType::CrossStrait)
         }];
         let scanner = Scanner::new(rules, vec![]);
         assert!(scanner.spelling_db.ac_charwise.is_some());
@@ -2176,18 +2300,8 @@ mod tests {
     fn positional_before_fires_when_term_follows() {
         // before:函式 means 函式 must appear within 20 chars AFTER the match.
         let rules = vec![SpellingRule {
-            from: "調用".into(),
-            to: vec!["呼叫".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
             positional_clues: Some(vec!["before:函式".into()]),
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new("調用", vec!["呼叫".into()], RuleType::CrossStrait)
         }];
         let scanner = Scanner::new(rules, vec![]);
 
@@ -2208,18 +2322,8 @@ mod tests {
     fn positional_after_fires_when_term_precedes() {
         // after:請 means 請 must appear within 20 chars BEFORE the match.
         let rules = vec![SpellingRule {
-            from: "調用".into(),
-            to: vec!["呼叫".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
             positional_clues: Some(vec!["after:請".into()]),
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new("調用", vec!["呼叫".into()], RuleType::CrossStrait)
         }];
         let scanner = Scanner::new(rules, vec![]);
 
@@ -2239,18 +2343,8 @@ mod tests {
     fn positional_adjacent_fires_when_immediately_next() {
         // adjacent:函式 means 函式 must be immediately adjacent (no gap).
         let rules = vec![SpellingRule {
-            from: "調用".into(),
-            to: vec!["呼叫".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
             positional_clues: Some(vec!["adjacent:函式".into()]),
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new("調用", vec!["呼叫".into()], RuleType::CrossStrait)
         }];
         let scanner = Scanner::new(rules, vec![]);
 
@@ -2283,18 +2377,8 @@ mod tests {
     fn positional_not_before_vetoes() {
         // not_before:的 means 的 must NOT appear within 20 chars after.
         let rules = vec![SpellingRule {
-            from: "項目".into(),
-            to: vec!["專案".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
             positional_clues: Some(vec!["not_before:的".into()]),
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new("項目", vec!["專案".into()], RuleType::CrossStrait)
         }];
         let scanner = Scanner::new(rules, vec![]);
 
@@ -2314,18 +2398,8 @@ mod tests {
     fn positional_not_after_vetoes() {
         // not_after:清單 means 清單 must NOT appear within 20 chars before.
         let rules = vec![SpellingRule {
-            from: "項目".into(),
-            to: vec!["專案".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
             positional_clues: Some(vec!["not_after:清單".into()]),
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new("項目", vec!["專案".into()], RuleType::CrossStrait)
         }];
         let scanner = Scanner::new(rules, vec![]);
 
@@ -2345,18 +2419,9 @@ mod tests {
     fn positional_and_context_clues_both_required() {
         // Rule has both context_clues and positional_clues.  Both must pass.
         let rules = vec![SpellingRule {
-            from: "調用".into(),
-            to: vec!["呼叫".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
             context_clues: Some(vec!["程式".into()]),
-            negative_context_clues: None,
-            exceptions: None,
             positional_clues: Some(vec!["before:函式".into()]),
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new("調用", vec!["呼叫".into()], RuleType::CrossStrait)
         }];
         let scanner = Scanner::new(rules, vec![]);
 
@@ -2387,18 +2452,8 @@ mod tests {
     fn positional_multiple_conditions_all_must_pass() {
         // Multiple positional conditions: all must pass (AND).
         let rules = vec![SpellingRule {
-            from: "調用".into(),
-            to: vec!["呼叫".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
             positional_clues: Some(vec!["after:請".into(), "before:函式".into()]),
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new("調用", vec!["呼叫".into()], RuleType::CrossStrait)
         }];
         let scanner = Scanner::new(rules, vec![]);
 
@@ -2427,20 +2482,11 @@ mod tests {
     #[test]
     fn positional_no_regression_without_positional_clues() {
         // Rules without positional_clues should behave exactly as before.
-        let rules = vec![SpellingRule {
-            from: "軟件".into(),
-            to: vec!["軟體".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }];
+        let rules = vec![SpellingRule::new(
+            "軟件",
+            vec!["軟體".into()],
+            RuleType::CrossStrait,
+        )];
         let scanner = Scanner::new(rules, vec![]);
         let issues = scanner.scan("這個軟件很好用").issues;
         assert_eq!(issues.len(), 1);
@@ -2451,18 +2497,8 @@ mod tests {
     fn positional_before_stops_at_paragraph_break() {
         // before:函式 should NOT match across a paragraph boundary.
         let rules = vec![SpellingRule {
-            from: "調用".into(),
-            to: vec!["呼叫".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
             positional_clues: Some(vec!["before:函式".into()]),
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new("調用", vec!["呼叫".into()], RuleType::CrossStrait)
         }];
         let scanner = Scanner::new(rules, vec![]);
 
@@ -2482,18 +2518,8 @@ mod tests {
     fn positional_after_stops_at_paragraph_break() {
         // after:請 should NOT match across a paragraph boundary.
         let rules = vec![SpellingRule {
-            from: "調用".into(),
-            to: vec!["呼叫".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
             positional_clues: Some(vec!["after:請".into()]),
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new("調用", vec!["呼叫".into()], RuleType::CrossStrait)
         }];
         let scanner = Scanner::new(rules, vec![]);
 
@@ -2509,18 +2535,8 @@ mod tests {
     fn positional_before_stops_at_code_span() {
         // In Markdown, before:函式 should NOT match text inside a code span.
         let rules = vec![SpellingRule {
-            from: "調用".into(),
-            to: vec!["呼叫".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
             positional_clues: Some(vec!["before:函式".into()]),
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new("調用", vec!["呼叫".into()], RuleType::CrossStrait)
         }];
         let scanner = Scanner::new(rules, vec![]);
 
@@ -2551,18 +2567,8 @@ mod tests {
     fn positional_adjacent_excluded_region() {
         // adjacent:函式 should NOT match if 函式 is inside an excluded region.
         let rules = vec![SpellingRule {
-            from: "調用".into(),
-            to: vec!["呼叫".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            context_clues: None,
-            negative_context_clues: None,
-            exceptions: None,
             positional_clues: Some(vec!["adjacent:函式".into()]),
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new("調用", vec!["呼叫".into()], RuleType::CrossStrait)
         }];
         let scanner = Scanner::new(rules, vec![]);
 

@@ -1,49 +1,29 @@
 // Scanner integration tests.
 //
-// Each test constructs a Scanner with specific rules and verifies that
-// scanning produces the expected issues for traditional/simplified filtering,
-// code block exclusion, URL/path exclusion, @mention exclusion, case rules,
-// punctuation normalization, and alternatives handling.
+// Each test constructs a Scanner with specific rules and verifies that scanning
+// produces the expected issues for traditional/simplified filtering, code block
+// exclusion, URL/path exclusion, @mention exclusion, case rules, punctuation
+// normalization, and alternatives handling.
 
 use zhtw_mcp::engine::scan::{ContentType, Scanner};
 use zhtw_mcp::rules::ruleset::{CaseRule, Profile, RuleType, SpellingRule};
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 fn spelling(from: &str, to: &[&str]) -> SpellingRule {
-    SpellingRule {
-        from: from.into(),
-        to: to.iter().map(|s| s.to_string()).collect(),
-        rule_type: RuleType::CrossStrait,
-        disabled: false,
-        context: None,
-        english: None,
-        exceptions: None,
-        context_clues: None,
-        negative_context_clues: None,
-        positional_clues: None,
-        tags: None,
-        editorial_confidence: None,
-    }
+    SpellingRule::new(
+        from,
+        to.iter().map(|s| s.to_string()).collect(),
+        RuleType::CrossStrait,
+    )
 }
 
 fn variant(from: &str, to: &[&str]) -> SpellingRule {
-    SpellingRule {
-        from: from.into(),
-        to: to.iter().map(|s| s.to_string()).collect(),
-        rule_type: RuleType::Variant,
-        disabled: false,
-        context: None,
-        english: None,
-        exceptions: None,
-        context_clues: None,
-        negative_context_clues: None,
-        positional_clues: None,
-        tags: None,
-        editorial_confidence: None,
-    }
+    SpellingRule::new(
+        from,
+        to.iter().map(|s| s.to_string()).collect(),
+        RuleType::Variant,
+    )
 }
 
 fn case_rule(term: &str, alternatives: Option<&[&str]>) -> CaseRule {
@@ -54,9 +34,7 @@ fn case_rule(term: &str, alternatives: Option<&[&str]>) -> CaseRule {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Traditional/Simplified filtering (4 tests)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn traditional_rule_applies_to_traditional_text() {
@@ -92,9 +70,7 @@ fn non_traditional_rule_applies_to_simplified_text() {
     assert_eq!(issues.len(), 1);
 }
 
-// ---------------------------------------------------------------------------
 // Code block exclusion — spelling rules (5 tests)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn single_backtick_code_excluded() {
@@ -116,7 +92,8 @@ fn triple_backtick_with_lang_excluded() {
 
 #[test]
 fn triple_backtick_with_other_tag_excluded() {
-    // Should ignore errors inside triple-backtick code fence with extra attributes.
+    // Should ignore errors inside triple-backtick code fence with extra
+    // attributes.
     let scanner = Scanner::new(vec![spelling("錯誤", &["正確"])], vec![]);
     let issues = scanner
         .scan("這是程式碼：\n```javascript line=5\n錯誤\n```\n的文字")
@@ -141,9 +118,7 @@ fn error_outside_code_block_detected() {
     assert_eq!(issues[0].found, "錯誤");
 }
 
-// ---------------------------------------------------------------------------
 // Markdown handling (5 tests)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn markdown_link_text_checked() {
@@ -159,9 +134,9 @@ fn markdown_link_text_checked() {
 
 #[test]
 fn markdown_link_url_not_excluded_for_spelling() {
-    // Non-URL text inside Markdown link parens is still checked.
-    // Note: the URL part of a markdown link is excluded as a URL, but
-    // non-URL text inside parens is still checked.
+    // Non-URL text inside Markdown link parens is still checked. Note: the URL
+    // part of a markdown link is excluded as a URL, but non-URL text inside
+    // parens is still checked.
     let scanner = Scanner::new(vec![spelling("錯誤", &["正確"])], vec![]);
     let issues = scanner.scan("這是 [hi](錯誤) 的文字").issues;
     assert_eq!(issues.len(), 1);
@@ -187,23 +162,23 @@ fn empty_autolink_no_crash() {
 
 #[test]
 fn multiple_excluded_blocks_only_outside_detected() {
-    // Should handle multiple exclusion zones correctly.
-    // `錯誤` is in code block, [錯誤](url) — "錯誤" in link text is NOT in URL,
-    // <http://錯誤> is in URL. Only the bare 錯誤 at the end is detected.
+    // Should handle multiple exclusion zones correctly. `錯誤` is in code
+    // block, [錯誤](url) — "錯誤" in link text is NOT in URL, <http://錯誤> is
+    // in URL. Only the bare 錯誤 at the end is detected.
     let scanner = Scanner::new(vec![spelling("錯誤", &["正確"])], vec![]);
     let text = "`錯誤` [錯誤](url) <http://錯誤> 這裡有錯誤";
     let issues = scanner.scan(text).issues;
-    // The [錯誤] in link text is not excluded, and the trailing 錯誤 is not excluded.
-    // The `錯誤` in backticks and http://錯誤 in autolink ARE excluded.
-    // So we expect 2 issues: [錯誤] in link text and the trailing one.
+
+    // The [錯誤] in link text is not excluded, and the trailing 錯誤 is not
+    // excluded. The `錯誤` in backticks and http://錯誤 in autolink ARE
+    // excluded. So we expect 2 issues: [錯誤] in link text and the trailing
+    // one.
     assert!(!issues.is_empty());
     // At minimum the trailing bare 錯誤 must be found.
     assert!(issues.iter().any(|i| i.found == "錯誤"));
 }
 
-// ---------------------------------------------------------------------------
 // Code block exclusion — case rules (4 tests)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn case_error_in_code_block_excluded() {
@@ -272,9 +247,7 @@ fn http_case_in_url_inside_code_block_excluded() {
     assert_eq!(issues.len(), 0);
 }
 
-// ---------------------------------------------------------------------------
 // URL exclusion (5 tests)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn url_content_excluded_for_spelling() {
@@ -318,9 +291,7 @@ fn rtmp_url_excluded_for_case() {
     assert_eq!(issues.len(), 0);
 }
 
-// ---------------------------------------------------------------------------
 // Path exclusion (3 tests)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn relative_path_dot_slash_excluded_for_case() {
@@ -346,9 +317,7 @@ fn absolute_path_excluded_for_case() {
     assert_eq!(issues.len(), 0);
 }
 
-// ---------------------------------------------------------------------------
 // URL vs outside text (2 tests)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn text_outside_url_still_checked() {
@@ -385,9 +354,7 @@ fn url_in_markdown_link_excluded_for_case() {
     assert_eq!(issues.len(), 0);
 }
 
-// ---------------------------------------------------------------------------
 // @mention exclusion (6 tests)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn mention_excludes_spelling_error() {
@@ -444,9 +411,7 @@ fn mention_and_url_both_excluded() {
     assert_eq!(issues.len(), 0);
 }
 
-// ---------------------------------------------------------------------------
 // Case rule alternatives (9 tests)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn alternatives_accepted() {
@@ -550,9 +515,7 @@ fn alternatives_outside_code_block_flagged() {
     assert_eq!(issues[0].suggestions[..], vec!["JavaScript"]);
 }
 
-// ---------------------------------------------------------------------------
 // Multi-rule interaction (1 test)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn multiple_rules_each_respect_own_alternatives() {
@@ -576,9 +539,7 @@ fn multiple_rules_each_respect_own_alternatives() {
     assert_eq!(issues[0].suggestions[..], vec!["TypeScript"]);
 }
 
-// ---------------------------------------------------------------------------
 // Backtick nesting (2-6 backticks) — ported from loop test
-// ---------------------------------------------------------------------------
 
 #[test]
 fn double_backtick_excludes_case() {
@@ -615,14 +576,12 @@ fn sextuple_backtick_excludes_case() {
     assert_eq!(issues.len(), 0);
 }
 
-// ---------------------------------------------------------------------------
 // Empty double backtick edge case
-// ---------------------------------------------------------------------------
 
 #[test]
 fn empty_double_backtick_not_excluded() {
-    // Empty double backtick should not act as an exclusion barrier.
-    // `` with nothing matching is treated as empty inline code.
+    // Empty double backtick should not act as an exclusion barrier. `` with
+    // nothing matching is treated as empty inline code.
     let scanner = Scanner::new(vec![spelling("test", &["測試"])], vec![]);
     let issues = scanner.scan("這是 `` 然後這裡有 test 錯誤").issues;
     assert_eq!(issues.len(), 1);
@@ -630,9 +589,7 @@ fn empty_double_backtick_not_excluded() {
     assert_eq!(issues[0].suggestions[..], vec!["測試"]);
 }
 
-// ---------------------------------------------------------------------------
 // Punctuation normalization (half-width → full-width in CJK context)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn punct_comma_in_chinese_text() {
@@ -696,14 +653,14 @@ fn punct_english_text_untouched() {
 #[test]
 fn punct_decimal_number_untouched() {
     let scanner = Scanner::new(vec![], vec![]);
-    // Even in Chinese text, decimal numbers should not trigger period conversion.
+
+    // Even in Chinese text, decimal numbers should not trigger period
+    // conversion.
     let issues = scanner.scan("圓周率是 3.14 左右").issues;
     assert!(issues.is_empty());
 }
 
-// ---------------------------------------------------------------------------
 // Definition-list colon should not be flagged as half-width punctuation
-// ---------------------------------------------------------------------------
 
 #[test]
 fn punct_definition_list_colon_skipped() {
@@ -756,9 +713,7 @@ fn punct_colon_after_cjk_still_flagged() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Grammar scanner: integration through full Scanner pipeline
-// ---------------------------------------------------------------------------
 
 #[test]
 fn grammar_issues_coexist_with_spelling() {
@@ -792,8 +747,10 @@ fn grammar_issues_have_line_col() {
         .find(|i| i.rule_type == IssueType::Grammar);
     assert!(grammar.is_some(), "should produce grammar issue");
     let g = grammar.unwrap();
-    // 是不是 starts at byte 10 (第一行\n = 9+1 bytes, then 你 = 3 bytes → offset 13).
-    // Line should be 2 (1-based), col should be 2 (UTF-16: 你 is 1 code unit → col 2).
+
+    // 是不是 starts at byte 10 (第一行\n = 9+1 bytes, then 你 = 3 bytes →
+    // offset 13). Line should be 2 (1-based), col should be 2 (UTF-16: 你 is 1
+    // code unit → col 2).
     assert_eq!(g.line, 2, "grammar issue should be on line 2");
     assert_eq!(g.col, 2, "grammar issue should start at col 2 (after 你)");
 }
@@ -850,8 +807,8 @@ fn grammar_excluded_in_markdown_code_block() {
 #[test]
 fn grammar_deterministic_sort_order() {
     // 進行 triggers both dui_jinxing (對資料進行分析) and bureaucratic
-    // nominalization (進行分析) at overlapping offsets.  Verify grammar
-    // issues are sorted by offset (ascending), then by length (descending).
+    // nominalization (進行分析) at overlapping offsets. Verify grammar issues
+    // are sorted by offset (ascending), then by length (descending).
     use zhtw_mcp::rules::ruleset::IssueType;
     let scanner = Scanner::new(vec![], vec![]);
     let output = scanner.scan("對資料進行分析");
@@ -887,27 +844,16 @@ fn grammar_clean_text_produces_no_issues() {
     assert!(!has_grammar, "clean text should not trigger grammar checks");
 }
 
-// ---------------------------------------------------------------------------
 // AI writing detection (40.1)
-// ---------------------------------------------------------------------------
 
 use zhtw_mcp::rules::ruleset::IssueType;
 
 fn ai_filler_rule(from: &str, to: &[&str]) -> SpellingRule {
-    SpellingRule {
-        from: from.into(),
-        to: to.iter().map(|s| s.to_string()).collect(),
-        rule_type: RuleType::AiFiller,
-        disabled: false,
-        context: None,
-        english: None,
-        exceptions: None,
-        context_clues: None,
-        negative_context_clues: None,
-        positional_clues: None,
-        tags: None,
-        editorial_confidence: None,
-    }
+    SpellingRule::new(
+        from,
+        to.iter().map(|s| s.to_string()).collect(),
+        RuleType::AiFiller,
+    )
 }
 
 #[test]
