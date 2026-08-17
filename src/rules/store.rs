@@ -183,19 +183,8 @@ impl OverrideStore {
     /// Disable a spelling rule by writing a disabled override.
     pub fn disable_spelling_rule(&mut self, from_key: &str) -> Result<()> {
         let rule = SpellingRule {
-            from: from_key.into(),
-            to: vec![],
-            rule_type: super::ruleset::RuleType::CrossStrait,
-
             disabled: true,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new(from_key, vec![], super::ruleset::RuleType::CrossStrait)
         };
         self.upsert_spelling_override(&rule)
     }
@@ -633,14 +622,12 @@ impl TranslationMemoryStore {
     pub fn suppress_issues(&self, issues: &mut [Issue]) -> usize {
         let mut count = 0;
         for issue in issues {
-            let immune = matches!(
-                issue.rule_type,
-                IssueType::Punctuation
-                    | IssueType::Case
-                    | IssueType::Variant
-                    | IssueType::Grammar
-                    | IssueType::AiStyle
-            ) || crate::rules::glossary::is_glossary_banned(issue);
+            // Orthographic types plus AiStyle. Spelled through the shared
+            // predicate so a rule type added there cannot silently become
+            // TM-suppressible here.
+            let immune = issue.rule_type.is_orthographic()
+                || issue.rule_type == IssueType::AiStyle
+                || crate::rules::glossary::is_glossary_banned(issue);
             if immune {
                 continue;
             }
@@ -1084,36 +1071,8 @@ mod tests {
 
     fn sample_base_spelling() -> Vec<SpellingRule> {
         vec![
-            SpellingRule {
-                from: "軟件".into(),
-                to: vec!["軟體".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
-                english: None,
-                exceptions: None,
-                context_clues: None,
-                negative_context_clues: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
-            },
-            SpellingRule {
-                from: "內存".into(),
-                to: vec!["記憶體".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
-                english: None,
-                exceptions: None,
-                context_clues: None,
-                negative_context_clues: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
-            },
+            SpellingRule::new("軟件", vec!["軟體".into()], RuleType::CrossStrait),
+            SpellingRule::new("內存", vec!["記憶體".into()], RuleType::CrossStrait),
         ]
     }
 
@@ -1147,21 +1106,11 @@ mod tests {
         let mut store = OverrideStore::open(&path).unwrap();
 
         // Override existing rule.
-        let override_rule = SpellingRule {
-            from: "軟件".into(),
-            to: vec!["軟體".into(), "應用程式".into()],
-            rule_type: RuleType::CrossStrait,
-
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        };
+        let override_rule = SpellingRule::new(
+            "軟件",
+            vec!["軟體".into(), "應用程式".into()],
+            RuleType::CrossStrait,
+        );
         store.upsert_spelling_override(&override_rule).unwrap();
 
         let rules = store.load_spelling_rules(&sample_base_spelling());
@@ -1170,21 +1119,7 @@ mod tests {
         assert_eq!(r.to.len(), 2);
 
         // Add new override.
-        let new_rule = SpellingRule {
-            from: "視頻".into(),
-            to: vec!["影片".into()],
-            rule_type: RuleType::CrossStrait,
-
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        };
+        let new_rule = SpellingRule::new("視頻", vec!["影片".into()], RuleType::CrossStrait);
         store.upsert_spelling_override(&new_rule).unwrap();
 
         let rules = store.load_spelling_rules(&sample_base_spelling());
@@ -1254,21 +1189,7 @@ mod tests {
         // Write an override.
         {
             let mut store = OverrideStore::open(&path).unwrap();
-            let rule = SpellingRule {
-                from: "視頻".into(),
-                to: vec!["影片".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
-                english: None,
-                exceptions: None,
-                context_clues: None,
-                negative_context_clues: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
-            };
+            let rule = SpellingRule::new("視頻", vec!["影片".into()], RuleType::CrossStrait);
             store.upsert_spelling_override(&rule).unwrap();
         }
 
@@ -1289,21 +1210,11 @@ mod tests {
         let bad = Overrides {
             schema_version: 1,
             metadata: None,
-            spelling: vec![SpellingRule {
-                from: "test".into(),
-                to: vec!["ok".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
-                english: None,
-                exceptions: None,
-                context_clues: None,
-                negative_context_clues: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
-            }],
+            spelling: vec![SpellingRule::new(
+                "test",
+                vec!["ok".into()],
+                RuleType::CrossStrait,
+            )],
             case: vec![],
         };
         std::fs::write(&path, serde_json::to_string(&bad).unwrap()).unwrap();

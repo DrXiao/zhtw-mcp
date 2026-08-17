@@ -3,68 +3,19 @@
 
 use std::path::Path;
 
-// Mirror the ruleset types needed for deserialization. These must match the
-// runtime types in src/rules/ruleset.rs exactly.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Ruleset {
-    spelling_rules: Vec<SpellingRule>,
-    case_rules: Vec<CaseRule>,
+// The wire-format types, pulled straight from the runtime source rather than
+// mirrored here. Postcard is not self-describing: field order and field count
+// are the encoding, so a hand-kept second copy corrupts every rule the moment
+// it drifts, silently and at runtime. One definition cannot drift.
+//
+// Everything the include!d file needs is in scope below and nothing else from
+// the crate is referenced, which is a constraint on that file rather than on
+// this one. See src/rules/schema.rs.
+#[allow(dead_code)]
+mod schema {
+    include!("src/rules/schema.rs");
 }
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SpellingRule {
-    from: String,
-    to: Vec<String>,
-    #[serde(rename = "type")]
-    rule_type: RuleType,
-    #[serde(default)]
-    disabled: bool,
-    #[serde(default)]
-    context: Option<String>,
-    #[serde(default)]
-    english: Option<String>,
-    #[serde(default)]
-    exceptions: Option<Vec<String>>,
-    #[serde(default)]
-    context_clues: Option<Vec<String>>,
-    #[serde(default)]
-    negative_context_clues: Option<Vec<String>>,
-    #[serde(default)]
-    positional_clues: Option<Vec<String>>,
-    #[serde(default)]
-    tags: Option<Vec<String>>,
-    #[serde(default)]
-    editorial_confidence: Option<EditorialConfidence>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum EditorialConfidence {
-    High,
-    Medium,
-    Low,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RuleType {
-    PoliticalColoring,
-    CrossStrait,
-    Typo,
-    Confusable,
-    Variant,
-    AiFiller,
-    Translationese,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CaseRule {
-    term: String,
-    #[serde(default)]
-    alternatives: Option<Vec<String>>,
-    #[serde(default)]
-    disabled: bool,
-}
+use schema::Ruleset;
 
 fn main() {
     let ruleset_path = Path::new("assets/ruleset.json");

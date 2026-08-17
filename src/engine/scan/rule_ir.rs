@@ -2,14 +2,14 @@
 //
 // Each SpellingRule compiles into a CompiledRule: an ordered chain of
 // MatchPredicate values that the evaluator walks sequentially, short-
-// circuiting on the first rejection.  This IR sits between the raw
-// SpellingRule struct (declarative) and the evaluation loop (imperative),
-// enabling future optimizations (predicate reordering, dead-predicate
-// elimination) without touching the evaluator.
+// circuiting on the first rejection. This IR sits between the raw SpellingRule
+// struct (declarative) and the evaluation loop (imperative), enabling future
+// optimizations (predicate reordering, dead-predicate elimination) without
+// touching the evaluator.
 //
-// Scope: per-match predicates only.  Overlap resolution, anchor
-// confirmation, and TM suppression operate at different granularity
-// and are explicitly excluded.
+// Scope: per-match predicates only. Overlap resolution, anchor confirmation,
+// and TM suppression operate at different granularity and are explicitly
+// excluded.
 
 use std::sync::Arc;
 
@@ -26,9 +26,7 @@ use crate::rules::ruleset::{Issue, IssueType, ProfileConfig, RuleType, SpellingR
 use super::spelling;
 use super::PositionalClue;
 
-// ---------------------------------------------------------------------------
 // Predicates
-// ---------------------------------------------------------------------------
 
 /// A single predicate in a compiled rule's filter chain.
 ///
@@ -74,7 +72,8 @@ pub enum MatchPredicate {
         exceptions: Vec<(String, Vec<usize>)>,
     },
 
-    // -- Context-clue gate (fused positive + negative, one window + one AC pass) --
+    // -- Context-clue gate (fused positive + negative, one window + one AC
+    // pass) --
     /// Evaluate context clues in a single windowed AC scan.
     /// Rejects if positive clue count < min_matches OR any negative clue fires.
     /// Either pos_ids or neg_ids (or both) may be empty.
@@ -95,9 +94,7 @@ pub enum MatchPredicate {
     MayExtendDeletionSpan,
 }
 
-// ---------------------------------------------------------------------------
 // Compiled rule
-// ---------------------------------------------------------------------------
 
 /// A fully compiled spelling rule: an ordered predicate chain.
 /// The evaluator walks `predicates` in order, short-circuiting on
@@ -113,12 +110,49 @@ pub struct CompiledRule {
     pub rule_type: RuleType,
 }
 
-// ---------------------------------------------------------------------------
+/// A rule's context-selected suggestion groups, compiled for one pass.
+///
+/// The clues of every group go into a single Aho-Corasick, with `group_of`
+/// mapping pattern id back to the group that owns it.  Selection then scans
+/// the window once and takes the lowest matching group index, instead of
+/// running `str::contains` over the whole window once per clue: on the shipped
+/// seven-clue rule that was seven full-window passes per issue.
+///
+/// Lowest index, not earliest match, because ruleset order is the documented
+/// precedence order and has nothing to do with where in the window a clue
+/// happens to sit.
+pub struct CompiledContextSelector {
+    /// All clues of all groups, in group order.
+    clue_ac: AhoCorasick,
+    /// `group_of[pattern_id]` is the group that clue belongs to.
+    group_of: Vec<usize>,
+    /// Replacements per group, pre-interned so selection costs a refcount bump.
+    to: Vec<Arc<[String]>>,
+}
+
+impl CompiledContextSelector {
+    /// Replacements for the first group with a clue in `window`, if any.
+    fn select(&self, window: &str) -> Option<&Arc<[String]>> {
+        let mut best: Option<usize> = None;
+        for m in self.clue_ac.find_overlapping_iter(window) {
+            let g = self.group_of[m.pattern().as_usize()];
+            if best.is_none_or(|b| g < b) {
+                // Group 0 wins outright; nothing later can beat it.
+                if g == 0 {
+                    return self.to.first();
+                }
+                best = Some(g);
+            }
+        }
+        best.map(|g| &self.to[g])
+    }
+}
+
 // Compiled spelling database
-// ---------------------------------------------------------------------------
 
 /// The compiled spelling rule database.  Owns the AC automata and
-/// all per-rule compiled data.  Constructed by `compile_spelling_rules_filtered()`.
+/// all per-rule compiled data. Constructed by
+/// `compile_spelling_rules_filtered()`.
 pub struct CompiledSpellingDb {
     /// Charwise double-array Aho-Corasick (primary).
     /// Not Debug because daachorse types don't implement it.
@@ -132,11 +166,19 @@ pub struct CompiledSpellingDb {
     /// Absorber strings (exception phrases + superstring `to` forms).
     pub absorber_strings: Vec<String>,
 
-    // -- Per-rule parallel arrays (indexed by rule position) --
-    // These arrays are populated during compile_spelling_rules_filtered() and used
-    // by structural validation tests (filter_flags_match_rule_properties,
+    // -- Per-rule parallel arrays (indexed by rule position) -- These arrays
+    // are populated during compile_spelling_rules_filtered() and used by
+    // structural validation tests (filter_flags_match_rule_properties,
     // filter_vecs_aligned, rule_classes_match_filter_flags).
     /// The spelling rules themselves (filtered and deduplicated).
+    ///
+    /// Retained whole, not narrowed to the fields the scan path reads.  The
+    /// Arc'd arrays below do duplicate roughly 100 KB of context, english and
+    /// clue strings, but these rules also back `Scanner::spelling_rules()`,
+    /// which the MCP ambiguous-terms resource reads, and the structural
+    /// validation tests that re-derive the filter flags from raw fields.
+    /// Dropping them would mean rebuilding the filtered list on demand for a
+    /// cold resource read, which is more moving parts than 100 KB is worth.
     pub spelling_rules: Vec<SpellingRule>,
     /// Precomputed suggestions per rule.  Arc avoids per-issue clone
     /// during inflation — only a reference count bump per survivor.
@@ -147,6 +189,15 @@ pub struct CompiledSpellingDb {
     pub spelling_english: Vec<Option<Arc<str>>>,
     /// Pre-interned context clues per rule.  Arc bump during inflation.
     pub spelling_context_clues: Vec<Option<Arc<[String]>>>,
+    /// Per-rule context-selected suggestion groups, pre-interned.  None for
+    /// the overwhelming majority of rules, which pay only an Option check at
+    /// inflation time.  A rule that has groups pays one window computation plus
+    /// a single pass of that window through the group automaton, per issue; see
+    /// `CompiledContextSelector` for why the clues are indexed rather than
+    /// searched one at a time.  One rule in 1882 carries groups, and building
+    /// its automaton is a handful of short words, so construction stays far
+    /// under the cold-start budget.
+    pub spelling_context_suggestions: Vec<Option<CompiledContextSelector>>,
     /// Per-rule editorial confidence (35.2).  Plain copy at inflation
     /// time — `EditorialConfidence` is `Copy`, so no Arc needed.
     pub spelling_editorial_confidence: Vec<Option<crate::rules::ruleset::EditorialConfidence>>,
@@ -167,31 +218,6 @@ pub struct CompiledSpellingDb {
     pub rule_classes: Vec<u8>,
 }
 
-impl CompiledSpellingDb {
-    /// An empty database with no rules or automata.
-    /// Used as a fallback when compilation fails.
-    pub fn empty() -> Self {
-        Self {
-            ac_charwise: None,
-            ac_bytewise: None,
-            rules: Vec::new(),
-            clue_ac: None,
-            absorber_strings: Vec::new(),
-            spelling_rules: Vec::new(),
-            spelling_suggestions: Vec::new(),
-            spelling_contexts: Vec::new(),
-            spelling_english: Vec::new(),
-            spelling_context_clues: Vec::new(),
-            spelling_editorial_confidence: Vec::new(),
-            rule_pos_clue_ids: Vec::new(),
-            rule_neg_clue_ids: Vec::new(),
-            rule_positional_clues: Vec::new(),
-            rule_filter_flags: Vec::new(),
-            rule_classes: Vec::new(),
-        }
-    }
-}
-
 impl std::fmt::Debug for CompiledSpellingDb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompiledSpellingDb")
@@ -205,9 +231,7 @@ impl std::fmt::Debug for CompiledSpellingDb {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Match context (borrowed evaluation state)
-// ---------------------------------------------------------------------------
 
 /// Borrowed state needed to evaluate a predicate chain against a single
 /// AC match.  All fields are references into caller-owned data, so the
@@ -245,10 +269,11 @@ pub fn build_clue_index_into(
         ac.find_overlapping_iter(text)
             .map(|m| (m.start(), m.pattern().as_usize() as u16)),
     );
+
     // find_overlapping_iter with MatchKind::Standard does not guarantee
-    // left-to-right start-offset order for overlapping patterns.
-    // Sort to satisfy the binary-search contract in lookup_clues_in_window.
-    // Nearly sorted in practice, so the sort is close to O(n).
+    // left-to-right start-offset order for overlapping patterns. Sort to
+    // satisfy the binary-search contract in lookup_clues_in_window. Nearly
+    // sorted in practice, so the sort is close to O(n).
     out.sort_unstable_by_key(|&(off, _)| off);
 }
 
@@ -296,9 +321,7 @@ pub fn lookup_clues_in_window(
     (pos_found, false)
 }
 
-// ---------------------------------------------------------------------------
 // compile_rule_predicates()
-// ---------------------------------------------------------------------------
 
 /// Build the ordered predicate chain for a single rule.
 ///
@@ -407,9 +430,7 @@ pub fn compile_rule_predicates(
     preds
 }
 
-// ---------------------------------------------------------------------------
 // eval_predicates() -- generic path for CLASS_CLUED and CLASS_FULL
-// ---------------------------------------------------------------------------
 
 /// Evaluate a compiled rule's predicate chain against a match context.
 ///
@@ -508,7 +529,8 @@ pub fn eval_predicates(
                 neg_ids,
                 min_pos_matches,
             } => {
-                // Fused context-clue gate using pre-computed document-wide index.
+                // Fused context-clue gate using pre-computed document-wide
+                // index.
                 let (win_start, win_end) =
                     spelling::context_byte_window(ctx.text, ctx.start, end, ctx.excluded);
                 let pos_slice = if pos_ids.is_empty() {
@@ -570,9 +592,7 @@ pub fn eval_predicates(
     ))
 }
 
-// ---------------------------------------------------------------------------
 // inflate_spelling_issues()
-// ---------------------------------------------------------------------------
 
 /// Inflate deferred spelling issues after overlap resolution.
 ///
@@ -580,31 +600,43 @@ pub fn eval_predicates(
 /// suggestions, context, english, and context_clues.  This function
 /// fills them in from the compiled DB and the original text.
 /// Non-spelling issues are left untouched.
-pub fn inflate_spelling_issues(db: &CompiledSpellingDb, text: &str, issues: &mut [Issue]) {
-    inflate_spelling_issues_inner(db, text, issues, false);
+pub fn inflate_spelling_issues(
+    db: &CompiledSpellingDb,
+    text: &str,
+    excluded: &[ByteRange],
+    issues: &mut [Issue],
+) {
+    inflate_spelling_issues_inner(db, text, excluded, issues, false);
 }
 
 /// Like `inflate_spelling_issues` but skips context/english/context_clues
 /// when `offset_only` is true (MCP compact output path).  Saves ~3 Arc
 /// clones per surviving issue.
-pub fn inflate_spelling_issues_compact(db: &CompiledSpellingDb, text: &str, issues: &mut [Issue]) {
-    inflate_spelling_issues_inner(db, text, issues, true);
+pub fn inflate_spelling_issues_compact(
+    db: &CompiledSpellingDb,
+    text: &str,
+    excluded: &[ByteRange],
+    issues: &mut [Issue],
+) {
+    inflate_spelling_issues_inner(db, text, excluded, issues, true);
 }
 
 #[inline]
 fn inflate_spelling_issues_inner(
     db: &CompiledSpellingDb,
     text: &str,
+    excluded: &[ByteRange],
     issues: &mut [Issue],
     offset_only: bool,
 ) {
     for issue in issues.iter_mut() {
         if let Some(idx) = issue.spelling_rule_idx.take() {
             let sr = &db.spelling_rules[idx];
+
             // For deletion rules, the span may have been extended to absorb
-            // trailing punctuation.  Use `rule.from.len()` for `found` so
-            // users see the phrase to delete, not the absorbed punctuation.
-            let found_len = if sr.to.first().is_some_and(|t| t.is_empty()) || sr.to.is_empty() {
+            // trailing punctuation. Use `rule.from.len()` for `found` so users
+            // see the phrase to delete, not the absorbed punctuation.
+            let found_len = if sr.has_deletion_sentinel() {
                 sr.from.len()
             } else {
                 issue.length
@@ -613,7 +645,22 @@ fn inflate_spelling_issues_inner(
             if let Some(s) = text.get(issue.offset..end) {
                 issue.found = s.to_string();
             }
-            issue.suggestions = db.spelling_suggestions[idx].clone();
+
+            // Context-selected replacements override the rule default when a
+            // group's clues appear nearby. First matching group wins, so
+            // ruleset order is the precedence order. The window comes from the
+            // same context_byte_window the clue gate uses, so it stops at
+            // paragraph breaks and excluded ranges: a clue in the next
+            // paragraph or inside a fenced code block must not swap the
+            // replacement set, which would also silently disable auto-fix.
+            issue.suggestions = db.spelling_context_suggestions[idx]
+                .as_ref()
+                .and_then(|sel| {
+                    let (ws, we) =
+                        spelling::context_byte_window(text, issue.offset.min(end), end, excluded);
+                    sel.select(&text[ws..we]).cloned()
+                })
+                .unwrap_or_else(|| db.spelling_suggestions[idx].clone());
             issue.refresh_suggested_rewrite();
             issue.editorial_confidence = db.spelling_editorial_confidence[idx];
             if !offset_only {
@@ -627,9 +674,7 @@ fn inflate_spelling_issues_inner(
     }
 }
 
-// ---------------------------------------------------------------------------
 // compile_spelling_rules_filtered()
-// ---------------------------------------------------------------------------
 
 /// Rule types to exclude from the compiled AC automaton.
 ///
@@ -663,23 +708,16 @@ impl ProfileFilter {
         }
     }
 }
-
-/// Compile a set of spelling rules into a `CompiledSpellingDb`.
+/// Reduce the incoming rules to the set that will actually be compiled.
 ///
-/// Filters disabled rules, deduplicates by `from` key (last wins),
-/// builds AC automata (charwise primary, bytewise fallback), interns
-/// context clues, and computes per-rule filter flags and dispatch classes.
-///
-/// `filter` optionally excludes rule types that the target profile would always
-/// reject, shrinking the DAAC by ~5% under the default profile; pass
-/// `ProfileFilter::none()` to keep every rule.
-pub fn compile_spelling_rules_filtered(
-    spelling_rules: Vec<SpellingRule>,
-    filter: &ProfileFilter,
-) -> anyhow::Result<CompiledSpellingDb> {
-    // Filter disabled first, then deduplicate (last-wins), THEN apply
-    // profile filter.  Profile filtering must run after dedup so it cannot
-    // change which duplicate survives for the same `from` key.
+/// Order matters and is load-bearing: disabled rules go first, then dedup by
+/// `from` (last wins, so overrides beat the embedded ruleset), and only then
+/// the profile filter.  Filtering before dedup could change which duplicate
+/// survives.
+fn prepare_rules(spelling_rules: Vec<SpellingRule>, filter: &ProfileFilter) -> Vec<SpellingRule> {
+    // Filter disabled first, then deduplicate (last-wins), THEN apply profile
+    // filter. Profile filtering must run after dedup so it cannot change which
+    // duplicate survives for the same `from` key.
     let mut spelling_rules: Vec<SpellingRule> =
         spelling_rules.into_iter().filter(|r| !r.disabled).collect();
 
@@ -702,9 +740,8 @@ pub fn compile_spelling_rules_filtered(
         });
     }
 
-    // Profile-aware filtering: exclude rule types that the target profile
-    // would always fast-reject.  Runs after dedup to preserve last-wins
-    // semantics.
+    // Profile-aware filtering: exclude rule types that the target profile would
+    // always fast-reject. Runs after dedup to preserve last-wins semantics.
     if filter.exclude_variant || filter.exclude_ai_filler || filter.exclude_translationese {
         spelling_rules.retain(|r| {
             if filter.exclude_variant && r.rule_type == RuleType::Variant {
@@ -732,35 +769,24 @@ pub fn compile_spelling_rules_filtered(
         }
     }
 
-    let spelling_suggestions: Vec<Arc<[String]>> = spelling_rules
-        .iter()
-        .map(super::effective_suggestions)
-        .map(Arc::from)
-        .collect();
+    spelling_rules
+}
 
-    let spelling_contexts: Vec<Option<Arc<str>>> = spelling_rules
-        .iter()
-        .map(|r| r.context.as_deref().map(Arc::from))
-        .collect();
+/// Intern every clue string once, map each rule's clue lists to ids, and build
+/// the bytewise automaton the windowed lookups use.
+///
+/// Returns `(clue_ac, pos_ids, neg_ids)` with both id vectors truncated to the
+/// 32-entry bitset capacity and sorted, which is what
+/// `lookup_clues_in_window` binary-searches.
+type ClueIndex = (
+    Option<AhoCorasick>,
+    Vec<Option<Vec<u16>>>,
+    Vec<Option<Vec<u16>>>,
+);
 
-    let spelling_english: Vec<Option<Arc<str>>> = spelling_rules
-        .iter()
-        .map(|r| r.english.as_deref().map(Arc::from))
-        .collect();
-
-    let spelling_context_clues: Vec<Option<Arc<[String]>>> = spelling_rules
-        .iter()
-        .map(|r| r.context_clues.as_ref().map(|v| Arc::from(v.as_slice())))
-        .collect();
-
-    let spelling_editorial_confidence: Vec<Option<crate::rules::ruleset::EditorialConfidence>> =
-        spelling_rules
-            .iter()
-            .map(|r| r.editorial_confidence)
-            .collect();
-
-    // Build clue AC: intern all unique clue strings, map per-rule clue
-    // lists to indices, build a bytewise AC for windowed lookups.
+fn build_clue_index(spelling_rules: &[SpellingRule]) -> ClueIndex {
+    // Build clue AC: intern all unique clue strings, map per-rule clue lists to
+    // indices, build a bytewise AC for windowed lookups.
     let (clue_ac, mut rule_pos_clue_ids, mut rule_neg_clue_ids) = {
         let mut clue_map: FxHashMap<String, u16> = FxHashMap::default();
         let mut clue_vec: Vec<String> = Vec::new();
@@ -799,7 +825,7 @@ pub fn compile_spelling_rules_filtered(
             }
         };
 
-        for rule in &spelling_rules {
+        for rule in spelling_rules {
             pos_ids.push(intern_clues(&rule.context_clues));
             neg_ids.push(intern_clues(&rule.negative_context_clues));
         }
@@ -822,8 +848,8 @@ pub fn compile_spelling_rules_filtered(
         (ac, pos_ids, neg_ids)
     };
 
-    // Validate clue-ID counts fit the fixed bitset (capacity 32).
-    // Truncate rather than panic on malformed rulesets.
+    // Validate clue-ID counts fit the fixed bitset (capacity 32). Truncate
+    // rather than panic on malformed rulesets.
     let truncate_clue_ids = |ids_vec: &mut Vec<Option<Vec<u16>>>, label: &str| {
         for (i, slot) in ids_vec.iter_mut().enumerate() {
             if let Some(ids) = slot {
@@ -850,43 +876,35 @@ pub fn compile_spelling_rules_filtered(
         ids.sort_unstable();
     }
 
-    let rule_positional_clues: Vec<Option<Vec<PositionalClue>>> = spelling_rules
-        .iter()
-        .map(|rule| {
-            rule.positional_clues.as_ref().and_then(|raw| {
-                let parsed: Vec<PositionalClue> = raw
-                    .iter()
-                    .filter_map(|s| {
-                        let clue = PositionalClue::parse(s);
-                        if clue.is_none() {
-                            tracing::warn!(
-                                "[zhtw-mcp] rule '{}': unrecognized positional clue '{}'",
-                                rule.from,
-                                s
-                            );
-                        }
-                        clue
-                    })
-                    .collect();
-                if parsed.is_empty() {
-                    None
-                } else {
-                    Some(parsed)
-                }
-            })
-        })
-        .collect();
+    (clue_ac, rule_pos_clue_ids, rule_neg_clue_ids)
+}
 
+/// Build the absorber strings and the pattern automata over them.
+///
+/// Absorbers are exception phrases and superstring `to` forms injected into the
+/// automaton so LeftmostLongest suppresses the shorter `from` match they
+/// contain.  Pattern indices at or beyond `spelling_rules.len()` are those
+/// sentinels rather than real rules.
+///
+/// Charwise (daachorse) is the primary automaton; the bytewise one is built
+/// only as a fallback when the charwise build fails, never both.
+type Automata = (
+    Vec<String>,
+    Option<daachorse::CharwiseDoubleArrayAhoCorasick<usize>>,
+    Option<AhoCorasick>,
+);
+
+fn build_automata(spelling_rules: &[SpellingRule]) -> Automata {
     let spelling_patterns: Vec<&str> = spelling_rules.iter().map(|r| r.from.as_str()).collect();
 
     // Absorption patterns: exception phrases and superstring `to` forms
     // injected into the AC so LeftmostLongest suppresses shorter `from`
-    // matches.  Indices >= spelling_rules.len() act as sentinels.
+    // matches. Indices >= spelling_rules.len() act as sentinels.
     let absorber_strings: Vec<String> = {
         let from_set: FxHashSet<&str> = spelling_patterns.iter().copied().collect();
         let mut candidates: Vec<(String, &str)> = Vec::new();
         let mut dedup = FxHashSet::default();
-        for rule in &spelling_rules {
+        for rule in spelling_rules {
             if let Some(ref exceptions) = rule.exceptions {
                 for exc in exceptions {
                     if exc.contains(&rule.from)
@@ -907,13 +925,14 @@ pub fn compile_spelling_rules_filtered(
                 }
             }
         }
-        // Index froms by first char.  Both shadow conditions below --
-        // containment (`absorber.contains(f)`) and right-boundary overlap
-        // (a suffix of the absorber is a prefix of f) -- require f's first
-        // char to occur in the absorber.  So only froms bucketed under a
-        // char the absorber actually contains can shadow it; the rest are
-        // skipped.  Exact same result as scanning all patterns, ~50x fewer
-        // comparisons on the ~1.8k-rule ruleset.
+
+        // Index froms by first char. Both shadow conditions below --
+        // containment (`absorber.contains(f)`) and right-boundary overlap (a
+        // suffix of the absorber is a prefix of f) -- require f's first char to
+        // occur in the absorber. So only froms bucketed under a char the
+        // absorber actually contains can shadow it; the rest are skipped. Exact
+        // same result as scanning all patterns, ~50x fewer comparisons on the
+        // ~1.8k-rule ruleset.
         let mut from_by_first: FxHashMap<char, Vec<&str>> = FxHashMap::default();
         let mut has_empty_from = false;
         for &f in &spelling_patterns {
@@ -946,8 +965,9 @@ pub fn compile_spelling_rules_filtered(
                         if absorber.contains(f) {
                             return true;
                         }
-                        // Right-boundary overlap: proper suffix of absorber
-                        // is a prefix of f.
+
+                        // Right-boundary overlap: proper suffix of absorber is
+                        // a prefix of f.
                         let mut ci = absorber.char_indices();
                         ci.next(); // skip position 0 (full string)
                         for (byte_idx, _) in ci {
@@ -1002,6 +1022,151 @@ pub fn compile_spelling_rules_filtered(
         None
     };
 
+    (absorber_strings, ac_charwise, ac_bytewise)
+}
+
+/// Compile a set of spelling rules into a `CompiledSpellingDb`.
+///
+/// Filters disabled rules, deduplicates by `from` key (last wins),
+/// builds AC automata (charwise primary, bytewise fallback), interns
+/// context clues, and computes per-rule filter flags and dispatch classes.
+///
+/// `filter` optionally excludes rule types that the target profile would always
+/// reject, shrinking the DAAC by ~5% under the default profile; pass
+/// `ProfileFilter::none()` to keep every rule.
+pub fn compile_spelling_rules_filtered(
+    spelling_rules: Vec<SpellingRule>,
+    filter: &ProfileFilter,
+) -> CompiledSpellingDb {
+    let spelling_rules = prepare_rules(spelling_rules, filter);
+
+    let spelling_suggestions: Vec<Arc<[String]>> = spelling_rules
+        .iter()
+        .map(super::effective_suggestions)
+        .map(Arc::from)
+        .collect();
+
+    let spelling_contexts: Vec<Option<Arc<str>>> = spelling_rules
+        .iter()
+        .map(|r| r.context.as_deref().map(Arc::from))
+        .collect();
+
+    let spelling_english: Vec<Option<Arc<str>>> = spelling_rules
+        .iter()
+        .map(|r| r.english.as_deref().map(Arc::from))
+        .collect();
+
+    let spelling_context_clues: Vec<Option<Arc<[String]>>> = spelling_rules
+        .iter()
+        .map(|r| r.context_clues.as_ref().map(|v| Arc::from(v.as_slice())))
+        .collect();
+
+    // A group is kept only when it can do what the field promises. Malformed
+    // shapes are dropped whole, never repaired, because a repaired group
+    // changes auto-fix eligibility without saying so: filtering the empty entry
+    // out of "["改善", ""]" would leave one candidate, and one candidate is
+    // writable.
+    //
+    // "usable" covers both lists: empty can never select or would erase the
+    // rule default, and an empty string is worse than useless in either
+    // position. As a clue it always matches, since "window.contains(\"\")" is
+    // true for every window, so one stray entry makes the group the answer for
+    // every match of the rule. As a replacement it is the deletion sentinel,
+    // which would turn a substitution into a deletion.
+    //
+    // Groups are refused outright on a rule whose own "to" is that sentinel:
+    // inflation derives the reported span from the rule default, so a group
+    // offering a real replacement would report a span shorter than the one it
+    // rewrites.
+    //
+    // A rule left with no usable group compiles to None so inflation skips the
+    // window scan.
+    fn usable(v: &[String]) -> bool {
+        !v.is_empty() && v.iter().all(|s| !s.is_empty())
+    }
+
+    let spelling_context_suggestions: Vec<Option<CompiledContextSelector>> = spelling_rules
+        .iter()
+        .map(|r| {
+            if r.has_deletion_sentinel() {
+                return None;
+            }
+            let groups: Vec<&crate::rules::ruleset::ContextSuggestion> = r
+                .context_suggestions
+                .iter()
+                .flatten()
+                .filter(|g| usable(&g.clues) && usable(&g.to))
+                .collect();
+            if groups.is_empty() {
+                return None;
+            }
+            let mut patterns: Vec<&str> = Vec::new();
+            let mut group_of: Vec<usize> = Vec::new();
+            for (gi, g) in groups.iter().enumerate() {
+                for clue in g.clues.iter() {
+                    patterns.push(clue.as_str());
+                    group_of.push(gi);
+                }
+            }
+
+            // Standard (not leftmost) match kind: selection needs every clue
+            // that is present, not the one the automaton would prefer.
+            //
+            // Noncontiguous NFA because build cost is what matters here. This
+            // runs once per scanner construction, inside a 50 ms cold-start
+            // budget, over a handful of short words; the faster automata earn
+            // their construction back on document-length haystacks, not on a
+            // 240-byte window.
+            let clue_ac = AhoCorasickBuilder::new()
+                .match_kind(MatchKind::Standard)
+                .kind(Some(aho_corasick::AhoCorasickKind::NoncontiguousNFA))
+                .build(&patterns)
+                .ok()?;
+            Some(CompiledContextSelector {
+                clue_ac,
+                group_of,
+                to: groups.iter().map(|g| Arc::from(g.to.as_slice())).collect(),
+            })
+        })
+        .collect();
+
+    let spelling_editorial_confidence: Vec<Option<crate::rules::ruleset::EditorialConfidence>> =
+        spelling_rules
+            .iter()
+            .map(|r| r.editorial_confidence)
+            .collect();
+
+    let (clue_ac, rule_pos_clue_ids, rule_neg_clue_ids) = build_clue_index(&spelling_rules);
+
+    let rule_positional_clues: Vec<Option<Vec<PositionalClue>>> = spelling_rules
+        .iter()
+        .map(|rule| {
+            rule.positional_clues.as_ref().and_then(|raw| {
+                let parsed: Vec<PositionalClue> = raw
+                    .iter()
+                    .filter_map(|s| {
+                        let clue = PositionalClue::parse(s);
+                        if clue.is_none() {
+                            tracing::warn!(
+                                "[zhtw-mcp] rule '{}': unrecognized positional clue '{}'",
+                                rule.from,
+                                s
+                            );
+                        }
+                        clue
+                    })
+                    .collect();
+                if parsed.is_empty() {
+                    None
+                } else {
+                    Some(parsed)
+                }
+            })
+        })
+        .collect();
+
+    let (absorber_strings, ac_charwise, ac_bytewise) = build_automata(&spelling_rules);
+
     let rule_filter_flags: Vec<u8> = spelling_rules
         .iter()
         .enumerate()
@@ -1029,9 +1194,9 @@ pub fn compile_spelling_rules_filtered(
         })
         .collect();
 
-    // Dispatch class per rule: determines which monomorphic fast path
-    // handles each AC hit.  Positional implies FULL; context clues
-    // without positional implies CLUED; everything else is SIMPLE.
+    // Dispatch class per rule: determines which monomorphic fast path handles
+    // each AC hit. Positional implies FULL; context clues without positional
+    // implies CLUED; everything else is SIMPLE.
     let rule_classes: Vec<u8> = rule_filter_flags
         .iter()
         .map(|&f| {
@@ -1066,7 +1231,7 @@ pub fn compile_spelling_rules_filtered(
         })
         .collect();
 
-    Ok(CompiledSpellingDb {
+    CompiledSpellingDb {
         ac_charwise,
         ac_bytewise,
         rules: compiled_rules,
@@ -1077,13 +1242,14 @@ pub fn compile_spelling_rules_filtered(
         spelling_contexts,
         spelling_english,
         spelling_context_clues,
+        spelling_context_suggestions,
         spelling_editorial_confidence,
         rule_pos_clue_ids,
         rule_neg_clue_ids,
         rule_positional_clues,
         rule_filter_flags,
         rule_classes,
-    })
+    }
 }
 
 #[cfg(test)]

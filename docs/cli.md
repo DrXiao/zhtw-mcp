@@ -26,9 +26,52 @@ zhtw-mcp lint -- --content-type markdown-scan-code < input.md  # also lint insid
 ```bash
 zhtw-mcp lint file.md --fix                        # lexical_safe (default)
 zhtw-mcp lint file.md --fix=orthographic           # punctuation/spacing/case/variant/grammar only
-zhtw-mcp lint file.md --fix=lexical_contextual     # context-clue-gated rules too
+zhtw-mcp lint file.md --fix=lexical_contextual     # context-clue-gated and low-confidence rules too
 zhtw-mcp lint file.md --fix --dry-run       # preview without writing
 ```
+
+`lexical_safe` declines rules the ruleset annotates `editorial_confidence: low`,
+where the flagged form is valid zh-TW and the suggestion is a register
+preference rather than a correction. They are still reported; only
+`lexical_contextual` rewrites them.
+
+Declined fixes are counted in both output modes: human output appends
+`N declined` to the fix line (and prints one even when nothing was applied),
+and `--format json` reports `fixes_declined`. A decline means the fixer weighed
+the issue and passed on it, for any of several reasons beyond editorial
+confidence: multiple candidate suggestions, anchor rejection under `--verify`,
+a clue gate the segmenter ran and did not confirm, or tier-2 suppression. A
+higher tier will not necessarily apply them.
+
+`fixes_skipped` is the wider JSON count and always includes `fixes_declined`.
+It also counts issues that were never weighed: anything out of tier, issues
+overlapping an earlier fix, and issues inside an excluded region. Out of tier
+covers lexical issues under `--fix=orthographic` and clue-gated rules below
+`lexical_contextual`, where the segmenter never runs. A rule that carries both
+`context_clues` and `editorial_confidence: low` counts as out of tier at
+`lexical_safe`, not as a decline, because the tier stopped it before the
+annotation could. Read `fixes_skipped` for "how many issues did `--fix` leave
+alone", `fixes_declined` for "how many did it turn down".
+
+Reading from stdin with `--fix` makes the command a filter: the document goes
+to stdout whether or not anything changed, and every status line goes to
+stderr. Simplified input goes to stdout the same way even without `--fix`,
+because the S2T conversion rewrites the document exactly as a fix does and
+stdin has no copy on disk to recover it from. Traditional input without `--fix`
+is unchanged, so nothing is emitted. `--dry-run` writes nothing to stdout, as
+it does for a file.
+
+That holds for the default human format only. `--format json`, `sarif`,
+`compact`, and `tabular` put their report on stdout instead, so combining one
+with a stdin rewrite discards the rewritten text. The command says so on stderr
+rather than exiting quietly, because `compact` and `tabular` print nothing for
+a clean document, and an empty stdout with exit 0 is indistinguishable from
+success. Process a file if you need both the report and the text.
+
+`zhtw-mcp convert` always fixes at `lexical_contextual`, so it rewrites
+`editorial_confidence: low` terms unattended regardless of any `--fix` setting.
+Conversion is a whole-document rewrite of Simplified input, where leaving the
+judgment calls half-converted would be the worse outcome.
 
 ## Explaining flagged terms
 

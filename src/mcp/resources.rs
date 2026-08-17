@@ -116,7 +116,8 @@ Use Taiwan-standard vocabulary rather than Mainland China equivalents:
     }
 }
 
-/// Generate the ambiguous dictionary from spelling rules that have an english field.
+/// Generate the ambiguous dictionary from spelling rules that have an english
+/// field.
 fn read_ambiguous_dict(spelling_rules: &[SpellingRule]) -> ResourceReadResult {
     let entries: Vec<serde_json::Value> = spelling_rules
         .iter()
@@ -170,35 +171,12 @@ mod tests {
 
         let rules = vec![
             SpellingRule {
-                from: "程序".into(),
-                to: vec!["程式".into()],
-                rule_type: RuleType::Confusable,
-
-                disabled: false,
                 context: Some("程序 in TW = procedure".into()),
                 english: Some("program".into()),
-                exceptions: None,
-                context_clues: None,
-                negative_context_clues: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
+                ..SpellingRule::new("程序", vec!["程式".into()], RuleType::Confusable)
             },
-            SpellingRule {
-                from: "軟件".into(),
-                to: vec!["軟體".into()],
-                rule_type: RuleType::CrossStrait,
-
-                disabled: false,
-                context: None,
-                english: None, // no english -> not in ambiguous dict
-                exceptions: None,
-                context_clues: None,
-                negative_context_clues: None,
-                positional_clues: None,
-                tags: None,
-                editorial_confidence: None,
-            },
+            // No english field, so this one stays out of the ambiguous dict.
+            SpellingRule::new("軟件", vec!["軟體".into()], RuleType::CrossStrait),
         ];
 
         let result = read_resource(AMBIGUOUS_DICT_URI, &rules).unwrap();

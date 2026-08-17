@@ -279,8 +279,8 @@ fn cli_lint_max_warnings_gate_exit_0_when_within_limit() {
 
 #[test]
 fn cli_lint_max_warnings_and_max_errors_both_checked() {
-    // Both thresholds must pass for exit 0.
-    // "軟件" emits 1 warning. With --max-errors 100 --max-warnings 0 → exit 1.
+    // Both thresholds must pass for exit 0. "軟件" emits 1 warning. With
+    // --max-errors 100 --max-warnings 0 → exit 1.
     let output = run_lint_stdin(
         &["--max-errors", "100", "--max-warnings", "0"],
         "這個軟件很好用",
@@ -594,6 +594,161 @@ fn cli_lint_fix_rewrites_file() {
     );
 }
 
+/// Install a single-rule pack under "dir" and return the packs directory to
+/// pass to "--packs-dir". Tests that need a rule with a specific shape define
+/// it here rather than leaning on whichever shipped term currently has that
+/// shape: re-classifying a term in assets/ruleset.json is a routine editorial
+/// call and must not break unrelated fixer tests.
+fn write_pack(dir: &std::path::Path, name: &str, rule: serde_json::Value) -> String {
+    let packs = dir.join("packs");
+    std::fs::create_dir_all(&packs).unwrap();
+    let pack = serde_json::json!({
+        "schema_version": 3,
+        "metadata": { "name": name },
+        "spelling": [rule],
+        "case": [],
+    });
+    std::fs::write(
+        packs.join(format!("{name}.json")),
+        serde_json::to_string(&pack).unwrap(),
+    )
+    .unwrap();
+    packs.to_str().unwrap().to_string()
+}
+
+#[test]
+fn cli_lint_lexical_safe_skips_low_editorial_confidence() {
+    // 軟件 is a plain cross-strait term the safe tier always rewrites. 測試詞
+    // is a synthetic pack rule annotated editorial_confidence low with a single
+    // suggestion and no clues, the exact shape the gate targets; no shipped
+    // rule currently has that shape. Each tier runs against its own pristine
+    // copy so the contextual case proves it handles the original input in one
+    // pass rather than inheriting the safe pass's rewrite.
+    let dir = tempfile::tempdir().unwrap();
+    let packs = write_pack(
+        dir.path(),
+        "ecgate",
+        serde_json::json!({
+            "from": "測試詞",
+            "to": ["替換詞"],
+            "type": "cross_strait",
+            "english": "test term",
+            "editorial_confidence": "low",
+        }),
+    );
+
+    let source = "這個軟件需要測試詞";
+    let safe_file = dir.path().join("safe.md");
+    let contextual_file = dir.path().join("contextual.md");
+    std::fs::write(&safe_file, source).unwrap();
+    std::fs::write(&contextual_file, source).unwrap();
+
+    let output = run_bin_args(&[
+        "--packs-dir",
+        &packs,
+        "--pack",
+        "ecgate",
+        "lint",
+        safe_file.to_str().unwrap(),
+        "--fix=lexical_safe",
+        "--format",
+        "json",
+    ]);
+    assert!(
+        output.status.success(),
+        "lexical_safe fix should exit 0: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let content = std::fs::read_to_string(&safe_file).unwrap();
+    assert!(
+        content.contains("軟體需要測試詞"),
+        "lexical_safe should fix safe terms but leave low-confidence terms: {content}"
+    );
+
+    // Counts, not just content: pins that the term was declined by the gate
+    // rather than never reported at all.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("valid JSON");
+    assert_eq!(parsed["fixes_applied"], 1, "only 軟件 should be rewritten");
+    assert_eq!(parsed["fixes_skipped"], 1, "測試詞 should be skipped");
+    assert_eq!(
+        parsed["fixes_declined"], 1,
+        "and skipped on its merits, not for being out of tier"
+    );
+
+    let output = run_bin_args(&[
+        "--packs-dir",
+        &packs,
+        "--pack",
+        "ecgate",
+        "lint",
+        contextual_file.to_str().unwrap(),
+        "--fix=lexical_contextual",
+    ]);
+    assert!(
+        output.status.success(),
+        "lexical_contextual fix should exit 0"
+    );
+    let content = std::fs::read_to_string(&contextual_file).unwrap();
+    assert!(
+        content.contains("軟體需要替換詞"),
+        "lexical_contextual should fix low-confidence terms: {content}"
+    );
+}
+
+#[test]
+fn cli_lint_reports_declined_fixes_in_human_output() {
+    // A file whose only issue is declined used to print no fix line at all,
+    // leaving the run indistinguishable from one without --fix. The pack rule
+    // carries two suggestions and no editorial_confidence, so the safe tier
+    // declines it at suggestion selection: the count must cover every gate, not
+    // just the confidence one.
+    let dir = tempfile::tempdir().unwrap();
+    let packs = write_pack(
+        dir.path(),
+        "multisug",
+        serde_json::json!({
+            "from": "測試詞",
+            "to": ["替換甲", "替換乙"],
+            "type": "cross_strait",
+            "english": "test term",
+        }),
+    );
+    let file = dir.path().join("declined.md");
+    std::fs::write(&file, "這樣會測試詞").unwrap();
+
+    let output = run_bin_args(&[
+        "--packs-dir",
+        &packs,
+        "--pack",
+        "multisug",
+        "lint",
+        file.to_str().unwrap(),
+        "--fix=lexical_safe",
+    ]);
+    assert!(output.status.success(), "declined-only fix should exit 0");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no fixes applied") && stderr.contains("declined"),
+        "human output should report the declined count: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "這樣會測試詞",
+        "declined fix must not rewrite the file"
+    );
+
+    // A clean fix run must not grow a declined clause.
+    let clean = dir.path().join("clean.md");
+    std::fs::write(&clean, "這個軟件很好").unwrap();
+    let output = run_lint_args(&[clean.to_str().unwrap(), "--fix=lexical_safe"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("1 fix(es) applied") && !stderr.contains("declined"),
+        "no declined clause when nothing was declined: {stderr}"
+    );
+}
+
 #[test]
 fn cli_lint_fix_preserves_markdown_structure() {
     // --fix must not rewrite bytes inside YAML frontmatter delimiters, fenced
@@ -601,9 +756,9 @@ fn cli_lint_fix_preserves_markdown_structure() {
     //
     // Scan-time exclusion already carries most of that: no issue is emitted in
     // those regions, so they survive even with an empty fixer mask. The line
-    // that needs the mask is the fronted-object clause: the grammar match
-    // spans the inline code sitting between its two parts, and the whole
-    // clause must be left alone rather than half-rewritten.
+    // that needs the mask is the fronted-object clause: the grammar match spans
+    // the inline code sitting between its two parts, and the whole clause must
+    // be left alone rather than half-rewritten.
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("test.md");
     let src = "---\ntitle: \"測試\"\nlang: zh-TW\n---\n\n我們對`x`進行處理，這個軟件很好用。\n\n\
@@ -669,6 +824,133 @@ fn cli_lint_fix_stdin_to_stdout() {
 }
 
 #[test]
+fn cli_lint_fix_stdin_passes_through_unchanged_text() {
+    // With --fix, stdin is a filter, so the document has to reach stdout even
+    // when nothing changed. Gating the passthrough on "something was fixed"
+    // made "lint -- --fix > out.md" truncate a clean document, on the one input
+    // with no copy on disk to recover from.
+    let clean = "這是正確的中文。";
+    let output = run_lint_stdin(&["--fix"], clean);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        clean,
+        "clean input must survive the filter"
+    );
+
+    // A document whose only issue is declined is the same case: nothing is
+    // written, so nothing must be lost.
+    let ambiguous = "這個視頻很好看";
+    let output = run_lint_stdin(&["--fix"], ambiguous);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), ambiguous);
+
+    // --dry-run still writes nothing: it reports, it does not filter.
+    let output = run_lint_stdin(&["--fix", "--dry-run"], clean);
+    assert!(
+        output.stdout.is_empty(),
+        "dry run must not emit the document"
+    );
+
+    // Machine formats own stdout, so the document must not be prepended to
+    // their report. Both inputs are checked: the clean one covers the
+    // passthrough added here, the dirty one the older write it replaced.
+    for input in [clean, "這個軟件很好用"] {
+        for fmt in ["json", "sarif"] {
+            let output = run_lint_stdin(&["--fix", "--format", fmt], input);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            serde_json::from_str::<serde_json::Value>(&stdout).unwrap_or_else(|e| {
+                panic!("--format {fmt} on {input:?} must parse: {e}: {stdout}")
+            });
+        }
+    }
+}
+
+#[test]
+fn cli_lint_stdin_emits_s2t_converted_text_without_fix() {
+    // S2T conversion rewrites the document whether or not --fix was passed, and
+    // the file path writes that rewrite back unconditionally. stdin has no copy
+    // on disk, so withholding it there loses the converted text: "lint -- <
+    // cn.md > out.md" produced an empty file.
+    let simplified = "这个软件很好用。";
+    let output = run_lint_stdin(&[], simplified);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("這個") && !stdout.is_empty(),
+        "converted document must reach stdout: {stdout:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("S2T only"),
+        "status line still belongs on stderr"
+    );
+
+    // Traditional input is unchanged, so there is nothing to emit and stdout
+    // stays free for a report.
+    let output = run_lint_stdin(&[], "這個軟體很好用。");
+    assert!(
+        output.stdout.is_empty(),
+        "no rewrite means no document on stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    // A machine format owns stdout, so the conversion is dropped and said so.
+    let output = run_lint_stdin(&["--format", "json"], simplified);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str::<serde_json::Value>(&stdout)
+        .unwrap_or_else(|e| panic!("--format json must parse: {e}: {stdout}"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not emitted"),
+        "the discard must be reported, not silent"
+    );
+
+    // --dry-run reports without filtering, exactly as it does for a file.
+    let output = run_lint_stdin(&["--dry-run"], simplified);
+    assert!(
+        output.stdout.is_empty(),
+        "dry run must not emit the document"
+    );
+}
+
+#[test]
+fn cli_lint_declined_excludes_out_of_tier_issues() {
+    // Every issue here is lexical, so --fix=orthographic leaves them all alone,
+    // but it never weighed any of them. Reporting seven declines would read as
+    // seven verdicts.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("t.md");
+    let source = "這個軟件的內存和硬盤都不夠。";
+    std::fs::write(&file, source).unwrap();
+
+    let output = run_bin_args(&[
+        "lint",
+        file.to_str().unwrap(),
+        "--fix=orthographic",
+        "--format",
+        "json",
+    ]);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("valid JSON");
+    assert!(
+        parsed["fixes_skipped"].as_u64().unwrap() >= 3,
+        "the lexical issues are still skipped"
+    );
+    assert!(
+        parsed["fixes_declined"].is_null() || parsed["fixes_declined"] == 0,
+        "out-of-tier issues are not declines: {}",
+        parsed["fixes_declined"]
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
+
+    // The run above asks for JSON, so its stderr never carries the human fix
+    // summary and asserting on it would pass no matter what the code did.
+    // Exercise the human path on its own.
+    let output = run_lint_args(&[file.to_str().unwrap(), "--fix=orthographic"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("declined"),
+        "human output must not claim declines either: {stderr}"
+    );
+}
+
+#[test]
 fn cli_lint_fix_round_trip() {
     // Fix, then re-lint: should find 0 fixable issues.
     let dir = tempfile::tempdir().unwrap();
@@ -693,6 +975,7 @@ fn cli_lint_sarif_output() {
     assert_eq!(parsed["version"], "2.1.0");
     let runs = parsed["runs"].as_array().unwrap();
     assert_eq!(runs.len(), 1);
+
     // Consumers render informationUri as the tool's home link and validate it
     // as a URI. Two independent properties, because equality alone would be
     // tautological (Cargo defines CARGO_PKG_REPOSITORY as "" when the manifest
@@ -821,8 +1104,8 @@ fn cli_lint_compact_format_clean_is_empty() {
 
 #[test]
 fn cli_lint_compact_format_dedup() {
-    // 5 identical 視頻 issues should deduplicate to one line with ×N.
-    // 視頻 is confusable and needs a context clue (e.g. 平台) to fire.
+    // 5 identical 視頻 issues should deduplicate to one line with ×N. 視頻 is
+    // confusable and needs a context clue (e.g. 平台) to fire.
     let output = run_lint_stdin(
         &["--format", "compact"],
         "平台上的視頻、視頻、視頻、視頻、視頻",
@@ -843,8 +1126,8 @@ fn cli_lint_compact_format_dedup() {
 
 #[test]
 fn cli_lint_compact_format_suggestion_plus_n() {
-    // 視頻 has 3 suggestions: 影片, 影音, 視訊 → compact shows 影片+2
-    // 視頻 is confusable and needs a context clue (e.g. 串流) to fire.
+    // 視頻 has 3 suggestions: 影片, 影音, 視訊 → compact shows 影片+2 視頻 is
+    // confusable and needs a context clue (e.g. 串流) to fire.
     let output = run_lint_stdin(&["--format", "compact"], "串流視頻");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -873,8 +1156,9 @@ fn cli_lint_compact_format_no_file_prefix_stdin() {
 
 #[test]
 fn cli_lint_compact_format_includes_path_single_file() {
-    // Single-file compact output must include the filename for grep compatibility.
-    // Run with current_dir set to the tempdir so strip_prefix relativization is exercised.
+    // Single-file compact output must include the filename for grep
+    // compatibility. Run with current_dir set to the tempdir so strip_prefix
+    // relativization is exercised.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.txt");
     std::fs::write(&path, "這個軟件").unwrap();
@@ -898,8 +1182,8 @@ fn cli_lint_compact_format_includes_path_single_file() {
 
 #[test]
 fn cli_lint_compact_token_reduction_vs_human() {
-    // Gate: ≥40% token reduction vs human default.
-    // Approximate tokens by character count (reasonable proxy for CJK+ASCII mix).
+    // Gate: ≥40% token reduction vs human default. Approximate tokens by
+    // character count (reasonable proxy for CJK+ASCII mix).
     let input = "這個軟件使用了串流視頻功能，串流視頻品質不錯。並行計算很快。";
     let human_output = run_lint_stdin(&["--format", "human"], input);
     let compact_output = run_lint_stdin(&["--format", "compact"], input);
@@ -1021,9 +1305,9 @@ fn cli_lint_grammar_explain_format() {
 
 #[test]
 fn cli_lint_grammar_does_not_suppress_spelling() {
-    // Grammar issues run after overlap resolution, so a text with both
-    // a spelling issue and a grammar issue should report both.
-    // 軟件 triggers a spelling issue; 是不是…嗎 triggers grammar.
+    // Grammar issues run after overlap resolution, so a text with both a
+    // spelling issue and a grammar issue should report both. 軟件 triggers a
+    // spelling issue; 是不是…嗎 triggers grammar.
     let input = "你是不是喜歡這個軟件嗎？";
     let output = run_lint_stdin(&["--format", "json"], input);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1042,9 +1326,9 @@ fn cli_lint_grammar_does_not_suppress_spelling() {
 
 #[test]
 fn cli_lint_grammar_disabled_with_relaxed() {
-    // --relaxed disables grammar_checks.
-    // Use input with both a grammar pattern and a spelling issue (軟件)
-    // to prove grammar is selectively disabled, not that all issues vanish.
+    // --relaxed disables grammar_checks. Use input with both a grammar pattern
+    // and a spelling issue (軟件) to prove grammar is selectively disabled, not
+    // that all issues vanish.
     let input = "你是不是喜歡這個軟件嗎？";
     let output = run_lint_stdin(&["--format", "json", "--relaxed"], input);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1121,9 +1405,9 @@ fn cli_lint_detect_ai_enables_density_detection() {
 
 #[test]
 fn cli_lint_detect_style_emits_three_axis_scorecard() {
-    // --detect-style produces a three-axis scorecard
-    // (ai / translationese / consistency).  All three axes are reported
-    // side by side and never collapsed into a single number.
+    // --detect-style produces a three-axis scorecard (ai / translationese /
+    // consistency). All three axes are reported side by side and never
+    // collapsed into a single number.
     let text = "策略的實施帶來了效率的提升。實際上基本上每個人都同意。\
                 這是 20 世紀最重要的發現之一。當我抵達公司的時候，他已經在開會了。";
     let output = run_lint_stdin(&["--detect-style", "--format", "json"], text);
@@ -1431,5 +1715,213 @@ fn cli_lint_translationese_technical_gate_low_false_positive_rate() {
     assert!(
         translationese_count <= 1,
         "technical clean-text gate allows <=1 FP per short fixture: {stdout}"
+    );
+}
+
+#[test]
+fn cli_lint_context_suggestions_survive_pack_loading() {
+    // The field rides on SpellingRule, so packs get it for free in principle.
+    // This pins that the pack deserialization path actually carries it, and
+    // that a multi-entry group is reported but never auto-applied.
+    let dir = tempfile::tempdir().unwrap();
+    let packs = write_pack(
+        dir.path(),
+        "ctxsug",
+        serde_json::json!({
+            "from": "測試詞",
+            "to": ["預設詞"],
+            "type": "cross_strait",
+            "english": "test term",
+            "context_suggestions": [
+                { "clues": ["流程"], "to": ["改善詞", "提升詞"] }
+            ],
+        }),
+    );
+
+    let it_file = dir.path().join("it.md");
+    let biz_file = dir.path().join("biz.md");
+    std::fs::write(&it_file, "需要測試詞演算法").unwrap();
+    std::fs::write(&biz_file, "需要測試詞流程").unwrap();
+
+    let suggestions = |path: &std::path::Path| -> Vec<String> {
+        let output = run_bin_args(&[
+            "--packs-dir",
+            &packs,
+            "--pack",
+            "ctxsug",
+            "lint",
+            path.to_str().unwrap(),
+            "--format",
+            "json",
+        ]);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("valid JSON");
+        parsed["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["found"] == "測試詞")
+            .map(|i| {
+                i["suggestions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.as_str().unwrap().to_string())
+                    .collect()
+            })
+            .expect("pack rule should fire")
+    };
+
+    assert_eq!(suggestions(&it_file), ["預設詞"], "no clue: rule default");
+    assert_eq!(
+        suggestions(&biz_file),
+        ["改善詞", "提升詞"],
+        "clue in window selects the group"
+    );
+
+    // A clue inside code is not prose, so it must not select the group. Getting
+    // this wrong is worse than a cosmetic wording change: the two-entry group
+    // is never auto-applied, so the match silently stops being fixable because
+    // of a word in a code sample.
+    //
+    // The pair below is inline code on the same line, deliberately, because it
+    // is the only shape that discriminates. A fenced block has to be preceded
+    // by a blank line, and context_byte_window already stops at a paragraph
+    // break, so a fenced fixture passes even when the excluded ranges are never
+    // threaded into the selection window at all. The control case differs only
+    // in the backticks.
+    let inline_file = dir.path().join("inline.md");
+    std::fs::write(&inline_file, "需要測試詞演算法 `流程` 說明\n").unwrap();
+    assert_eq!(
+        suggestions(&inline_file),
+        ["預設詞"],
+        "a clue inside an inline code span must not select the group"
+    );
+
+    let bare_file = dir.path().join("bare.md");
+    std::fs::write(&bare_file, "需要測試詞演算法 流程 說明\n").unwrap();
+    assert_eq!(
+        suggestions(&bare_file),
+        ["改善詞", "提升詞"],
+        "the same clue as prose, same distance, does select the group"
+    );
+
+    // The single-suggestion default is auto-fixable; the two-entry group is
+    // not.
+    let output = run_bin_args(&[
+        "--packs-dir",
+        &packs,
+        "--pack",
+        "ctxsug",
+        "lint",
+        it_file.to_str().unwrap(),
+        "--fix=lexical_safe",
+    ]);
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read_to_string(&it_file).unwrap(),
+        "需要預設詞演算法"
+    );
+
+    let output = run_bin_args(&[
+        "--packs-dir",
+        &packs,
+        "--pack",
+        "ctxsug",
+        "lint",
+        biz_file.to_str().unwrap(),
+        "--fix=lexical_contextual",
+    ]);
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read_to_string(&biz_file).unwrap(),
+        "需要測試詞流程",
+        "a multi-entry group must stay a judgment call at every tier"
+    );
+}
+
+#[test]
+fn cli_lint_orthographic_tier_never_picks_among_candidates() {
+    // A variant rule is orthographic, so the fixer applies it at every tier. It
+    // used to take the first of however many suggestions were offered, which
+    // meant a pack could get one of two judgment calls written to the user's
+    // file at --fix=orthographic, the most conservative tier there is. Both
+    // routes into that arm are covered here: a plain multi-entry `to`, and a
+    // multi-entry context group.
+    let dir = tempfile::tempdir().unwrap();
+    for (name, rule, text) in [
+        (
+            "vmulti",
+            serde_json::json!({
+                "from": "測試詞", "to": ["甲詞", "乙詞"],
+                "type": "variant", "english": "test term",
+            }),
+            "需要測試詞",
+        ),
+        (
+            "vctx",
+            serde_json::json!({
+                "from": "測試詞", "to": ["預設詞"],
+                "type": "variant", "english": "test term",
+                "context_suggestions": [{ "clues": ["流程"], "to": ["改善詞", "提升詞"] }],
+            }),
+            "需要測試詞流程",
+        ),
+    ] {
+        let packs = write_pack(dir.path(), name, rule);
+        let file = dir.path().join(format!("{name}.md"));
+        std::fs::write(&file, text).unwrap();
+
+        let output = run_bin_args(&[
+            "--packs-dir",
+            &packs,
+            "--pack",
+            name,
+            "lint",
+            file.to_str().unwrap(),
+            "--profile",
+            "strict",
+            "--fix=orthographic",
+        ]);
+        assert!(output.status.success());
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            text,
+            "{name}: several candidates must never be resolved by picking one"
+        );
+    }
+}
+
+#[test]
+fn cli_lint_editorial_confidence_gate_covers_a_shipped_rule() {
+    // Every other test of this gate builds a synthetic pack. Seven shipped
+    // rules carry editorial_confidence: low, but six have multi-entry `to`
+    // lists and were already declined at suggestion selection, so 場景 is the
+    // only one whose behavior the annotation actually changes. Without this the
+    // gate is only ever exercised against rules that do not ship.
+    let dir = tempfile::tempdir().unwrap();
+    let safe = dir.path().join("safe.md");
+    let contextual = dir.path().join("contextual.md");
+
+    // Clue-bearing IT prose, so the rule's own context gate is satisfied and
+    // the editorial annotation is the only thing left deciding.
+    let source = "這個測試場景需要在系統中重現。";
+    std::fs::write(&safe, source).unwrap();
+    std::fs::write(&contextual, source).unwrap();
+
+    let output = run_lint_args(&[safe.to_str().unwrap(), "--fix=lexical_safe"]);
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read_to_string(&safe).unwrap(),
+        source,
+        "lexical_safe must decline a low-confidence shipped rule"
+    );
+
+    let output = run_lint_args(&[contextual.to_str().unwrap(), "--fix=lexical_contextual"]);
+    assert!(output.status.success());
+    let fixed = std::fs::read_to_string(&contextual).unwrap();
+    assert!(
+        fixed.contains("情境"),
+        "lexical_contextual must apply it: {fixed}"
     );
 }

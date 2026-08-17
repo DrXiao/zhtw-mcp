@@ -1126,20 +1126,11 @@ mod tests {
     #[test]
     fn from_rules_builds_dict() {
         use crate::rules::ruleset::{RuleType, SpellingRule};
-        let rules = vec![SpellingRule {
-            from: "軟件".into(),
-            to: vec!["軟體".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }];
+        let rules = vec![SpellingRule::new(
+            "軟件",
+            vec!["軟體".into()],
+            RuleType::CrossStrait,
+        )];
         let seg = Segmenter::from_rules(&rules);
         // Dict should contain "軟件", "軟體", and all stop words.
         assert!(seg.trie.contains("軟件"));
@@ -1265,20 +1256,11 @@ mod tests {
     #[test]
     fn freq_weights_assigned_correctly() {
         use crate::rules::ruleset::{RuleType, SpellingRule};
-        let rules = vec![SpellingRule {
-            from: "軟件".into(),
-            to: vec!["軟體".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }];
+        let rules = vec![SpellingRule::new(
+            "軟件",
+            vec!["軟體".into()],
+            RuleType::CrossStrait,
+        )];
         let seg = Segmenter::from_rules(&rules);
         // Stop word "的" must have freq=10.
         assert_eq!(seg.trie.get_freq("的"), Some(10));
@@ -1374,20 +1356,11 @@ mod tests {
     #[test]
     fn general_vocab_in_from_rules_dict() {
         use crate::rules::ruleset::{RuleType, SpellingRule};
-        let rules = vec![SpellingRule {
-            from: "軟件".into(),
-            to: vec!["軟體".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }];
+        let rules = vec![SpellingRule::new(
+            "軟件",
+            vec!["軟體".into()],
+            RuleType::CrossStrait,
+        )];
         let seg = Segmenter::from_rules(&rules);
         // General vocab words should be present.
         assert!(seg.trie.contains("提供"));
@@ -1405,18 +1378,8 @@ mod tests {
     fn general_vocab_improves_clue_recall() {
         use crate::rules::ruleset::{RuleType, SpellingRule};
         let rules = vec![SpellingRule {
-            from: "數據".into(),
-            to: vec!["資料".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
             context_clues: Some(vec!["分析".into(), "處理".into()]),
-            negative_context_clues: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
+            ..SpellingRule::new("數據", vec!["資料".into()], RuleType::CrossStrait)
         }];
         let seg = Segmenter::from_rules(&rules);
 
@@ -1432,20 +1395,11 @@ mod tests {
     #[test]
     fn general_vocab_segments_as_multichar() {
         use crate::rules::ruleset::{RuleType, SpellingRule};
-        let rules = vec![SpellingRule {
-            from: "軟件".into(),
-            to: vec!["軟體".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }];
+        let rules = vec![SpellingRule::new(
+            "軟件",
+            vec!["軟體".into()],
+            RuleType::CrossStrait,
+        )];
         let seg = Segmenter::from_rules(&rules);
         let tokens = seg.segment("目前提供的重要功能");
         let dict_words: Vec<&str> = tokens
@@ -1464,20 +1418,11 @@ mod tests {
     fn general_vocab_does_not_override_rule_freq() {
         use crate::rules::ruleset::{RuleType, SpellingRule};
         // "設計" is both a general vocab word AND could be a rule term.
-        let rules = vec![SpellingRule {
-            from: "設計".into(),
-            to: vec!["設計".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }];
+        let rules = vec![SpellingRule::new(
+            "設計",
+            vec!["設計".into()],
+            RuleType::CrossStrait,
+        )];
         let seg = Segmenter::from_rules(&rules);
 
         // Rule term "設計" inserted first with freq=1; general vocab uses

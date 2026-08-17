@@ -23,6 +23,8 @@ Quotation mark conversion includes a pairing fix: when CN curly quotes are unbal
 
 Some cross-strait rules involve false friends (假朋友), where the `from` term is also a valid zh-TW word with a different meaning. For example, 文件 means "file" in zh-CN but "document" in zh-TW. These rules are disabled to prevent false positives.
 
+A milder case gets the optional `editorial_confidence` field instead of being disabled, and a term needing different corrections in different domains gets `context_suggestions`. Both are described under [Optional rule fields](#optional-rule-fields).
+
 Tree data structure terminology follows a gender-neutral naming principle (性別中立原則). English terms like "parent" and "sibling" are inherently gender-neutral, so zh-TW translations should preserve that neutrality rather than importing gendered kinship terms:
 
 | Flagged | Suggested | English | Rationale |
@@ -109,6 +111,60 @@ JavaScript  TypeScript  Python  Rust  HTTP  HTTPS
 API  JSON  GitHub  Instagram  Google  Facebook
 React  Linux  macOS
 ```
+
+## Optional rule fields
+
+These apply to any lexical rule type, not just `cross_strait`. Seven rules currently carry `editorial_confidence`, and five of them are not `cross_strait`: one `confusable` and four `translationese`.
+
+### editorial_confidence
+
+`"low"` marks a rule whose flagged form is valid zh-TW and whose suggestion is a register preference rather than a correction, so the term is worth reporting but not worth rewriting unattended. Auto-fix honors it: `lexical_safe` declines these rules and only `lexical_contextual` applies them.
+
+Use it sparingly; a rule that is simply wrong in zh-TW should carry no annotation, even when the flagged form has a valid unrelated sense. 算法 is the reference case: 演算法 is the MoE standard, so the rule stays unannotated and auto-fixes, and the arithmetic sense of 算法 is handled with `context_clues` if it ever needs handling.
+
+Only lexical rule types can carry the field. The fixer's gate is guarded on lexical issues, and `variant` rules classify as orthographic, so an annotation there would be silently ignored; `scripts/check-ruleset.py --lint` rejects that placement.
+
+The MCP `explain` output also reports `auto_fix_safe` and `needs_review`, but on a wider notion of low confidence: when a rule carries no annotation it falls back to a heuristic that treats translationese, AI-style, grammar, `Info`-severity, and anchor-rejected issues as low. That fallback decides what to tell a human reviewer, not what the fixer writes. Do not read `auto_fix_safe: false` as a prediction that `--fix=lexical_safe` will decline the issue; only the explicit ruleset annotation gates the fixer.
+
+### context_suggestions
+
+One source term can need different corrections in different domains, and a flat `to` list cannot say so. `context_suggestions` is a list of `{clues, to}` groups: when any clue appears in the same ±40-character window the context-clue gate uses (clamped at paragraph breaks and at excluded ranges such as code blocks, so a clue in the next paragraph or inside a fence cannot select a group), that group's `to` replaces the rule's default for that match only. Groups are tried in order, so the first match wins and ruleset order is the precedence order.
+
+`優化` is the worked example. IT `optimize` takes 最佳化, but where the text means improve rather than make-optimal, 「優化」is a misuse and the right word is 改善 or 提升, per <https://hackmd.io/@sysprog/it-vocabulary>:
+
+```json
+{
+  "from": "優化",
+  "to": ["最佳化"],
+  "context_suggestions": [
+    { "clues": ["微服務", "服務端", "客戶端", "用戶端"], "to": ["最佳化"] },
+    { "clues": ["流程", "體驗", "服務", "客戶", "顧客", "營運", "績效", "品質"], "to": ["改善", "提升"] }
+  ]
+}
+```
+
+So 「優化演算法」suggests 最佳化 and auto-fixes, while 「優化客戶服務流程」suggests 改善 or 提升 and does not. That difference is deliberate: a group carrying several entries is never auto-applied at any tier, because choosing between them is a judgment call. Putting 改善 and 提升 directly in `to` would instead disable auto-fix for the IT sense as well, which is the trade this field exists to avoid.
+
+That invariant is structural rather than per-field: the fixer writes only when exactly one candidate is on offer, whatever produced it and whatever the tier. Groups are still dropped at compile time on deletion rules, for an unrelated reason: the reported span comes from the rule's own `to`, so a group offering a real replacement would report a shorter span than it rewrites.
+
+Selection is a raw substring test over the window, so a clue matches inside
+longer words: 服務 matches 微服務, 客戶 matches 客戶端. Dropping those clues is
+the wrong fix, because it drops the bare business reading with them, and there
+the rule default is not merely unhelpful but wrong. 「優化服務」would fall through
+to 最佳化 and auto-fix at `lexical_safe`, silently rewriting a sentence that
+means improve the service, where before this field existed the term was not
+flagged there at all.
+
+The narrow IT group above repeats the rule default 最佳化 rather than offering
+anything new, because its only job is to claim those compounds before the broad
+group's 服務 and 客戶 match inside them. `--lint` rejects the two groups in the
+other order, since the broad one would swallow the narrow one entirely.
+
+A clue this field gets wrong is worse than one `context_clues` gets wrong: it
+does not just gate the match, it replaces the suggestion, and a multi-entry
+group also removes auto-fix at every tier.
+
+A malformed group is dropped whole, never repaired. That covers an empty `clues` list (can never select), an empty `to` list (would erase the rule default), and an empty string anywhere inside `to`. The last one matters most: filtering the empty entry out of `["改善", ""]` would leave a one-entry group, and one entry is auto-fixable, so a typo would quietly grant the write permission the author's two candidates were meant to deny. A clue that also appears in `negative_context_clues` can never select, because the negative clue vetoes the whole match first; `--lint` warns about all of these.
 
 ## Extending the ruleset
 

@@ -2,6 +2,13 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+// The postcard wire-format types live in one file that build.rs include!s, so
+// the serializer and the deserializer cannot drift. Re-exported here so every
+// existing crate::rules::ruleset::* path keeps resolving.
+pub use super::schema::{
+    CaseRule, ContextSuggestion, EditorialConfidence, RuleType, Ruleset, SpellingRule,
+};
+
 /// Linting profile controlling zh-TW norm enforcement strictness.
 ///
 /// Two profiles on the strictness axis:
@@ -77,7 +84,8 @@ pub struct ProfileConfig {
     /// for issues whose span is fully contained inside a heading.  Headings
     /// are higher-visibility than body prose and warrant stricter treatment.
     pub heading_severity_boost: bool,
-    /// Political stance sub-profile. Controls which PoliticalColoring rules fire.
+    /// Political stance sub-profile. Controls which PoliticalColoring rules
+    /// fire.
     pub political_stance: PoliticalStance,
     /// When true, skip line/col computation (byte offsets only).
     /// Used by MCP tool which consumes offsets directly.
@@ -267,7 +275,8 @@ impl PoliticalStance {
         }
     }
 
-    /// Whether a specific political_coloring rule should fire under this stance.
+    /// Whether a specific political_coloring rule should fire under this
+    /// stance.
     ///
     /// Identity-loaded terms (內地, 大陸同胞, 祖國) are suppressed under
     /// International. All terms suppressed under Neutral.
@@ -337,31 +346,6 @@ impl ResolutionTier {
     }
 }
 
-/// Rule types for spelling/terminology rules.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuleType {
-    /// Mainland China political coloring
-    PoliticalColoring,
-    /// Cross-strait usage difference
-    CrossStrait,
-    /// Typo / spelling correction
-    Typo,
-    /// Confusable term
-    Confusable,
-    /// Character variant: MoE standard form differs from non-standard glyph
-    /// (e.g. 裏->裡, 綫->線). Curated from OpenCC TWVariants.txt.
-    Variant,
-    /// AI filler phrase: zero-information hedging/emphasis inserted by LLMs.
-    /// Fixed-string AC matches; deletions or simple substitutions.
-    AiFiller,
-    /// Translationese (翻譯腔 / 歐化): Europeanized Chinese syntax and
-    /// vocabulary.  Orthogonal to AI detection — a translated manual is
-    /// 歐化 but not AI-generated.  Sourced from the dewesternise checklist
-    /// (余光中《論中文之西化》 and related literature).
-    Translationese,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
@@ -391,6 +375,13 @@ impl Severity {
 }
 
 impl RuleType {
+    /// True when issues from this rule type land in the fixer's orthographic
+    /// tier.  Delegates to `IssueType::is_orthographic` through the same
+    /// mapping the scanner uses, so the two cannot disagree.
+    pub fn is_orthographic(self) -> bool {
+        IssueType::from(self).is_orthographic()
+    }
+
     pub fn default_severity(self) -> Severity {
         match self {
             RuleType::PoliticalColoring | RuleType::Typo => Severity::Error,
@@ -400,95 +391,6 @@ impl RuleType {
     }
 }
 
-/// A spelling/terminology rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpellingRule {
-    /// The term to match (source form to be flagged).
-    pub from: String,
-    /// One or more replacement suggestions (target forms).
-    pub to: Vec<String>,
-    /// Classification of this rule.
-    #[serde(rename = "type")]
-    pub rule_type: RuleType,
-    /// If true, this rule is disabled and will not be used for scanning.
-    #[serde(default)]
-    pub disabled: bool,
-    /// Usage context that helps the AI agent pick the right suggestion
-    /// when multiple correct forms exist or when the term is ambiguous.
-    #[serde(default)]
-    pub context: Option<String>,
-    /// English original term — serves as an unambiguous anchor when the
-    /// same Chinese term means different things across the strait.
-    /// E.g. 並行 = concurrency (TW) vs parallelism (CN).
-    #[serde(default)]
-    pub english: Option<String>,
-    /// Exception phrases where the matched form should not be flagged.
-    /// Applies to all rule types (variant, cross_strait, typo, confusable).
-    /// E.g. chess term 下著 keeps 着; 分類 keeps 類 from firing as a class
-    /// warning.  An empty or absent list means no exceptions.
-    #[serde(default)]
-    pub exceptions: Option<Vec<String>>,
-    /// Surrounding words that suggest the intended meaning for ambiguous terms.
-    /// When present, the fixer uses segmentation to check if these clue words
-    /// appear near the match. E.g. 程序 with clues ["編寫", "代碼", "執行"]
-    /// suggests the "program" sense rather than "procedure".
-    #[serde(default)]
-    pub context_clues: Option<Vec<String>>,
-    /// Words that, when present in the surrounding window, indicate the term is
-    /// being used correctly in context and should NOT be flagged.  Acts as a
-    /// veto: if any negative clue matches, the rule is skipped regardless of
-    /// positive context_clues.  E.g. 項目 should not fire when 的 or 等
-    /// precede it (list-item grammatical usage vs. project/IT usage).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub negative_context_clues: Option<Vec<String>>,
-    /// Positional conditions that constrain WHERE a context term must appear
-    /// relative to the match.  More expressive than flat context_clues (which
-    /// check presence anywhere in +-40-char window).  Syntax:
-    ///
-    /// - `before:TERM` — TERM must appear within 20 chars AFTER the match
-    /// - `after:TERM` — TERM must appear within 20 chars BEFORE the match
-    /// - `adjacent:TERM` — TERM must be immediately adjacent (no gap)
-    /// - `not_before:TERM` — TERM must NOT appear within 20 chars after
-    /// - `not_after:TERM` — TERM must NOT appear within 20 chars before
-    ///
-    /// All positive conditions must pass (AND). Any negative condition vetoes.
-    /// When both context_clues and positional_clues are present, both must
-    /// match (AND).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub positional_clues: Option<Vec<String>>,
-    /// Optional tags for categorization and filtering in rule packs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Vec<String>>,
-    /// Per-rule editorial confidence (35.2).  Distinguishes binary
-    /// corrections from style-preference suggestions.  When set to
-    /// `Low`, the explain pipeline marks issues from this rule as
-    /// `auto_fix_safe = false` AND `needs_review = true` — these are
-    /// terms whose Mainland/Taiwan distinction is genuine but where
-    /// the calque form is also valid zh-TW vocabulary in some senses
-    /// (e.g. `優化`, `算法`, `場景`).  Defaults to `None` (heuristic
-    /// derivation in `derive_explain_meta`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub editorial_confidence: Option<EditorialConfidence>,
-}
-
-/// Editorial confidence tier surfaced in explain output (35.2).
-///
-/// Per-issue field that distinguishes binary corrections (`線程` →
-/// `執行緒`, high) from editorial-judgment terms (`優化` is valid
-/// zh-TW; `最佳化` is preferred in formal writing — low).  Distinct
-/// from `summary_metrics.confidence_distribution`, which tracks
-/// resolution-tier confidence across the document.
-///
-/// Invariant enforced downstream: `Low` ⇒ `auto_fix_safe = false`
-/// AND `needs_review = true`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum EditorialConfidence {
-    High,
-    Medium,
-    Low,
-}
-
 impl SpellingRule {
     /// True when this rule is an AiFiller deletion (`to: [""]`): the matched
     /// phrase should be removed entirely, with the empty string as the fix.
@@ -496,8 +398,31 @@ impl SpellingRule {
         self.rule_type == RuleType::AiFiller && self.to.len() == 1 && self.to[0].is_empty()
     }
 
-    /// Create a spelling rule with required fields; optional fields default to None.
-    #[cfg(test)]
+    /// True when this rule's own `to` is the deletion sentinel, whatever its
+    /// type: empty, or leading with an empty string.
+    ///
+    /// Wider than [`Self::is_deletion_rule`], which also requires `AiFiller`.
+    /// Inflation derives the reported span from this shape, and the group
+    /// compiler refuses `context_suggestions` on it for that reason, so the
+    /// two have to agree; naming it once is what makes them.
+    pub fn has_deletion_sentinel(&self) -> bool {
+        self.to.first().is_some_and(|t| t.is_empty()) || self.to.is_empty()
+    }
+
+    /// Create a spelling rule with required fields; optional fields default to
+    /// None.  Combine with struct-update syntax to set one of them:
+    ///
+    /// ```ignore
+    /// SpellingRule {
+    ///     exceptions: Some(vec!["下著".into()]),
+    ///     ..SpellingRule::new("著", vec!["着".into()], RuleType::Variant)
+    /// }
+    /// ```
+    ///
+    /// Not `#[cfg(test)]`, though tests are the main caller: that gate made it
+    /// invisible to the integration tests in `tests/`, which link the library
+    /// built without `cfg(test)`, so those files spelled out all thirteen
+    /// fields and every new optional field cost an edit in each of them.
     pub fn new(from: impl Into<String>, to: Vec<String>, rule_type: RuleType) -> Self {
         Self {
             from: from.into(),
@@ -510,30 +435,11 @@ impl SpellingRule {
             context_clues: None,
             negative_context_clues: None,
             positional_clues: None,
+            context_suggestions: None,
             tags: None,
             editorial_confidence: None,
         }
     }
-}
-
-/// A proper noun casing rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CaseRule {
-    /// The canonical correct casing (e.g. "JavaScript").
-    pub term: String,
-    /// Other accepted casings (e.g. ["javascript", "JAVASCRIPT"]).
-    #[serde(default)]
-    pub alternatives: Option<Vec<String>>,
-    /// If true, this rule is disabled and will not be used for scanning.
-    #[serde(default)]
-    pub disabled: bool,
-}
-
-/// Top-level ruleset container — the JSON source format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Ruleset {
-    pub spelling_rules: Vec<SpellingRule>,
-    pub case_rules: Vec<CaseRule>,
 }
 
 /// An issue found by the scanner.
@@ -731,7 +637,8 @@ impl Issue {
     }
 }
 
-/// Issue classification — covers spelling, case, punctuation, grammar, and AI style checks.
+/// Issue classification — covers spelling, case, punctuation, grammar, and AI
+/// style checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueType {
@@ -755,6 +662,22 @@ pub enum IssueType {
 }
 
 impl IssueType {
+    /// True for issue types the fixer treats as mechanical: applied at every
+    /// `--fix` tier, taking the first suggestion without the single-candidate
+    /// check that keeps judgment calls out of the write path.
+    ///
+    /// The definition lives here rather than inline in the fixer because three
+    /// places need the same answer and were drifting: the fixer's tier gate,
+    /// the compile step that refuses `context_suggestions` on orthographic
+    /// rules, and `scripts/check-ruleset.py`.  A rule type added to one and not
+    /// the others quietly auto-applies a term nobody meant to auto-apply.
+    pub fn is_orthographic(self) -> bool {
+        matches!(
+            self,
+            IssueType::Punctuation | IssueType::Case | IssueType::Variant | IssueType::Grammar
+        )
+    }
+
     /// Stable ordering key for deterministic output (used by scan sort).
     pub fn sort_order(self) -> u8 {
         match self {
@@ -801,7 +724,8 @@ pub fn is_delete_suggestion(suggestions: &[String]) -> bool {
 }
 
 impl Issue {
-    /// Compact suggestion string: first suggestion only, `+N` suffix for alternatives.
+    /// Compact suggestion string: first suggestion only, `+N` suffix for
+    /// alternatives.
     /// Falls back to `english` field when no suggestions exist.
     pub fn compact_suggestion(&self) -> String {
         if self.suggestions.is_empty() {
@@ -816,8 +740,10 @@ impl Issue {
     }
 
     /// Grouping key for deduplication in compact output.
-    /// Issues with identical (found, rule_type, suggestions, severity) are collapsible.
-    /// Uses full suggestion list (joined) rather than compact display form to avoid
+    /// Issues with identical (found, rule_type, suggestions, severity) are
+    /// collapsible.
+    /// Uses full suggestion list (joined) rather than compact display form to
+    /// avoid
     /// merging issues with different alternative sets.
     pub fn compact_dedup_key(&self) -> (&str, &'static str, String, &'static str) {
         (
@@ -872,5 +798,152 @@ mod delete_suggestion_tests {
             Severity::Info,
         );
         assert_eq!(issue.compact_suggestion(), DELETE_SUGGESTION);
+    }
+}
+
+#[cfg(test)]
+mod schema_facts_tests {
+    use super::*;
+
+    /// Facts about the ruleset schema that `scripts/check-ruleset.py` needs.
+    ///
+    /// Written to `scripts/schema-facts.json`, which is checked in and read by
+    /// the script.  Both sides used to hand-parse the other's source: Python
+    /// regexed `schema.rs` for field and variant names, and a Rust test string-
+    /// parsed the Python for its rule-type sets.  Two parsers, four fail-open
+    /// holes between them, and a patch on the first hole that added a second
+    /// parse of the same file.
+    ///
+    /// Serde already knows every one of these facts, so ask it and write the
+    /// answer down.  The generated file is data, so the Python side is a
+    /// `json.load` and the Rust side is this test, which fails when the file on
+    /// disk no longer matches what the types say.
+    #[test]
+    fn schema_facts_file_is_current() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/schema-facts.json");
+        let current =
+            serde_json::to_string_pretty(&schema_facts()).expect("serialize facts") + "\n";
+
+        if std::env::var_os("UPDATE_SCHEMA_FACTS").is_some() {
+            std::fs::write(path, &current).expect("write schema-facts.json");
+            return;
+        }
+        let on_disk = std::fs::read_to_string(path).unwrap_or_default();
+        assert_eq!(
+            on_disk, current,
+            "scripts/schema-facts.json is stale; regenerate with \
+             UPDATE_SCHEMA_FACTS=1 cargo test schema_facts_file_is_current"
+        );
+    }
+
+    /// Every fact the lint script would otherwise copy by hand.
+    ///
+    /// Field names come from serializing a real rule, so renames are whatever
+    /// serde actually does rather than whatever a regex believed.  The
+    /// rule-type lists come from the enum itself.
+    ///
+    /// The emitted lists are sorted, not in declaration order: serde_json's
+    /// Map is a BTreeMap without the preserve_order feature.  That is fine
+    /// because check_schema_parity compares sets, but do not derive the
+    /// postcard wire order from this file.  Wire order is declaration order in
+    /// schema.rs, and the round-trip test in loader.rs is what guards it.
+    fn schema_facts() -> serde_json::Value {
+        let sample = SpellingRule {
+            context: Some(String::new()),
+            english: Some(String::new()),
+            exceptions: Some(Vec::new()),
+            context_clues: Some(Vec::new()),
+            negative_context_clues: Some(Vec::new()),
+            positional_clues: Some(Vec::new()),
+            context_suggestions: Some(Vec::new()),
+            tags: Some(Vec::new()),
+            editorial_confidence: Some(EditorialConfidence::Low),
+            ..SpellingRule::new("x", vec!["y".into()], RuleType::CrossStrait)
+        };
+        let case = CaseRule {
+            term: "X".into(),
+            alternatives: Some(Vec::new()),
+            disabled: false,
+        };
+
+        // Every variant, exhaustively: the match makes a new one fail to
+        // compile here rather than silently drop out of the generated lists.
+        let all = [
+            RuleType::PoliticalColoring,
+            RuleType::CrossStrait,
+            RuleType::Typo,
+            RuleType::Confusable,
+            RuleType::Variant,
+            RuleType::AiFiller,
+            RuleType::Translationese,
+        ];
+        for rt in all {
+            match rt {
+                RuleType::PoliticalColoring
+                | RuleType::CrossStrait
+                | RuleType::Typo
+                | RuleType::Confusable
+                | RuleType::Variant
+                | RuleType::AiFiller
+                | RuleType::Translationese => (),
+            }
+        }
+        let name = |rt: RuleType| {
+            serde_json::to_value(rt)
+                .expect("RuleType serializes")
+                .as_str()
+                .expect("string enum")
+                .to_string()
+        };
+
+        let confidences = [
+            EditorialConfidence::High,
+            EditorialConfidence::Medium,
+            EditorialConfidence::Low,
+        ];
+        for ec in confidences {
+            match ec {
+                EditorialConfidence::High
+                | EditorialConfidence::Medium
+                | EditorialConfidence::Low => (),
+            }
+        }
+
+        serde_json::json!({
+            "_comment": concat!(
+                "Generated from the Rust types by schema_facts_file_is_current in ",
+                "src/rules/ruleset.rs. Do not edit; regenerate with ",
+                "UPDATE_SCHEMA_FACTS=1 cargo test schema_facts_file_is_current."
+            ),
+            "spelling_fields": keys(&sample),
+            "case_fields": keys(&case),
+            "rule_types": all.iter().map(|rt| name(*rt)).collect::<Vec<_>>(),
+            "orthographic_rule_types": all
+                .iter()
+                .filter(|rt| rt.is_orthographic())
+                .map(|rt| name(*rt))
+                .collect::<Vec<_>>(),
+            "editorial_confidence": confidences
+                .iter()
+                .map(|ec| {
+                    serde_json::to_value(ec)
+                        .expect("EditorialConfidence serializes")
+                        .as_str()
+                        .expect("string enum")
+                        .to_string()
+                })
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// JSON keys of a value, in serialization order.
+    fn keys<T: Serialize>(v: &T) -> Vec<String> {
+        serde_json::to_value(v)
+            .expect("serializes")
+            .as_object()
+            .expect("struct is an object")
+            .keys()
+            .cloned()
+            .collect()
     }
 }

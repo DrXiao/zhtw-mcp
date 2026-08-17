@@ -21,7 +21,8 @@ pub fn load_embedded_ruleset() -> Result<Ruleset> {
     Ok(ruleset)
 }
 
-/// Compute a combined hash of all rules (spelling + case) for reproducibility tracking.
+/// Compute a combined hash of all rules (spelling + case) for reproducibility
+/// tracking.
 /// This hash changes whenever base rules or overrides change.
 pub fn compute_ruleset_hash(
     spelling_rules: &[super::ruleset::SpellingRule],
@@ -42,21 +43,11 @@ mod tests {
 
     #[test]
     fn hash_deterministic() {
-        let rules = vec![SpellingRule {
-            from: "軟件".into(),
-            to: vec!["軟體".into()],
-            rule_type: RuleType::CrossStrait,
-
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }];
+        let rules = vec![SpellingRule::new(
+            "軟件",
+            vec!["軟體".into()],
+            RuleType::CrossStrait,
+        )];
         let case_rules = vec![CaseRule {
             term: "JavaScript".into(),
             alternatives: None,
@@ -71,36 +62,16 @@ mod tests {
 
     #[test]
     fn hash_changes_with_rules() {
-        let rules_a = vec![SpellingRule {
-            from: "軟件".into(),
-            to: vec!["軟體".into()],
-            rule_type: RuleType::CrossStrait,
-
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }];
-        let rules_b = vec![SpellingRule {
-            from: "內存".into(),
-            to: vec!["記憶體".into()],
-            rule_type: RuleType::CrossStrait,
-
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }];
+        let rules_a = vec![SpellingRule::new(
+            "軟件",
+            vec!["軟體".into()],
+            RuleType::CrossStrait,
+        )];
+        let rules_b = vec![SpellingRule::new(
+            "內存",
+            vec!["記憶體".into()],
+            RuleType::CrossStrait,
+        )];
         let case_rules: Vec<CaseRule> = vec![];
 
         let h1 = compute_ruleset_hash(&rules_a, &case_rules);
@@ -129,44 +100,81 @@ mod tests {
             json_ruleset.case_rules.len(),
             postcard_ruleset.case_rules.len()
         );
-        // Full field-by-field parity: catches postcard schema drift
-        // (e.g. field reorder, enum variant reorder between build.rs and
-        // runtime types).
+
+        // Full field-by-field parity: the JSON the ruleset ships as must
+        // survive the postcard round trip unchanged.
+        //
+        // build.rs no longer mirrors these types; it include!s
+        // src/rules/schema.rs, so a field cannot exist on one side and not the
+        // other. What remains is the asymmetry inside serde itself: postcard is
+        // not self-describing, so any attribute that changes what Serialize
+        // emits without changing what Deserialize expects (skip_serializing_if
+        // is the one that already bit us) silently shortens the stream and
+        // shifts every following field. That is what this test still catches.
+        //
+        // The destructuring is load-bearing, not style. Listing fields by hand
+        // let two of them (editorial_confidence, context_suggestions) go
+        // unchecked for several releases. Exhaustive destructuring makes the
+        // compiler refuse to build this test until a new field is handled here,
+        // so the coverage cannot silently rot again.
         for (i, (j, p)) in json_ruleset
             .spelling_rules
             .iter()
             .zip(postcard_ruleset.spelling_rules.iter())
             .enumerate()
         {
-            assert_eq!(j.from, p.from, "spelling rule {i}: from mismatch");
-            assert_eq!(j.to, p.to, "spelling rule {i}: to mismatch");
+            let SpellingRule {
+                from,
+                to,
+                rule_type,
+                disabled,
+                context,
+                english,
+                exceptions,
+                context_clues,
+                negative_context_clues,
+                positional_clues,
+                context_suggestions,
+                tags,
+                editorial_confidence,
+            } = j;
+            assert_eq!(*from, p.from, "spelling rule {i}: from mismatch");
+            assert_eq!(*to, p.to, "spelling rule {i}: to mismatch");
             assert_eq!(
-                j.rule_type, p.rule_type,
+                *rule_type, p.rule_type,
                 "spelling rule {i}: rule_type mismatch"
             );
             assert_eq!(
-                j.disabled, p.disabled,
+                *disabled, p.disabled,
                 "spelling rule {i}: disabled mismatch"
             );
-            assert_eq!(j.context, p.context, "spelling rule {i}: context mismatch");
-            assert_eq!(j.english, p.english, "spelling rule {i}: english mismatch");
+            assert_eq!(*context, p.context, "spelling rule {i}: context mismatch");
+            assert_eq!(*english, p.english, "spelling rule {i}: english mismatch");
             assert_eq!(
-                j.exceptions, p.exceptions,
+                *exceptions, p.exceptions,
                 "spelling rule {i}: exceptions mismatch"
             );
             assert_eq!(
-                j.context_clues, p.context_clues,
+                *context_clues, p.context_clues,
                 "spelling rule {i}: context_clues mismatch"
             );
             assert_eq!(
-                j.negative_context_clues, p.negative_context_clues,
+                *negative_context_clues, p.negative_context_clues,
                 "spelling rule {i}: negative_context_clues mismatch"
             );
             assert_eq!(
-                j.positional_clues, p.positional_clues,
+                *positional_clues, p.positional_clues,
                 "spelling rule {i}: positional_clues mismatch"
             );
-            assert_eq!(j.tags, p.tags, "spelling rule {i}: tags mismatch");
+            assert_eq!(
+                *context_suggestions, p.context_suggestions,
+                "spelling rule {i}: context_suggestions mismatch"
+            );
+            assert_eq!(*tags, p.tags, "spelling rule {i}: tags mismatch");
+            assert_eq!(
+                *editorial_confidence, p.editorial_confidence,
+                "spelling rule {i}: editorial_confidence mismatch"
+            );
         }
         for (i, (j, p)) in json_ruleset
             .case_rules
@@ -174,12 +182,18 @@ mod tests {
             .zip(postcard_ruleset.case_rules.iter())
             .enumerate()
         {
-            assert_eq!(j.term, p.term, "case rule {i}: term mismatch");
+            // Destructured for the same reason as the spelling loop above.
+            let CaseRule {
+                term,
+                alternatives,
+                disabled,
+            } = j;
+            assert_eq!(*term, p.term, "case rule {i}: term mismatch");
             assert_eq!(
-                j.alternatives, p.alternatives,
+                *alternatives, p.alternatives,
                 "case rule {i}: alternatives mismatch"
             );
-            assert_eq!(j.disabled, p.disabled, "case rule {i}: disabled mismatch");
+            assert_eq!(*disabled, p.disabled, "case rule {i}: disabled mismatch");
         }
     }
 }

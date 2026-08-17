@@ -1,5 +1,5 @@
-// IR parity tests: verify the IR-based eval_predicates() path produces
-// correct output across all rule types and filter stages.
+// IR parity tests: verify the IR-based eval_predicates() path produces correct
+// output across all rule types and filter stages.
 //
 // Since 48.5, the production scan path uses eval_predicates() exclusively.
 // These tests exercise every rule category (cross-strait, variant, ai_filler,
@@ -14,9 +14,7 @@ use zhtw_mcp::engine::scan::{ContentType, Scanner};
 use zhtw_mcp::rules::loader::load_embedded_ruleset;
 use zhtw_mcp::rules::ruleset::{PoliticalStance, Profile, RuleType, SpellingRule};
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 fn full_scanner() -> Scanner {
     let rs = load_embedded_ruleset().expect("load embedded ruleset");
@@ -30,145 +28,77 @@ fn spelling_with_clues(
     negative_clues: Option<Vec<&str>>,
 ) -> SpellingRule {
     SpellingRule {
-        from: from.into(),
-        to: to.iter().map(|s| s.to_string()).collect(),
-        rule_type: RuleType::CrossStrait,
-        disabled: false,
-        context: None,
-        english: None,
-        exceptions: None,
         context_clues: context_clues.map(|v| v.into_iter().map(String::from).collect()),
         negative_context_clues: negative_clues.map(|v| v.into_iter().map(String::from).collect()),
-        positional_clues: None,
-        tags: None,
-        editorial_confidence: None,
+        ..SpellingRule::new(
+            from,
+            to.iter().map(|s| s.to_string()).collect(),
+            RuleType::CrossStrait,
+        )
     }
 }
 
 fn spelling_with_exceptions(from: &str, to: &[&str], exceptions: Vec<&str>) -> SpellingRule {
     SpellingRule {
-        from: from.into(),
-        to: to.iter().map(|s| s.to_string()).collect(),
-        rule_type: RuleType::CrossStrait,
-        disabled: false,
-        context: None,
-        english: None,
         exceptions: Some(exceptions.into_iter().map(String::from).collect()),
-        context_clues: None,
-        negative_context_clues: None,
-        positional_clues: None,
-        tags: None,
-        editorial_confidence: None,
+        ..SpellingRule::new(
+            from,
+            to.iter().map(|s| s.to_string()).collect(),
+            RuleType::CrossStrait,
+        )
     }
 }
 
 fn spelling_variant(from: &str, to: &[&str]) -> SpellingRule {
-    SpellingRule {
-        from: from.into(),
-        to: to.iter().map(|s| s.to_string()).collect(),
-        rule_type: RuleType::Variant,
-        disabled: false,
-        context: None,
-        english: None,
-        exceptions: None,
-        context_clues: None,
-        negative_context_clues: None,
-        positional_clues: None,
-        tags: None,
-        editorial_confidence: None,
-    }
+    SpellingRule::new(
+        from,
+        to.iter().map(|s| s.to_string()).collect(),
+        RuleType::Variant,
+    )
 }
 
 fn spelling_ai_filler(from: &str, to: &[&str]) -> SpellingRule {
-    SpellingRule {
-        from: from.into(),
-        to: to.iter().map(|s| s.to_string()).collect(),
-        rule_type: RuleType::AiFiller,
-        disabled: false,
-        context: None,
-        english: None,
-        exceptions: None,
-        context_clues: None,
-        negative_context_clues: None,
-        positional_clues: None,
-        tags: None,
-        editorial_confidence: None,
-    }
+    SpellingRule::new(
+        from,
+        to.iter().map(|s| s.to_string()).collect(),
+        RuleType::AiFiller,
+    )
 }
 
 fn spelling_political(from: &str, to: &[&str]) -> SpellingRule {
-    SpellingRule {
-        from: from.into(),
-        to: to.iter().map(|s| s.to_string()).collect(),
-        rule_type: RuleType::PoliticalColoring,
-        disabled: false,
-        context: None,
-        english: None,
-        exceptions: None,
-        context_clues: None,
-        negative_context_clues: None,
-        positional_clues: None,
-        tags: None,
-        editorial_confidence: None,
-    }
+    SpellingRule::new(
+        from,
+        to.iter().map(|s| s.to_string()).collect(),
+        RuleType::PoliticalColoring,
+    )
 }
 
 fn spelling_deletion(from: &str) -> SpellingRule {
     // Deletion rule: must be AiFiller with to == [""] per is_deletion_rule().
-    SpellingRule {
-        from: from.into(),
-        to: vec!["".to_string()],
-        rule_type: RuleType::AiFiller,
-        disabled: false,
-        context: None,
-        english: None,
-        exceptions: None,
-        context_clues: None,
-        negative_context_clues: None,
-        positional_clues: None,
-        tags: None,
-        editorial_confidence: None,
-    }
+    SpellingRule::new(from, vec!["".to_string()], RuleType::AiFiller)
 }
 
 fn spelling_with_positional(from: &str, to: &[&str], positional: Vec<&str>) -> SpellingRule {
     SpellingRule {
-        from: from.into(),
-        to: to.iter().map(|s| s.to_string()).collect(),
-        rule_type: RuleType::CrossStrait,
-        disabled: false,
-        context: None,
-        english: None,
-        exceptions: None,
-        context_clues: None,
-        negative_context_clues: None,
         positional_clues: Some(positional.into_iter().map(String::from).collect()),
-        tags: None,
-        editorial_confidence: None,
+        ..SpellingRule::new(
+            from,
+            to.iter().map(|s| s.to_string()).collect(),
+            RuleType::CrossStrait,
+        )
     }
 }
 
-// ---------------------------------------------------------------------------
 // Cross-strait rules (basic IR path)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ir_cross_strait_fires() {
     let scanner = Scanner::new(
-        vec![SpellingRule {
-            from: "程序".into(),
-            to: vec!["程式".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }],
+        vec![SpellingRule::new(
+            "程序",
+            vec!["程式".into()],
+            RuleType::CrossStrait,
+        )],
         vec![],
     );
     let out = scanner.scan("這個程序有問題");
@@ -177,9 +107,7 @@ fn ir_cross_strait_fires() {
     assert_eq!(out.issues[0].suggestions[..], vec!["程式"]);
 }
 
-// ---------------------------------------------------------------------------
 // Variant gating: skip on Simplified Chinese
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ir_variant_skipped_for_simplified() {
@@ -196,9 +124,7 @@ fn ir_variant_fires_for_traditional() {
     assert_eq!(out.issues.len(), 1, "variant should fire once for TC text");
 }
 
-// ---------------------------------------------------------------------------
 // AI filler profile gate
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ir_ai_filler_gated_by_profile() {
@@ -226,9 +152,7 @@ fn ir_ai_filler_gated_by_profile() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Political stance gating
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ir_political_gated_by_stance() {
@@ -253,9 +177,7 @@ fn ir_political_gated_by_stance() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Context clues (positive)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ir_positive_clues_required() {
@@ -278,9 +200,7 @@ fn ir_positive_clues_required() {
     assert_eq!(out.issues.len(), 1, "should fire with context clue present");
 }
 
-// ---------------------------------------------------------------------------
 // Negative context clues
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ir_negative_clues_suppress() {
@@ -307,9 +227,7 @@ fn ir_negative_clues_suppress() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Exception phrases
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ir_exception_suppresses_match() {
@@ -335,30 +253,19 @@ fn ir_exception_suppresses_match() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Superstring absorption
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ir_superstring_absorption() {
-    // Rule where one of the `to` entries contains `from` as a substring.
-    // When the surrounding text already has the correct superstring form,
-    // the rule should not fire.
+    // Rule where one of the `to` entries contains `from` as a substring. When
+    // the surrounding text already has the correct superstring form, the rule
+    // should not fire.
     let scanner = Scanner::new(
-        vec![SpellingRule {
-            from: "鏈接".into(),
-            to: vec!["連結".into(), "鏈接池".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }],
+        vec![SpellingRule::new(
+            "鏈接",
+            vec!["連結".into(), "鏈接池".into()],
+            RuleType::CrossStrait,
+        )],
         vec![],
     );
 
@@ -375,24 +282,23 @@ fn ir_superstring_absorption() {
     assert_eq!(out.issues.len(), 1, "standalone should fire");
 }
 
-// ---------------------------------------------------------------------------
 // Deletion rules (span extension)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ir_deletion_extends_span_over_comma() {
     let scanner = Scanner::new(vec![spelling_deletion("進行")], vec![]);
 
-    // Deletion rule (AiFiller) with trailing fullwidth comma: span should extend.
-    // Must enable ai_filler_detection since AiFiller requires it.
+    // Deletion rule (AiFiller) with trailing fullwidth comma: span should
+    // extend. Must enable ai_filler_detection since AiFiller requires it.
     let mut cfg = Profile::Base.config();
     cfg.ai_filler_detection = true;
     let out = scanner.scan_for_content_type_with_config("進行，後續工作", ContentType::Plain, cfg);
     assert_eq!(out.issues.len(), 1);
     // The extended span should include the comma.
     let issue = &out.issues[0];
-    // The `found` field shows the matched phrase (without absorbed comma)
-    // but `length` covers the full deletion span including the comma.
+
+    // The `found` field shows the matched phrase (without absorbed comma) but
+    // `length` covers the full deletion span including the comma.
     assert_eq!(
         issue.found, "進行",
         "deletion found should be the rule's from pattern"
@@ -415,15 +321,13 @@ fn ir_deletion_no_extension_without_comma() {
     assert_eq!(out.issues[0].found, "進行");
 }
 
-// ---------------------------------------------------------------------------
 // Positional clues
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ir_positional_clue_exercises_predicate() {
-    // Verify that the RequirePositionalClues predicate is exercised by
-    // the IR path.  We test with adjacent: which is the simplest to
-    // validate (no window ambiguity).
+    // Verify that the RequirePositionalClues predicate is exercised by the IR
+    // path. We test with adjacent: which is the simplest to validate (no window
+    // ambiguity).
     let scanner = Scanner::new(
         vec![spelling_with_positional(
             "測試",
@@ -449,9 +353,7 @@ fn ir_positional_clue_exercises_predicate() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Full ruleset: smoke test each category with embedded rules
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ir_full_ruleset_cross_strait_sample() {
@@ -517,9 +419,10 @@ fn ir_full_ruleset_ai_filler_gated() {
 #[test]
 fn ir_full_ruleset_context_clue_suppression() {
     let scanner = full_scanner();
-    // Rules with context clues should only fire when clues are present.
-    // '渲染' with rendering context should fire; without should not.
-    // (渲染 has context_clues like '3D', 'GPU', etc.)
+
+    // Rules with context clues should only fire when clues are present. '渲染'
+    // with rendering context should fire; without should not. (渲染 has
+    // context_clues like '3D', 'GPU', etc.)
     let out_no_clue = scanner.scan("這幅畫的渲染效果很好");
     let out_with_clue = scanner.scan("使用GPU進行渲染加速");
     let no_clue_count = out_no_clue
@@ -588,8 +491,9 @@ fn ir_full_ruleset_return_and_mapping_terms_stay_unflagged() {
 fn ir_full_ruleset_atomic_family_rules() {
     let scanner = full_scanner();
 
-    // 原子性 fires as a compound rule with both Chinese and English suggestions.
-    // Leftmost-longest must pick 原子性 over the bare 原子 rule on this input.
+    // 原子性 fires as a compound rule with both Chinese and English
+    // suggestions. Leftmost-longest must pick 原子性 over the bare 原子 rule on
+    // this input.
     let atomicity = scanner.scan("這個操作必須保證原子性");
     let atomicity_issue = atomicity
         .issues
@@ -627,27 +531,16 @@ fn ir_full_ruleset_atomic_family_rules() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Markdown exclusion through IR path
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ir_markdown_code_exclusion() {
     let scanner = Scanner::new(
-        vec![SpellingRule {
-            from: "視頻".into(),
-            to: vec!["影片".into()],
-            rule_type: RuleType::CrossStrait,
-            disabled: false,
-            context: None,
-            english: None,
-            exceptions: None,
-            context_clues: None,
-            negative_context_clues: None,
-            positional_clues: None,
-            tags: None,
-            editorial_confidence: None,
-        }],
+        vec![SpellingRule::new(
+            "視頻",
+            vec!["影片".into()],
+            RuleType::CrossStrait,
+        )],
         vec![],
     );
 
@@ -662,9 +555,7 @@ fn ir_markdown_code_exclusion() {
     assert_eq!(out.issues.len(), 1, "outside code block should fire");
 }
 
-// ---------------------------------------------------------------------------
 // Determinism: same input -> same output
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ir_deterministic_output() {

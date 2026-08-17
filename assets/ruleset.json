@@ -1315,10 +1315,9 @@
       "from": "優化",
       "to": ["最佳化"],
       "type": "cross_strait",
-      "context": "@domain IT。tw「優化」泛用於商業；IT optimize 改「最佳化」以區分 improve",
+      "context": "@domain IT。optimize 取「最佳化」；「優」非「最優」，譯作「優化」喪失 optimal 挑選比較之意，亦難與 improve 區隔。語境若僅指提升或改善，本就宜用「改善」「提升」",
       "english": "optimize",
-      "negative_context_clues": ["流程", "體驗", "服務"],
-      "editorial_confidence": "low"
+      "context_suggestions": [{"clues": ["微服務", "服務端", "客戶端", "用戶端"], "to": ["最佳化"]}, {"clues": ["流程", "體驗", "服務", "客戶", "顧客", "營運", "績效", "品質"], "to": ["改善", "提升"]}]
     },
     {
       "from": "優步",
@@ -9508,8 +9507,7 @@
       "type": "cross_strait",
       "context": "@domain 程式設計",
       "english": "algorithm",
-      "exceptions": ["演算法"],
-      "editorial_confidence": "low"
+      "exceptions": ["演算法"]
     },
     {
       "from": "箭頭操作符",

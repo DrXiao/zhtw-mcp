@@ -192,6 +192,35 @@
       ]
     },
     {
+      "id": "ai_optimize_business_sense",
+      "repeat": 30,
+      "input": "值得注意的是，我們需要優化客戶服務流程。",
+      "expected_fixed": "我們需要優化客戶服務流程。",
+      "expected_issues": [
+        { "found": "值得注意的是", "replace": "", "rule_type": "ai_style" },
+        { "found": "優化", "replace": "改善", "rule_type": "cross_strait" }
+      ]
+    },
+    {
+      "id": "ai_optimize_it_sense_client_side",
+      "repeat": 30,
+      "input": "我們需要優化客戶端的影像品質。",
+      "expected_fixed": "我們需要最佳化用戶端的影像品質。",
+      "expected_issues": [
+        { "found": "優化", "replace": "最佳化", "rule_type": "cross_strait" },
+        { "found": "客戶端", "replace": "用戶端", "rule_type": "cross_strait" }
+      ]
+    },
+    {
+      "id": "ai_optimize_it_sense_across_paragraph",
+      "repeat": 30,
+      "input": "我們需要優化演算法的執行效率。\n\n客戶服務流程的檢討另案處理。",
+      "expected_fixed": "我們需要最佳化演算法的執行效率。\n\n客戶服務流程的檢討另案處理。",
+      "expected_issues": [
+        { "found": "優化", "replace": "最佳化", "rule_type": "cross_strait" }
+      ]
+    },
+    {
       "id": "ai_algorithm",
       "repeat": 30,
       "input": "儘管存在這些挑戰，通過優化算法可以顯著提升系統性能。",
