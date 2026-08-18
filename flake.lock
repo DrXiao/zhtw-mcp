@@ -34,27 +34,10 @@
         "url": "https://flakehub.com/f/NixOS/nixpkgs/0.1"
       }
     },
-    "opencc-src": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1786677727,
-        "narHash": "sha256-XZ9lDV8c+0AQKqiEVHLY7bf+9xsREFlTsq00fa4tkDg=",
-        "owner": "BYVoid",
-        "repo": "OpenCC",
-        "rev": "b50b26a04f3bb97a6e52a240108a239444ea871f",
-        "type": "github"
-      },
-      "original": {
-        "owner": "BYVoid",
-        "repo": "OpenCC",
-        "type": "github"
-      }
-    },
     "root": {
       "inputs": {
         "fenix": "fenix",
-        "nixpkgs": "nixpkgs",
-        "opencc-src": "opencc-src"
+        "nixpkgs": "nixpkgs"
       }
     },
     "rust-analyzer-src": {
