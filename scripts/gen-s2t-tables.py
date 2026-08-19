@@ -3,7 +3,8 @@
 
 Downloads STCharacters.txt, STPhrases.txt, and TWVariants.txt from the
 OpenCC GitHub repository and generates a Rust source file with static
-arrays that can be compiled into the binary.
+arrays that can be compiled into the binary.  Which OpenCC revision to use is
+pinned in [package.metadata.opencc] in Cargo.toml.
 
 This eliminates include_str! + runtime text parsing: the dictionaries
 are pre-parsed into typed Rust arrays at code-generation time.
@@ -18,59 +19,148 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
+import re
 import sys
+import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import NamedTuple
+
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # pragma: no cover - depends on interpreter
+    print(
+        "error: this script needs Python 3.11+ for tomllib "
+        "(it reads the OpenCC pin from Cargo.toml).",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 REPO = Path(__file__).resolve().parent.parent
 OUTPUT = REPO / "src" / "engine" / "s2t_data.rs"
+MANIFEST = REPO / "Cargo.toml"
 
-# Pinned OpenCC commit.  This used to say "master", with a comment claiming
-# that was for reproducibility, which it is not: master moves, downloaded
-# files are cached forever, so two developers at the same repo commit built
-# different conversion tables depending on when they first cloned.
+# The OpenCC pin lives in [package.metadata.opencc] in Cargo.toml, next to
+# every other pinned dependency of this crate, so `cargo metadata` reports it
+# and a bump shows up in the manifest diff rather than buried in a script.
 #
-# To bump: change OPENCC_COMMIT, run this script, and paste the printed
-# source hash into EXPECTED_SOURCE_HASH.  The check below refuses to
-# generate if only one of the two moved, so a bump cannot be half-applied.
-OPENCC_COMMIT = "5249273a3e5606852f088c9a8b23522145d94f78"
-EXPECTED_SOURCE_HASH = "959b88f60c9dcc0d"
+# The pin used to say "master", with a comment claiming that was for
+# reproducibility, which it is not: master moves, downloaded files are cached
+# forever, so two developers at the same repo commit built different conversion
+# tables depending on when they first cloned.
+#
+# To bump: change `commit` in Cargo.toml, run this script, and paste the printed
+# source hash into `source-hash`.  The check below refuses to generate if only
+# one of the two moved, so a bump cannot be half-applied.
 
-OPENCC_RAW = (
-    f"https://raw.githubusercontent.com/BYVoid/OpenCC/{OPENCC_COMMIT}/data/dictionary"
-)
 
-# Cache keyed by commit, so bumping the pin fetches fresh files instead of
-# silently reusing whatever an earlier run happened to download.
-DICT_DIR = REPO / "data" / "opencc" / OPENCC_COMMIT[:12]
+class Pin(NamedTuple):
+    """The OpenCC pin from Cargo.toml, plus the paths derived from it."""
+
+    repository: str
+    commit: str
+    source_hash: str
+    raw_base: str
+    dict_dir: Path
+
+
+def load_pin() -> Pin:
+    """Read the OpenCC pin from Cargo.toml metadata and derive its paths."""
+    try:
+        with open(MANIFEST, "rb") as f:
+            manifest = tomllib.load(f)
+    except OSError as e:
+        print(f"error: cannot read {MANIFEST}: {e}", file=sys.stderr)
+        sys.exit(1)
+    except tomllib.TOMLDecodeError as e:
+        print(f"error: {MANIFEST} is not valid TOML: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    pin = manifest.get("package", {}).get("metadata", {}).get("opencc", {})
+    missing = [k for k in ("repository", "commit", "source-hash") if k not in pin]
+    if missing:
+        print(
+            f"error: [package.metadata.opencc] in {MANIFEST.name} is missing "
+            f"{', '.join(missing)}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    repository, commit = pin["repository"], pin["commit"]
+    # A branch, a tag, or a short SHA all resolve on raw.githubusercontent.com
+    # and all key the cache below on something that can move underneath it --
+    # exactly the bug the pin exists to remove.  Nothing downstream can tell
+    # the difference, so reject anything but a full SHA here.
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        print(
+            f"error: commit in [package.metadata.opencc] must be a full "
+            f"40-character SHA, got {commit!r}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    return Pin(
+        repository=repository,
+        commit=commit,
+        source_hash=pin["source-hash"],
+        raw_base=raw_base_url(repository, commit),
+        # Cache keyed by commit, so bumping the pin fetches fresh files instead
+        # of silently reusing whatever an earlier run happened to download.
+        dict_dir=REPO / "data" / "opencc" / commit[:12],
+    )
+
+
+def raw_base_url(repository: str, commit: str) -> str:
+    """Map a GitHub repo URL + commit to its raw dictionary directory."""
+    parsed = urllib.parse.urlparse(repository)
+    if parsed.netloc != "github.com":
+        print(
+            f"error: unsupported OpenCC repository {repository!r}; "
+            f"only github.com URLs can be mapped to raw downloads.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    owner_repo = parsed.path.strip("/").removesuffix(".git")
+    return f"https://raw.githubusercontent.com/{owner_repo}/{commit}/data/dictionary"
+
 
 # Dictionary files to process.
 DICT_FILES = {
-    "st_phrases": ("STPhrases.txt", f"{OPENCC_RAW}/STPhrases.txt"),
-    "st_characters": ("STCharacters.txt", f"{OPENCC_RAW}/STCharacters.txt"),
-    "tw_variants": ("TWVariants.txt", f"{OPENCC_RAW}/TWVariants.txt"),
+    "st_phrases": "STPhrases.txt",
+    "st_characters": "STCharacters.txt",
+    "tw_variants": "TWVariants.txt",
 }
 
 
-def ensure_downloaded() -> None:
-    """Download dictionary files from GitHub if not already cached."""
-    DICT_DIR.mkdir(parents=True, exist_ok=True)
-    for name, (filename, url) in DICT_FILES.items():
-        path = DICT_DIR / filename
+def ensure_downloaded(pin: Pin) -> bool:
+    """Download missing dictionary files.  True if anything was fetched."""
+    pin.dict_dir.mkdir(parents=True, exist_ok=True)
+    fetched = False
+    for filename in DICT_FILES.values():
+        path = pin.dict_dir / filename
         if path.exists():
             continue
+        url = f"{pin.raw_base}/{filename}"
         print(f"Downloading {filename} ...", file=sys.stderr)
+        # Download beside the target and rename into place: an interrupted
+        # fetch would otherwise leave a partial file that every later run
+        # skips over as "already cached".
+        tmp = path.with_suffix(path.suffix + ".part")
         try:
-            urllib.request.urlretrieve(url, path)
+            urllib.request.urlretrieve(url, tmp)
+            os.replace(tmp, path)
         except Exception as e:
+            tmp.unlink(missing_ok=True)
             print(f"error: failed to download {url}: {e}", file=sys.stderr)
             sys.exit(1)
+        fetched = True
+    return fetched
 
 
-def dict_path(name: str) -> Path:
+def dict_path(pin: Pin, name: str) -> Path:
     """Return local path for a dictionary file."""
-    filename, _ = DICT_FILES[name]
-    return DICT_DIR / filename
+    return pin.dict_dir / DICT_FILES[name]
 
 
 # Genuinely two-way chars curated by hand: each has two common TC readings
@@ -203,11 +293,11 @@ def parse_phrases_with_ambiguous_protection(
     return entries, applied
 
 
-def compute_source_hash() -> str:
+def compute_source_hash(pin: Pin) -> str:
     """SHA-256 of all source dictionary files (sorted by name)."""
     h = hashlib.sha256()
     for name in sorted(DICT_FILES):
-        path = dict_path(name)
+        path = dict_path(pin, name)
         h.update(path.read_bytes())
     return h.hexdigest()[:16]
 
@@ -294,12 +384,15 @@ def main():
     )
     args = parser.parse_args()
 
+    # After parse_args(), so --help still works on a tree whose pin is broken.
+    pin = load_pin()
+
     # Download dictionaries if needed.
-    ensure_downloaded()
+    fetched = ensure_downloaded(pin)
 
     # Verify dictionary files exist.
     for name in DICT_FILES:
-        path = dict_path(name)
+        path = dict_path(pin, name)
         if not path.exists():
             print(f"error: {name} not found at {path}", file=sys.stderr)
             sys.exit(1)
@@ -307,24 +400,43 @@ def main():
     ambiguous_chars = parse_ambiguous_chars()
 
     phrases, extras_applied = parse_phrases_with_ambiguous_protection(
-        dict_path("st_phrases"), ambiguous_chars
+        dict_path(pin, "st_phrases"), ambiguous_chars
     )
-    chars_raw = parse_char_dict(dict_path("st_characters"))
+    chars_raw = parse_char_dict(dict_path(pin, "st_characters"))
     chars = filter_safe_chars(chars_raw, ambiguous_chars)
-    tw_variants = parse_char_dict(dict_path("tw_variants"))
-    source_hash = compute_source_hash()
+    tw_variants = parse_char_dict(dict_path(pin, "tw_variants"))
+    source_hash = compute_source_hash(pin)
 
     # The pin is only worth having if something checks it.  A mismatch means
     # either the pinned commit was bumped without refreshing the expected
     # hash, or the cached files no longer match the commit they are filed
     # under; both produce conversion tables nobody reviewed.
-    if source_hash != EXPECTED_SOURCE_HASH:
+    #
+    # Which one it is depends on whether this run fetched anything.  If every
+    # file came from the cache, the pin cannot have changed since the files
+    # were written, so the cache is the suspect -- and telling that reader to
+    # paste the new hash would bless a truncated download as the new pin.
+    if source_hash != pin.source_hash:
+        bump = (
+            f"  If you bumped the commit in {MANIFEST.name} (currently "
+            f"{pin.commit[:12]}), review the diff and set "
+            f'source-hash = "{source_hash}" in [package.metadata.opencc].'
+        )
+        corrupt = (
+            f"  Otherwise the cache at {pin.dict_dir} is corrupt: "
+            f"delete it and re-run."
+        )
+        cached_only = (
+            f"  The dictionaries all came from the cache at {pin.dict_dir}, "
+            f"so it is most likely corrupt: delete it and re-run.\n"
+            f"  If instead you bumped the commit in {MANIFEST.name} (currently "
+            f"{pin.commit[:12]}) and refreshed the cache yourself, review the "
+            f'diff and set source-hash = "{source_hash}".'
+        )
+        detail = f"{bump}\n{corrupt}" if fetched else cached_only
         print(
             f"error: dictionary source hash {source_hash} does not match "
-            f"EXPECTED_SOURCE_HASH {EXPECTED_SOURCE_HASH}.\n"
-            f"  If you bumped OPENCC_COMMIT (currently {OPENCC_COMMIT[:12]}), "
-            f'review the diff and set EXPECTED_SOURCE_HASH = "{source_hash}".\n'
-            f"  Otherwise the cache at {DICT_DIR} is corrupt: delete it and re-run.",
+            f"the pinned source-hash {pin.source_hash}.\n{detail}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -367,6 +479,15 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(1)
+        return
+
+    # Write only on a real change.  Cargo fingerprints by mtime, and this file
+    # is ~870 KB of static tables, so rewriting identical bytes costs a ~45 s
+    # release rebuild of the crate.  The Makefile lists Cargo.toml as a
+    # prerequisite, so any manifest edit -- a version bump, a new dependency --
+    # runs this script; that rerun is cheap, the rebuild behind it was not.
+    if OUTPUT.exists() and OUTPUT.read_text(encoding="utf-8") == content:
+        print(f"{OUTPUT.name} is already up-to-date ({len(content)} bytes)")
         return
 
     OUTPUT.write_text(content, encoding="utf-8")

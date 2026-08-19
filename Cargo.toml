@@ -12,6 +12,18 @@ keywords = ["mcp", "chinese", "linting", "traditional-chinese", "zh-tw"]
 readme = "README.md"
 include = ["src/**/*", "assets/ruleset.json", "scripts/schema-facts.json", "Cargo.toml", "LICENSE", "README.md", "rust-toolchain.toml"]
 
+# Pinned OpenCC dictionary source for scripts/gen-s2t-tables.py.  Kept here,
+# not in the script, so the dependency is declared where every other pinned
+# dependency of this crate lives and `cargo metadata` can report it.
+#
+# To bump: change `commit`, run `python3 scripts/gen-s2t-tables.py`, and paste
+# the printed source hash into `source-hash`.  The script refuses to generate
+# if only one of the two moved, so a bump cannot be half-applied.
+[package.metadata.opencc]
+repository = "https://github.com/BYVoid/OpenCC"
+commit = "5249273a3e5606852f088c9a8b23522145d94f78"
+source-hash = "959b88f60c9dcc0d"
+
 [features]
 default = ["native", "translate"]
 native = [
