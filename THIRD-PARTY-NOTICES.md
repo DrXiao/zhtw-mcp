@@ -25,8 +25,9 @@ not tested, and not redistributed, so it is not listed here.
   of the dictionary data.
 
 Apache-2.0 requires that the license and attribution accompany distribution.
-The commit is pinned in `scripts/gen-s2t-tables.py` and verified against
-`EXPECTED_SOURCE_HASH`, so the compiled tables are reproducible.
+The commit is pinned in `[package.metadata.opencc]` in `Cargo.toml` and
+verified against the `source-hash` recorded there, so the compiled tables are
+reproducible.
 
 ## Derived text in this repository
 

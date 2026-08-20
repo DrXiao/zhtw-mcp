@@ -5,10 +5,12 @@ all: $(S2T_DATA)
 	cargo build --release
 
 # gen-s2t-tables.py handles downloading from GitHub + code generation.
-# Depending on the script alone is sufficient because the OpenCC commit is
-# pinned inside it: changing which dictionaries we build from means editing
-# this prerequisite.
-$(S2T_DATA): scripts/gen-s2t-tables.py
+# Cargo.toml is a prerequisite too: the OpenCC commit is pinned in its
+# [package.metadata.opencc] table, so changing which dictionaries we build
+# from means editing one of these two files.  Make cannot depend on a single
+# table inside a file, so an unrelated manifest edit reruns the generator;
+# it rewrites s2t_data.rs only when the tables change, so nothing rebuilds.
+$(S2T_DATA): scripts/gen-s2t-tables.py Cargo.toml
 	python3 scripts/gen-s2t-tables.py
 	rustfmt $@
 

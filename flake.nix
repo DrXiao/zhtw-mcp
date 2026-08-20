@@ -7,10 +7,6 @@
       url = "https://flakehub.com/f/nix-community/fenix/0.1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    opencc-src = {
-      url = "github:BYVoid/OpenCC";
-      flake = false;
-    };
   };
 
   outputs =
@@ -18,7 +14,6 @@
       self,
       nixpkgs,
       fenix,
-      opencc-src,
     }:
 
     let
@@ -58,6 +53,18 @@
         zhtw-mcp =
           let
             cargoToml = fromTOML (builtins.readFile ./Cargo.toml);
+            # Same pin gen-s2t-tables.py reads, so a bump touches only Cargo.toml.
+            opencc = cargoToml.package.metadata.opencc;
+            # shallow = true is load-bearing, not a bandwidth tweak: without
+            # it fetchGit resolves rev against the default branch, so a commit
+            # that is not an ancestor of master fails to fetch.
+            opencc-src = builtins.fetchGit {
+              url = opencc.repository;
+              rev = opencc.commit;
+              shallow = true;
+            };
+            # Where gen-s2t-tables.py looks before downloading.
+            dictDir = "data/opencc/${builtins.substring 0 12 opencc.commit}";
             rustPlatform = final.makeRustPlatform {
               cargo = final.rustToolchain;
               rustc = final.rustToolchain;
@@ -79,10 +86,10 @@
             ];
 
             preBuild = ''
-              mkdir -p data/opencc
-              cp ${opencc-src}/data/dictionary/STPhrases.txt data/opencc/STPhrases.txt
-              cp ${opencc-src}/data/dictionary/STCharacters.txt data/opencc/STCharacters.txt
-              cp ${opencc-src}/data/dictionary/TWVariants.txt data/opencc/TWVariants.txt
+              mkdir -p ${dictDir}
+              for dict in STPhrases STCharacters TWVariants; do
+                cp ${opencc-src}/data/dictionary/$dict.txt ${dictDir}/$dict.txt
+              done
               python3 scripts/gen-s2t-tables.py
               rustfmt src/engine/s2t_data.rs
             '';
