@@ -149,64 +149,8 @@ pub(crate) fn validate_quote_hierarchy(
             }
 
             match ch {
-                '「' | '『' | '《' => {
-                    stack.push((ch, abs_offset));
-                }
-                '」' | '』' | '》' => {
-                    let (opener, found_str, interleave_msg, unmatched_msg) = match ch {
-                        '」' => (
-                            '「',
-                            "」",
-                            "引號層級錯誤：「」與『』交錯嵌套",
-                            "多餘的關閉引號「」」，找不到對應的開啟引號「「」",
-                        ),
-                        '』' => (
-                            '『',
-                            "』",
-                            "引號層級錯誤：「」與『』交錯嵌套",
-                            "多餘的關閉引號「』」，找不到對應的開啟引號「『」",
-                        ),
-                        _ => (
-                            '《',
-                            "》",
-                            "書名號層級錯誤：《》與引號交錯嵌套",
-                            "多餘的關閉書名號「》」，找不到對應的開啟書名號「《」",
-                        ),
-                    };
-                    match stack.last() {
-                        Some(&(c, _)) if c == opener => {
-                            stack.pop();
-                            // Secondary quotes must be enclosed in primary.
-                            if ch == '』' && !stack.iter().any(|(c, _)| *c == '「') {
-                                issues.push(punct_issue_sev(
-                                    abs_offset,
-                                    "』",
-                                    "",
-                                    "『』應嵌套在「」內使用，不應出現在最外層",
-                                    Severity::Warning,
-                                ));
-                            }
-                        }
-                        Some(_) => {
-                            issues.push(punct_issue_sev(
-                                abs_offset,
-                                found_str,
-                                "",
-                                interleave_msg,
-                                Severity::Warning,
-                            ));
-                        }
-                        None => {
-                            issues.push(punct_issue_sev(
-                                abs_offset,
-                                found_str,
-                                "",
-                                unmatched_msg,
-                                Severity::Warning,
-                            ));
-                        }
-                    }
-                }
+                '「' | '『' | '《' => stack.push((ch, abs_offset)),
+                '」' | '』' | '》' => close_quote(ch, abs_offset, &mut stack, issues),
                 _ => {}
             }
         }
@@ -228,4 +172,61 @@ pub(crate) fn validate_quote_hierarchy(
             ));
         }
     }
+}
+
+/// Match one closing mark against the open stack, reporting the three ways it
+/// can be wrong: interleaved with a different pair, unmatched entirely, or a
+/// secondary quote standing outside a primary one.
+fn close_quote(
+    ch: char,
+    abs_offset: usize,
+    stack: &mut Vec<(char, usize)>,
+    issues: &mut Vec<Issue>,
+) {
+    let (opener, found_str, interleave_msg, unmatched_msg) = match ch {
+        '」' => (
+            '「',
+            "」",
+            "引號層級錯誤：「」與『』交錯嵌套",
+            "多餘的關閉引號「」」，找不到對應的開啟引號「「」",
+        ),
+        '』' => (
+            '『',
+            "』",
+            "引號層級錯誤：「」與『』交錯嵌套",
+            "多餘的關閉引號「』」，找不到對應的開啟引號「『」",
+        ),
+        _ => (
+            '《',
+            "》",
+            "書名號層級錯誤：《》與引號交錯嵌套",
+            "多餘的關閉書名號「》」，找不到對應的開啟書名號「《」",
+        ),
+    };
+
+    let message = match stack.last() {
+        Some(&(c, _)) if c == opener => {
+            stack.pop();
+            // Secondary quotes must be enclosed in primary.
+            if ch == '』' && !stack.iter().any(|(c, _)| *c == '「') {
+                issues.push(punct_issue_sev(
+                    abs_offset,
+                    "』",
+                    "",
+                    "『』應嵌套在「」內使用，不應出現在最外層",
+                    Severity::Warning,
+                ));
+            }
+            return;
+        }
+        Some(_) => interleave_msg,
+        None => unmatched_msg,
+    };
+    issues.push(punct_issue_sev(
+        abs_offset,
+        found_str,
+        "",
+        message,
+        Severity::Warning,
+    ));
 }

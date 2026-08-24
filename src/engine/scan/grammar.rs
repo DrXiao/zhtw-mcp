@@ -890,7 +890,11 @@ pub(crate) fn scan_bare_shi_adjective(text: &str, excluded: &[ByteRange], issues
             }
 
             // Find the pronoun that precedes 是 to include in the found span.
-            let pronoun = PRONOUNS.iter().find(|p| before.ends_with(*p)).unwrap();
+            // The guard above already established one is there; re-deriving it
+            // here rather than unwrapping keeps the two from drifting apart.
+            let Some(pronoun) = PRONOUNS.iter().find(|p| before.ends_with(*p)) else {
+                continue;
+            };
             let pronoun_start = abs_pos - pronoun.len();
             let found = &text[pronoun_start..adj_end];
             let suggestion = format!("{}很{}", pronoun, adj,);
@@ -1687,9 +1691,7 @@ pub(crate) fn scan_ai_density(
                 continue;
             }
             count += 1;
-            if first_offset.is_none() {
-                first_offset = Some(abs_pos);
-            }
+            first_offset.get_or_insert(abs_pos);
         }
 
         if count == 0 {
@@ -1699,7 +1701,10 @@ pub(crate) fn scan_ai_density(
         let density = count as f32 / text_k;
         let effective_threshold = threshold * threshold_multiplier;
         if density > effective_threshold {
-            let offset = first_offset.unwrap();
+            // Set on the first hit, and this branch needs count > 0.
+            let Some(offset) = first_offset else {
+                continue;
+            };
             let ctx = format!(
                 "AI density: \u{300C}{phrase}\u{300D} 在本文出現 {count} 次 \
                  ({density:.1}次/千字，閾值 {effective_threshold:.1})，\
@@ -1721,6 +1726,23 @@ fn is_para_excluded(start: usize, end: usize, excluded: &[ByteRange]) -> bool {
 // Binary contrast density: AI overuses paired transition patterns. Counts
 // intra-sentence double turns, progressive, and concessive patterns. Threshold:
 // >5 per 1000 chars is AI-typical (human baseline: 2-3).
+/// Offset of a binary-contrast construction in `sentence`: a start word with
+/// one of its turn words somewhere after it.
+///
+/// Only the first start word that occurs at all is considered, whether or not
+/// a turn follows it, which is what keeps one sentence from being counted
+/// twice for the same construction.
+fn contrast_hit(sentence: &str, starts: &[&str], turns: &[&str]) -> Option<usize> {
+    for &start_word in starts {
+        let Some(pos) = sentence.find(start_word) else {
+            continue;
+        };
+        let after = &sentence[pos + start_word.len()..];
+        return turns.iter().any(|turn| after.contains(turn)).then_some(pos);
+    }
+    None
+}
+
 pub(crate) fn scan_ai_binary_contrast(
     text: &str,
     excluded: &[ByteRange],
@@ -1753,37 +1775,16 @@ pub(crate) fn scan_ai_binary_contrast(
         // Scan sentences within paragraph (split on 。！？).
         for sentence in para.split(['。', '！', '？']) {
             let sent_start = sentence.as_ptr() as usize - text.as_ptr() as usize;
-            // Check concessive pattern.
-            for &start_word in concessive_starts {
-                if let Some(pos) = sentence.find(start_word) {
-                    let after = &sentence[pos + start_word.len()..];
-                    for &turn in concessive_turns {
-                        if after.contains(turn) {
-                            count += 1;
-                            if first_offset.is_none() {
-                                first_offset = Some(sent_start + pos);
-                            }
-                            break;
-                        }
-                    }
-                    break;
-                }
-            }
-            // Check progressive pattern.
-            for &start_word in progressive_starts {
-                if let Some(pos) = sentence.find(start_word) {
-                    let after = &sentence[pos + start_word.len()..];
-                    for &turn in progressive_turns {
-                        if after.contains(turn) {
-                            count += 1;
-                            if first_offset.is_none() {
-                                first_offset = Some(sent_start + pos);
-                            }
-                            break;
-                        }
-                    }
-                    break;
-                }
+            let patterns = [
+                (concessive_starts, concessive_turns),
+                (progressive_starts, progressive_turns),
+            ];
+            for (starts, turns) in patterns {
+                let Some(pos) = contrast_hit(sentence, starts, turns) else {
+                    continue;
+                };
+                count += 1;
+                first_offset.get_or_insert(sent_start + pos);
             }
         }
     }
@@ -2177,34 +2178,35 @@ fn scan_ai_negative_parallel(
     for sent in &idx.sentences {
         let s = &text[sent.byte_start..sent.byte_end];
         for opener in OPENERS {
-            if let Some(pos) = s.find(opener) {
-                let after_opener = pos + opener.len();
-                // 30-char lookahead, char-boundary safe (not byte-truncated).
-                let search_end = char_bounded_end(s, after_opener, 30);
-                let window = &s[after_opener..search_end];
-                for closer in CLOSERS {
-                    if let Some(cpos) = window.find(closer) {
-                        let abs_start = sent.byte_start + pos;
-                        let abs_end = sent.byte_start + after_opener + cpos + closer.len();
-                        if !is_excluded(abs_start, abs_end, excluded) {
-                            issues.push(
-                                Issue::new(
-                                    abs_start,
-                                    abs_end - abs_start,
-                                    &text[abs_start..abs_end],
-                                    vec![],
-                                    IssueType::AiStyle,
-                                    Severity::Info,
-                                )
-                                .with_context(
-                                    "AI structural: 否定平行結構（不只是…而是/更是），AI 常用公式",
-                                ),
-                            );
-                        }
-                        break;
-                    }
-                }
+            let Some(pos) = s.find(opener) else {
+                continue;
+            };
+            let after_opener = pos + opener.len();
+            // 30-char lookahead, char-boundary safe (not byte-truncated).
+            let search_end = char_bounded_end(s, after_opener, 30);
+            let window = &s[after_opener..search_end];
+
+            // The first closer that appears decides the span; a second one in
+            // the same window describes the same construction.
+            let hit = CLOSERS
+                .iter()
+                .find_map(|closer| window.find(closer).map(|cpos| (cpos, closer)));
+            let Some((cpos, closer)) = hit else {
+                continue;
+            };
+
+            let abs_start = sent.byte_start + pos;
+            let abs_end = sent.byte_start + after_opener + cpos + closer.len();
+            if is_excluded(abs_start, abs_end, excluded) {
+                continue;
             }
+            issues.push(ai_style_issue(
+                abs_start,
+                &text[abs_start..abs_end],
+                "",
+                "AI structural: 否定平行結構（不只是…而是/更是），AI 常用公式",
+                Severity::Info,
+            ));
         }
     }
 }
@@ -2302,6 +2304,26 @@ fn scan_ai_formulaic_section_endings(
     issues: &mut Vec<Issue>,
     idx: &crate::engine::sentence::BoundaryIndex,
 ) {
+    for para in &idx.paragraphs {
+        let sents = idx.sentences_in_paragraph(para);
+        flag_closing_phrases(text, excluded, issues, &sents);
+        flag_significance_stamps(text, excluded, issues, &sents);
+    }
+}
+
+/// Closing phrases, which are only a tell where a section actually closes.
+///
+/// The position gate applies to these and not to the patterns in
+/// [`flag_significance_stamps`]: 展望未來 is a closer, so it is a tell at a
+/// close and ordinary prose in the middle of a paragraph. A significance stamp
+/// and 隨著…不斷發展 are tells wherever they sit, so gating those would have
+/// deleted them.
+fn flag_closing_phrases(
+    text: &str,
+    excluded: &[ByteRange],
+    issues: &mut Vec<Issue>,
+    sents: &[&crate::engine::sentence::SentenceBound],
+) {
     const FORMULAIC_ENDINGS: &[&str] = &[
         "展望未來",
         "拭目以待",
@@ -2310,125 +2332,128 @@ fn scan_ai_formulaic_section_endings(
         "具有重要意義",
         "具有重要戰略意義",
     ];
+
+    // A sentence followed by a heading is a close even when body text follows
+    // that heading inside the same paragraph, so the walk runs forwards over
+    // every sentence. Searching backwards for a single candidate found the
+    // document's last sentence instead and missed the real close.
+    let mut body = sents
+        .iter()
+        .copied()
+        .filter(|s| !is_markdown_heading_sentence(&text[s.byte_start..s.byte_end]))
+        .peekable();
+
+    // The document's final sentence is a close too, which is what the DocEnd
+    // arm covers: `peek` is what makes that sentence the final one.
+    while let Some(sent) = body.next() {
+        let closes = match section_boundary_after(text, sent.byte_end) {
+            SectionBoundary::Heading => true,
+            SectionBoundary::DocEnd => body.peek().is_none(),
+            SectionBoundary::Body => false,
+        };
+        if !closes {
+            continue;
+        }
+        let s = &text[sent.byte_start..sent.byte_end];
+        for &phrase in FORMULAIC_ENDINGS {
+            // First occurrence that is neither on a heading line nor excluded;
+            // later ones in the same sentence add nothing.
+            let hit = s
+                .match_indices(phrase)
+                .map(|(pos, _)| sent.byte_start + pos)
+                .find(|&abs| {
+                    !is_in_markdown_heading_line(text, abs)
+                        && !is_excluded(abs, abs + phrase.len(), excluded)
+                });
+            let Some(abs) = hit else {
+                continue;
+            };
+            issues.push(ai_style_issue(
+                abs,
+                phrase,
+                "",
+                "AI structural: 公式化用語，常見於 AI 生成文本",
+                Severity::Info,
+            ));
+        }
+    }
+}
+
+/// Significance stamps and 隨著…不斷發展, which are tells at any position.
+fn flag_significance_stamps(
+    text: &str,
+    excluded: &[ByteRange],
+    issues: &mut Vec<Issue>,
+    sents: &[&crate::engine::sentence::SentenceBound],
+) {
     const FORMULAIC_PAIRS: &[(&str, &str)] = &[
         ("奠定", "理論基礎"),
         ("提供", "重要框架"),
         ("發揮", "關鍵作用"),
         ("印證", "重要性"),
     ];
-    // Regex-like patterns: 隨著.*不斷發展 — handled with substring checks.
-    for para in &idx.paragraphs {
-        let sents = idx.sentences_in_paragraph(para);
 
-        // Position gate applies to the closing phrases ONLY. 展望未來 is a
-        // closer, so it is only a tell at a close: a sentence that ends a
-        // section. The two pattern groups below are not closers: a significance
-        // stamp and 隨著…不斷發展 are AI tells wherever they sit, so gating
-        // them here would have deleted them.
-        //
-        // A sentence followed by a heading is a close even when body text
-        // follows that heading inside the same paragraph, so the walk runs
-        // forwards over every sentence. Searching backwards for a single
-        // candidate found the document's last sentence instead and missed the
-        // real close.
-        let mut body = sents
-            .iter()
-            .copied()
-            .filter(|s| !is_markdown_heading_sentence(&text[s.byte_start..s.byte_end]))
-            .peekable();
-
-        // The document's final sentence is a close too, which is what the
-        // DocEnd arm covers: `peek` is what makes that sentence the final one.
-        while let Some(sent) = body.next() {
-            let closes = match section_boundary_after(text, sent.byte_end) {
-                SectionBoundary::Heading => true,
-                SectionBoundary::DocEnd => body.peek().is_none(),
-                SectionBoundary::Body => false,
+    for sent in sents {
+        let s = &text[sent.byte_start..sent.byte_end];
+        for &(start_phrase, end_phrase) in FORMULAIC_PAIRS {
+            let Some(start) = s.find(start_phrase) else {
+                continue;
             };
-            if !closes {
+            let Some(end_pos) = s[start + start_phrase.len()..].find(end_phrase) else {
+                continue;
+            };
+            let end = start + start_phrase.len() + end_pos + end_phrase.len();
+            let abs = sent.byte_start + start;
+            let abs_end = sent.byte_start + end;
+            if is_excluded(abs, abs_end, excluded) {
                 continue;
             }
-            let s = &text[sent.byte_start..sent.byte_end];
-            for &phrase in FORMULAIC_ENDINGS {
-                // First occurrence that is neither on a heading line nor
-                // excluded; later ones in the same sentence add nothing.
-                let hit = s
-                    .match_indices(phrase)
-                    .map(|(pos, _)| sent.byte_start + pos)
-                    .find(|&abs| {
-                        !is_in_markdown_heading_line(text, abs)
-                            && !is_excluded(abs, abs + phrase.len(), excluded)
-                    });
-                if let Some(abs) = hit {
-                    issues.push(
-                        Issue::new(
-                            abs,
-                            phrase.len(),
-                            phrase,
-                            vec![],
-                            IssueType::AiStyle,
-                            Severity::Info,
-                        )
-                        .with_context("AI structural: 公式化用語，常見於 AI 生成文本"),
-                    );
-                }
-            }
+            issues.push(ai_style_issue(
+                abs,
+                &text[abs..abs_end],
+                "",
+                "AI structural: 意義蓋章式收尾，常見於 AI 生成文本",
+                Severity::Info,
+            ));
         }
 
-        for sent in sents {
-            let s = &text[sent.byte_start..sent.byte_end];
-            for &(start_phrase, end_phrase) in FORMULAIC_PAIRS {
-                if let Some(start) = s.find(start_phrase) {
-                    if let Some(end_pos) = s[start + start_phrase.len()..].find(end_phrase) {
-                        let end = start + start_phrase.len() + end_pos + end_phrase.len();
-                        let abs = sent.byte_start + start;
-                        let abs_end = sent.byte_start + end;
-                        if !is_excluded(abs, abs_end, excluded) {
-                            issues.push(
-                                Issue::new(
-                                    abs,
-                                    abs_end - abs,
-                                    &text[abs..abs_end],
-                                    vec![],
-                                    IssueType::AiStyle,
-                                    Severity::Info,
-                                )
-                                .with_context("AI structural: 意義蓋章式收尾，常見於 AI 生成文本"),
-                            );
-                        }
-                    }
-                }
-            }
-            // Pattern: 隨著...不斷發展 (gap ≤40 chars; gap can be zero)
-            if let Some(start) = s.find("隨著") {
-                if let Some(end_pos) = s.find("不斷發展") {
-                    let after_kw = start + "隨著".len();
-                    let gap_chars = if end_pos >= after_kw {
-                        s[after_kw..end_pos].chars().count()
-                    } else {
-                        usize::MAX // skip — pattern out of order
-                    };
-                    if gap_chars <= 40 {
-                        let abs = sent.byte_start + start;
-                        let abs_end = sent.byte_start + end_pos + "不斷發展".len();
-                        if !is_excluded(abs, abs_end, excluded) {
-                            issues.push(
-                                Issue::new(
-                                    abs,
-                                    abs_end - abs,
-                                    &text[abs..abs_end],
-                                    vec![],
-                                    IssueType::AiStyle,
-                                    Severity::Info,
-                                )
-                                .with_context("AI structural: 公式化用語（隨著…不斷發展）"),
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        flag_gradual_development(text, excluded, issues, sent);
     }
+}
+
+/// 隨著...不斷發展 with a gap of at most 40 characters, which may be zero.
+fn flag_gradual_development(
+    text: &str,
+    excluded: &[ByteRange],
+    issues: &mut Vec<Issue>,
+    sent: &crate::engine::sentence::SentenceBound,
+) {
+    let s = &text[sent.byte_start..sent.byte_end];
+    // Two bindings rather than one tuple: a tuple evaluates both arms, so the
+    // second search would run over every sentence even though 隨著 is rare.
+    let Some(start) = s.find("隨著") else {
+        return;
+    };
+    let Some(end_pos) = s.find("不斷發展") else {
+        return;
+    };
+    let after_kw = start + "隨著".len();
+    // Out of order is not the pattern.
+    if end_pos < after_kw || s[after_kw..end_pos].chars().count() > 40 {
+        return;
+    }
+    let abs = sent.byte_start + start;
+    let abs_end = sent.byte_start + end_pos + "不斷發展".len();
+    if is_excluded(abs, abs_end, excluded) {
+        return;
+    }
+    issues.push(ai_style_issue(
+        abs,
+        &text[abs..abs_end],
+        "",
+        "AI structural: 公式化用語（隨著…不斷發展）",
+        Severity::Info,
+    ));
 }
 
 // S4: mechanical bullet lists — every item starts with **keyword**
@@ -2826,42 +2851,38 @@ fn scan_ai_formulaic_despite(
 
     for sent in &idx.sentences {
         let s = &text[sent.byte_start..sent.byte_end];
-        if let Some(start) = s.find("儘管") {
-            let after_despite_start = start + "儘管".len();
-            let after_despite = &s[after_despite_start..];
-            if let Some(challenge_rel) = after_despite.find("挑戰") {
-                let challenge = after_despite_start + challenge_rel;
-                // Char-counted gap (≤40 chars) — encoding-independent.
-                let gap_chars = s[after_despite_start..challenge].chars().count();
-                if gap_chars <= 40 {
-                    // Check for forward-looking verb in the rest of the
-                    // sentence.
-                    let rest = &s[challenge + "挑戰".len()..];
-                    for verb in FORWARD_VERBS {
-                        if rest.contains(verb) {
-                            let abs = sent.byte_start + start;
-                            let abs_end = sent.byte_end;
-                            if !is_excluded(abs, abs_end, excluded) {
-                                issues.push(
-                                    Issue::new(
-                                        abs,
-                                        abs_end - abs,
-                                        &text[abs..abs_end],
-                                        vec![],
-                                        IssueType::AiStyle,
-                                        Severity::Info,
-                                    )
-                                    .with_context(
-                                        "AI structural: 公式化轉折（儘管…挑戰…仍然），AI 常見句型",
-                                    ),
-                                );
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
+        let Some(start) = s.find("儘管") else {
+            continue;
+        };
+        let after_despite_start = start + "儘管".len();
+        let Some(challenge_rel) = s[after_despite_start..].find("挑戰") else {
+            continue;
+        };
+        let challenge = after_despite_start + challenge_rel;
+
+        // Char-counted gap (<= 40 chars), encoding-independent.
+        if s[after_despite_start..challenge].chars().count() > 40 {
+            continue;
         }
+
+        // The pattern needs a forward-looking verb after the challenge.
+        let rest = &s[challenge + "挑戰".len()..];
+        if !FORWARD_VERBS.iter().any(|verb| rest.contains(verb)) {
+            continue;
+        }
+
+        let abs = sent.byte_start + start;
+        let abs_end = sent.byte_end;
+        if is_excluded(abs, abs_end, excluded) {
+            continue;
+        }
+        issues.push(ai_style_issue(
+            abs,
+            &text[abs..abs_end],
+            "",
+            "AI structural: 公式化轉折（儘管…挑戰…仍然），AI 常見句型",
+            Severity::Info,
+        ));
     }
 }
 
@@ -2874,36 +2895,36 @@ fn scan_ai_false_ranges(
 ) {
     for sent in &idx.sentences {
         let s = &text[sent.byte_start..sent.byte_end];
-        if let Some(cong) = s.find("從") {
-            let after_cong = cong + "從".len();
-            if let Some(dao) = s[after_cong..].find("到") {
-                let after_dao = after_cong + dao + "到".len();
-                if let Some(zaidao) = s[after_dao..].find("再到") {
-                    let chain_end = after_dao + zaidao + "再到".len();
-                    let chain_chars = s[cong..chain_end].chars().count();
-                    if chain_chars >= 10 {
-                        // ≥10 chars chain
-                        let abs = sent.byte_start + cong;
-                        let abs_end = sent.byte_start + chain_end;
-                        if !is_excluded(abs, abs_end, excluded) {
-                            issues.push(
-                                Issue::new(
-                                    abs,
-                                    abs_end - abs,
-                                    &text[abs..abs_end],
-                                    vec![],
-                                    IssueType::AiStyle,
-                                    Severity::Info,
-                                )
-                                .with_context(
-                                    "AI structural: 假範圍鏈（從…到…再到），AI 常見列舉模式",
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
+        let Some(cong) = s.find("從") else {
+            continue;
+        };
+        let after_cong = cong + "從".len();
+        let Some(dao) = s[after_cong..].find("到") else {
+            continue;
+        };
+        let after_dao = after_cong + dao + "到".len();
+        let Some(zaidao) = s[after_dao..].find("再到") else {
+            continue;
+        };
+        let chain_end = after_dao + zaidao + "再到".len();
+
+        // Only a chain of 10 or more characters reads as the AI pattern.
+        if s[cong..chain_end].chars().count() < 10 {
+            continue;
         }
+
+        let abs = sent.byte_start + cong;
+        let abs_end = sent.byte_start + chain_end;
+        if is_excluded(abs, abs_end, excluded) {
+            continue;
+        }
+        issues.push(ai_style_issue(
+            abs,
+            &text[abs..abs_end],
+            "",
+            "AI structural: 假範圍鏈（從…到…再到），AI 常見列舉模式",
+            Severity::Info,
+        ));
     }
 }
 
@@ -3035,35 +3056,32 @@ fn scan_trans_abstract_subject(
     const ABSTRACT_NOUNS: &[&str] = &["的減少", "的增加", "的提高", "的下降", "的通過", "的實施"];
     const ABSTRACT_VERBS: &[&str] = &["導致", "標誌著", "意味著"];
 
-    'sentences: for sent in &idx.sentences {
+    for sent in &idx.sentences {
         let s = &text[sent.byte_start..sent.byte_end];
-        // Check sentence head (first 20 chars).
+        // The abstract noun has to lead the sentence; the verb may sit
+        // anywhere after it. One issue per sentence either way.
         let head = &s[..char_bounded_end(s, 0, 20)];
-        for noun in ABSTRACT_NOUNS {
-            if head.contains(noun) {
-                for verb in ABSTRACT_VERBS {
-                    if s.contains(verb) {
-                        let abs = sent.byte_start;
-                        if !is_excluded(abs, abs + s.len().min(12), excluded) {
-                            issues.push(
-                                Issue::new(
-                                    abs,
-                                    s.len(),
-                                    s,
-                                    vec![],
-                                    IssueType::Translationese,
-                                    Severity::Info,
-                                )
-                                .with_context(
-                                    "翻譯腔 G2: 抽象主語（的+抽象名詞+導致/意味著），歐化句型",
-                                ),
-                            );
-                            continue 'sentences; // One per sentence.
-                        }
-                    }
-                }
-            }
+        if !ABSTRACT_NOUNS.iter().any(|noun| head.contains(noun)) {
+            continue;
         }
+        if !ABSTRACT_VERBS.iter().any(|verb| s.contains(verb)) {
+            continue;
+        }
+        let abs = sent.byte_start;
+        if is_excluded(abs, abs + s.len().min(12), excluded) {
+            continue;
+        }
+        issues.push(
+            Issue::new(
+                abs,
+                s.len(),
+                s,
+                vec![],
+                IssueType::Translationese,
+                Severity::Info,
+            )
+            .with_context("翻譯腔 G2: 抽象主語（的+抽象名詞+導致/意味著），歐化句型"),
+        );
     }
 }
 
@@ -3190,29 +3208,30 @@ fn scan_trans_copula_classifier(
     for sent in &idx.sentences {
         let s = &text[sent.byte_start..sent.byte_end];
         for &pattern in COPULA_PATTERNS {
-            if let Some(pos) = s.find(pattern) {
-                // Check if followed by 的...人 within the sentence.
-                let after = &s[pos + pattern.len()..];
-                if after.contains("的") {
-                    let abs = sent.byte_start + pos;
-                    if !is_excluded(abs, abs + pattern.len(), excluded) {
-                        issues.push(
-                            Issue::new(
-                                abs,
-                                pattern.len(),
-                                pattern,
-                                vec![format!("是")],
-                                IssueType::Translationese,
-                                Severity::Info,
-                            )
-                            .with_context(
-                                "翻譯腔 Y1: 繫詞+量詞膨脹（是一個/名/位…的…），建議刪除繫詞+量詞",
-                            ),
-                        );
-                    }
-                    break; // One per sentence.
-                }
+            let Some(pos) = s.find(pattern) else {
+                continue;
+            };
+            // The pattern only reads as the calque when a 的 clause follows.
+            if !s[pos + pattern.len()..].contains("的") {
+                continue;
             }
+            let abs = sent.byte_start + pos;
+            if !is_excluded(abs, abs + pattern.len(), excluded) {
+                issues.push(
+                    Issue::new(
+                        abs,
+                        pattern.len(),
+                        pattern,
+                        vec!["是".to_string()],
+                        IssueType::Translationese,
+                        Severity::Info,
+                    )
+                    .with_context(
+                        "翻譯腔 Y1: 繫詞+量詞膨脹（是一個/名/位…的…），建議刪除繫詞+量詞",
+                    ),
+                );
+            }
+            break; // One per sentence.
         }
     }
 }
@@ -3493,6 +3512,19 @@ fn find_within_chars(
 
 // ZY2a: bounded EN connective calques — 因為…所以 / 雖然…但是 / 當…的時候 /
 // 如果…那麼. Hard-bounded distance (no `.*?`).
+/// Whether what follows a bare 當 makes it part of a different word.
+///
+/// 當 is one character with many non-connective uses (當下, 當時, 當作, 當地,
+/// 當局, 當事人, 當中, 當然, 當面), so the connective reading needs this filter
+/// before the distance search is worth running.
+fn starts_another_dang_word(rest: &str) -> bool {
+    const SKIP_NEXT: &[char] = &[
+        '下', '時', '作', '初', '今', '年', '日', '前', '地', '局', '事', '中', '然', '面', '選',
+        '權', '代',
+    ];
+    rest.chars().next().is_some_and(|c| SKIP_NEXT.contains(&c))
+}
+
 fn scan_zy2a_connective_calques(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue>) {
     // (opener, closer, max_chars_between, label). Distance budget per opener:
     // 40 chars for 因/雖/如, 30 chars for 當.
@@ -3519,19 +3551,9 @@ fn scan_zy2a_connective_calques(text: &str, excluded: &[ByteRange], issues: &mut
             let abs_open = search_from + pos;
             let after_open = abs_open + opener.len();
 
-            // 當 is a single character with many non-connective uses (當下,
-            // 當時, 當作, 當地, 當局, 當事人, 當中, 當然, 當面 etc.). Skip when
-            // next char is a common 當-prefix forming a different word.
-            if opener == "當" {
-                let rest = &text[after_open..];
-                const SKIP_NEXT: &[char] = &[
-                    '下', '時', '作', '初', '今', '年', '日', '前', '地', '局', '事', '中', '然',
-                    '面', '選', '權', '代',
-                ];
-                if rest.chars().next().is_some_and(|c| SKIP_NEXT.contains(&c)) {
-                    search_from = after_open;
-                    continue;
-                }
+            if opener == "當" && starts_another_dang_word(&text[after_open..]) {
+                search_from = after_open;
+                continue;
             }
             match find_within_chars(text, after_open, max_between, closer) {
                 Some(abs_close) => {

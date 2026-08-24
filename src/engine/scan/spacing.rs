@@ -6,6 +6,9 @@
 // 4. No repeated full-width punctuation marks
 // 5. Full-width digits → half-width
 
+use std::iter::Peekable;
+use std::str::CharIndices;
+
 use crate::engine::excluded::{is_excluded, ByteRange};
 use crate::rules::ruleset::{Issue, IssueType, Severity};
 
@@ -98,125 +101,157 @@ impl super::Scanner {
             }
 
             if !excluded_ch {
-                // Rule 5: full-width digits → half-width.
-                if is_fullwidth_digit(ch) {
-                    let hw = fullwidth_to_halfwidth_digit(ch);
-                    issues.push(punct_issue_sev(
-                        offset,
-                        &ch.to_string(),
-                        &hw.to_string(),
-                        "數字應使用半形字元",
-                        Severity::Warning,
-                    ));
-                }
-                // Rule 4: repeated full-width punctuation.
-                else if is_fullwidth_punct(ch) && same_punct_run > 0 {
-                    // For paired punct (… and —), allow exactly 2 consecutive
-                    // (run=1).
-                    let should_flag = if is_paired_punct(ch) {
-                        same_punct_run >= 2
-                    } else {
-                        true
-                    };
-                    if should_flag {
-                        issues.push(punct_issue_sev(
-                            offset,
-                            &ch.to_string(),
-                            "",
-                            "不重複使用標點符號",
-                            Severity::Warning,
-                        ));
-                    }
-                }
-                // Rules 1-3: spacing checks between adjacent characters.
-                else if let Some(&(next_offset, next_ch)) = iter.peek() {
-                    let next_len = next_ch.len_utf8();
-                    if !is_excluded(next_offset, next_offset + next_len, excluded) {
-                        // Rule 1: CJK immediately adjacent to Latin (no space
-                        // between).
-                        if (is_cjk_ideograph(ch) && next_ch.is_ascii_alphabetic())
-                            || (ch.is_ascii_alphabetic() && is_cjk_ideograph(next_ch))
-                        {
-                            issues.push(missing_space_issue(
-                                offset + ch_len,
-                                "中英文之間需要增加空格",
-                            ));
-                        }
-
-                        // Rule 2: CJK immediately adjacent to digit (no space
-                        // between).
-                        if (is_cjk_ideograph(ch) && next_ch.is_ascii_digit())
-                            || (ch.is_ascii_digit() && is_cjk_ideograph(next_ch))
-                        {
-                            issues.push(missing_space_issue(
-                                offset + ch_len,
-                                "中文與數字之間需要增加空格",
-                            ));
-                        }
-
-                        // Rule 3: unwanted space adjacent to full-width
-                        // punctuation. Space before full-width punct.
-                        if ch == ' ' && prev.is_some_and(|(_, pc)| pc != ' ') {
-                            let mut fwd = iter.clone();
-                            let mut space_end_offset = next_offset;
-                            let mut space_end_ch = next_ch;
-                            while space_end_ch == ' ' {
-                                if let Some(&(so, sc)) = fwd.peek() {
-                                    space_end_offset = so;
-                                    space_end_ch = sc;
-                                    fwd.next();
-                                } else {
-                                    break;
-                                }
-                            }
-                            if is_fullwidth_punct(space_end_ch) {
-                                if let Some((_, content_ch)) = prev {
-                                    if is_cjk_ideograph(content_ch)
-                                        || content_ch.is_ascii_alphanumeric()
-                                    {
-                                        let space_len = space_end_offset - offset;
-                                        issues.push(unwanted_space_issue(
-                                            offset,
-                                            space_len,
-                                            "全形標點與其他字元之間不加空格",
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        // Space after full-width punct.
-                        if is_fullwidth_punct(ch) && next_ch == ' ' {
-                            let mut fwd = iter.clone();
-                            fwd.next(); // skip the space we already peeked
-                            let mut after_offset = next_offset + 1;
-                            let mut after_ch = ' ';
-                            while let Some(&(so, sc)) = fwd.peek() {
-                                after_offset = so;
-                                after_ch = sc;
-                                if sc != ' ' {
-                                    break;
-                                }
-                                fwd.next();
-                            }
-                            if after_ch != ' '
-                                && (is_cjk_ideograph(after_ch) || after_ch.is_ascii_alphanumeric())
-                            {
-                                let space_len = after_offset - next_offset;
-                                issues.push(unwanted_space_issue(
-                                    next_offset,
-                                    space_len,
-                                    "全形標點與其他字元之間不加空格",
-                                ));
-                            }
-                        }
-                    }
-                }
+                check_char(
+                    &mut iter,
+                    offset,
+                    ch,
+                    prev,
+                    same_punct_run,
+                    excluded,
+                    issues,
+                );
             }
 
-            // Single update point for prev — no continue statements above.
+            // Single update point for prev, which is why the per-character
+            // checks live in a function instead of `continue`ing here.
             prev = Some((offset, ch));
         }
     }
+}
+
+/// Apply rules 1 to 5 at one character. Rules 4 and 5 are mutually exclusive
+/// with the adjacency rules, so each match returns.
+fn check_char(
+    iter: &mut Peekable<CharIndices<'_>>,
+    offset: usize,
+    ch: char,
+    prev: Option<(usize, char)>,
+    same_punct_run: usize,
+    excluded: &[ByteRange],
+    issues: &mut Vec<Issue>,
+) {
+    // Rule 5: full-width digits should be half-width.
+    if is_fullwidth_digit(ch) {
+        let hw = fullwidth_to_halfwidth_digit(ch);
+        issues.push(punct_issue_sev(
+            offset,
+            &ch.to_string(),
+            &hw.to_string(),
+            "數字應使用半形字元",
+            Severity::Warning,
+        ));
+        return;
+    }
+
+    // Rule 4: repeated full-width punctuation. Paired punct (…… and ——) is
+    // allowed at exactly two, so it only trips from the third onward.
+    if is_fullwidth_punct(ch) && same_punct_run > 0 {
+        let limit = if is_paired_punct(ch) { 2 } else { 1 };
+        if same_punct_run >= limit {
+            issues.push(punct_issue_sev(
+                offset,
+                &ch.to_string(),
+                "",
+                "不重複使用標點符號",
+                Severity::Warning,
+            ));
+        }
+        return;
+    }
+
+    // Rules 1 to 3 all compare against the following character.
+    let Some(&(next_offset, next_ch)) = iter.peek() else {
+        return;
+    };
+    if is_excluded(next_offset, next_offset + next_ch.len_utf8(), excluded) {
+        return;
+    }
+
+    // Rule 1: CJK immediately adjacent to Latin.
+    if (is_cjk_ideograph(ch) && next_ch.is_ascii_alphabetic())
+        || (ch.is_ascii_alphabetic() && is_cjk_ideograph(next_ch))
+    {
+        issues.push(missing_space_issue(
+            offset + ch.len_utf8(),
+            "中英文之間需要增加空格",
+        ));
+    }
+
+    // Rule 2: CJK immediately adjacent to a digit.
+    if (is_cjk_ideograph(ch) && next_ch.is_ascii_digit())
+        || (ch.is_ascii_digit() && is_cjk_ideograph(next_ch))
+    {
+        issues.push(missing_space_issue(
+            offset + ch.len_utf8(),
+            "中文與數字之間需要增加空格",
+        ));
+    }
+
+    // Rule 3: no space on either side of full-width punctuation.
+    check_space_before_punct(iter, offset, ch, prev, issues);
+    check_space_after_punct(iter, next_offset, ch, next_ch, issues);
+}
+
+/// Rule 3, leading half: a space run between content and full-width punct.
+fn check_space_before_punct(
+    iter: &Peekable<CharIndices<'_>>,
+    offset: usize,
+    ch: char,
+    prev: Option<(usize, char)>,
+    issues: &mut Vec<Issue>,
+) {
+    if ch != ' ' {
+        return;
+    }
+    let Some((_, content_ch)) = prev.filter(|&(_, pc)| pc != ' ') else {
+        return;
+    };
+    if !is_cjk_ideograph(content_ch) && !content_ch.is_ascii_alphanumeric() {
+        return;
+    }
+    let Some((punct_offset, punct_ch)) = next_non_space(iter.clone()) else {
+        return;
+    };
+    if !is_fullwidth_punct(punct_ch) {
+        return;
+    }
+    issues.push(unwanted_space_issue(
+        offset,
+        punct_offset - offset,
+        "全形標點與其他字元之間不加空格",
+    ));
+}
+
+/// Rule 3, trailing half: a space run between full-width punct and content.
+fn check_space_after_punct(
+    iter: &Peekable<CharIndices<'_>>,
+    next_offset: usize,
+    ch: char,
+    next_ch: char,
+    issues: &mut Vec<Issue>,
+) {
+    if !is_fullwidth_punct(ch) || next_ch != ' ' {
+        return;
+    }
+    // Skip the space already peeked, then find what the run leads to.
+    let mut fwd = iter.clone();
+    fwd.next();
+    let Some((content_offset, content_ch)) = next_non_space(fwd) else {
+        return;
+    };
+    if !is_cjk_ideograph(content_ch) && !content_ch.is_ascii_alphanumeric() {
+        return;
+    }
+    issues.push(unwanted_space_issue(
+        next_offset,
+        content_offset - next_offset,
+        "全形標點與其他字元之間不加空格",
+    ));
+}
+
+/// First non-space character at or after `fwd`'s current position.
+fn next_non_space(fwd: Peekable<CharIndices<'_>>) -> Option<(usize, char)> {
+    fwd.into_iter().find(|&(_, ch)| ch != ' ')
 }
 
 /// True for punctuation that is legitimately used in pairs (…… and ——).
