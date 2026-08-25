@@ -891,7 +891,7 @@ fn run_server(
         }
     };
 
-    let mut server = zhtw_mcp::mcp::tools::Server::new(
+    let server = zhtw_mcp::mcp::tools::Server::new(
         store,
         suppression_store,
         pack_store,
@@ -901,9 +901,58 @@ fn run_server(
 
     tracing::info!("zhtw-mcp server starting on stdio");
 
-    zhtw_mcp::mcp::transport::run_stdio(&mut server)?;
+    // One stdio connection, one server behind one lock: a worker pool per core
+    // would be idle threads. The lint pipeline runs on the blocking pool so it
+    // never stalls the protocol loop.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let outcome = runtime.block_on(async {
+        use rmcp::ServiceExt;
+        let service = zhtw_mcp::mcp::sdk::SdkServer::new(server);
+        let transport = zhtw_mcp::mcp::transport::stdio(service.lifecycle());
+        let running = match service.serve(transport).await {
+            Ok(running) => running,
+            // A client that closed the pipe before the handshake is a client
+            // that went away, not a failure to report: the hand-rolled
+            // transport returned cleanly on EOF and supervisors still probe
+            // this binary by spawning it and closing stdin.
+            Err(rmcp::service::ServerInitializeError::ConnectionClosed(reason)) => {
+                tracing::info!("client disconnected before initialize: {reason}");
+                return Ok(());
+            }
+            // A pre-handshake request the SDK answered and then declined to
+            // continue from, which in practice is a `server/discover` missing
+            // the per-request metadata its revision requires. The client has
+            // its error; ending quietly is the whole of the outcome.
+            Err(rmcp::service::ServerInitializeError::ExpectedInitializeRequest(message)) => {
+                tracing::warn!("client ended the session before initialize: {message:?}");
+                return Ok(());
+            }
+            // The client asked for a protocol revision this server does not
+            // serve and was told so, with the list it can choose from. The
+            // handshake failing ends the session, but a negotiation that
+            // reached a definite answer is not a crash to report as one.
+            Err(rmcp::service::ServerInitializeError::InitializeFailed(error)) => {
+                tracing::warn!("handshake refused: {error:?}");
+                return Ok(());
+            }
+            Err(e) => return Err(anyhow::Error::from(e)),
+        };
+        running.waiting().await?;
+        Ok::<(), anyhow::Error>(())
+    });
 
-    Ok(())
+    // End of input is bounded on purpose: the transport waits a fixed while
+    // for responses still owed and then reports EOF regardless. Dropping the
+    // runtime here would undo that, because a runtime waits for its blocking
+    // tasks with no deadline and the lint runs on that pool. A scan wedged
+    // past the drain would hold the process open indefinitely, having already
+    // been given up on. Shutting down with a deadline keeps the exit bounded;
+    // whatever the scan still held is lost either way, and the judgment cache
+    // is flushed on the `exit` path rather than here.
+    runtime.shutdown_timeout(zhtw_mcp::mcp::transport::BLOCKING_SHUTDOWN_GRACE);
+    outcome
 }
 
 // Lint subcommand

@@ -60,6 +60,63 @@ fn binary_path() -> std::path::PathBuf {
     path
 }
 
+/// Spawn the server with a throwaway config and cache, and hold the temp dir
+/// alive for the caller's session.
+fn spawn_server() -> (
+    tempfile::TempDir,
+    std::process::Child,
+    std::process::ChildStdin,
+    BufReader<std::process::ChildStdout>,
+) {
+    let bin = binary_path();
+    assert!(
+        bin.exists(),
+        "binary not found at {bin:?}; run `cargo build` first"
+    );
+    let tmp = tempfile::tempdir().expect("create temp dir for the server session");
+    let mut child = Command::new(&bin)
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join(".config"))
+        .env("XDG_CACHE_HOME", tmp.path().join(".cache"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn zhtw-mcp");
+    let stdin = child.stdin.take().unwrap();
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    // The caller holds the temp dir: dropping it early would pull the config
+    // and cache directories out from under a live server.
+    (tmp, child, stdin, stdout)
+}
+
+/// Drive the stock handshake and return the `initialize` result.
+///
+/// Most tests want a session, not a particular handshake; the ones that are
+/// about the handshake itself keep their own literal.
+fn handshake(stdin: &mut impl Write, stdout: &mut impl BufRead) -> Value {
+    let init = send_recv(
+        stdin,
+        stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
+    );
+    assert!(init["result"].is_object(), "initialize failed: {init}");
+    send_notification(
+        stdin,
+        &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    );
+    init
+}
+
 #[test]
 fn e2e_initialize_and_tools_list() {
     let bin = binary_path();
@@ -87,7 +144,8 @@ fn e2e_initialize_and_tools_list() {
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
 
-    // 0. Pre-init: tools/list before initialize should be rejected
+    // 0. Pre-init: tools/list before initialize should be rejected, and the
+    // server must stay up to serve the handshake that follows.
     let resp = send_recv(
         &mut stdin,
         &mut stdout,
@@ -734,29 +792,39 @@ fn e2e_initialize_and_tools_list() {
 }
 
 #[test]
-fn e2e_initialize_protocol_version_mismatch_logs_warning() {
-    let bin = binary_path();
-    if !bin.exists() {
-        panic!("binary not found at {:?}; run `cargo build` first", bin);
+fn e2e_initialize_negotiates_every_supported_version() {
+    // 2025-06-18 used to be answered with 2024-11-05 and a stderr warning.
+    // It is a version this server serves, so it is answered with itself.
+    for version in ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"] {
+        let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+        let resp = send_recv(
+            &mut stdin,
+            &mut stdout,
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "id": 0,
+                "params": {
+                    "protocolVersion": version,
+                    "capabilities": {},
+                    "clientInfo": { "name": "test", "version": "0.1" },
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": version,
+                        "io.modelcontextprotocol/clientCapabilities": {}
+                    }
+                }
+            }),
+        );
+        assert_eq!(resp["result"]["protocolVersion"], version, "{version}");
+        assert_eq!(resp["result"]["serverInfo"]["name"], "zhtw-mcp");
+        drop(stdin);
+        let _ = child.wait();
     }
+}
 
-    let tmp_dir = tempfile::tempdir().expect("create temp dir");
-
-    let mut child = Command::new(&bin)
-        .env("HOME", tmp_dir.path())
-        .env("XDG_CONFIG_HOME", tmp_dir.path().join(".config"))
-        .env("XDG_CACHE_HOME", tmp_dir.path().join(".cache"))
-        .env("RUST_LOG", "warn")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn zhtw-mcp");
-
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-
-    // Send initialize request with mismatched protocol version "2024-01-01"
+#[test]
+fn e2e_initialize_rejects_inline_only_version() {
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
     let resp = send_recv(
         &mut stdin,
         &mut stdout,
@@ -765,29 +833,776 @@ fn e2e_initialize_protocol_version_mismatch_logs_warning() {
             "method": "initialize",
             "id": 0,
             "params": {
-                "protocolVersion": "2025-06-18",
+                "protocolVersion": "2026-07-28",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
+    );
+    // Refused, but as a wrong entry point rather than an unsupported version:
+    // the alternatives offered must not include the one just refused, or the
+    // client is sent back to the method it already failed at.
+    assert_eq!(resp["error"]["code"], -32022, "{resp}");
+    assert_eq!(
+        resp["error"]["data"]["entryPoint"], "server/discover",
+        "{resp}"
+    );
+    let supported = resp["error"]["data"]["supported"]
+        .as_array()
+        .expect("the error names the versions reachable from here");
+    assert!(!supported.contains(&json!("2026-07-28")), "{resp}");
+    assert!(supported.contains(&json!("2025-11-25")), "{resp}");
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_initialize_rejects_unsupported_version_with_32022() {
+    // Since 2026-07-28 an unsupported version is a server error rather than a
+    // client judgment call, and the reply says what is on offer.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "id": 0,
+            "params": {
+                "protocolVersion": "1900-01-01",
                 "capabilities": {},
                 "clientInfo": { "name": "test", "version": "0.1" }
             }
         }),
     );
 
-    // Handshake must still succeed
-    assert_eq!(resp["id"], 0);
-    assert_eq!(resp["result"]["serverInfo"]["name"], "zhtw-mcp");
+    assert_eq!(resp["error"]["code"], -32022, "{resp}");
+    assert_eq!(resp["error"]["message"], "Unsupported protocol version");
+    assert_eq!(resp["error"]["data"]["requested"], "1900-01-01");
+    let supported = resp["error"]["data"]["supported"]
+        .as_array()
+        .expect("the error names the versions on offer");
+    assert!(supported.contains(&json!("2024-11-05")), "{resp}");
+    // Only the handshake-reachable revisions: 2026-07-28 is served, but not
+    // from `initialize`, so offering it here would be a dead end.
+    assert!(!supported.contains(&json!("2026-07-28")), "{resp}");
 
-    // Close stdin to let child terminate and flush stderr
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_discover_mid_session_keeps_the_client_it_was_told_about() {
+    // `server/discover` may arrive after a handshake that already named the
+    // client, and its `_meta` need not carry client info. Recording that
+    // absence as the client's identity loses the name, and with it the compact
+    // output an AI-agent client gets: the answer silently grows a `text` and a
+    // `trace` field it had been told to leave out.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    let init = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "claude-code", "version": "1" }
+            }
+        }),
+    );
+    assert!(init["result"].is_object(), "initialize: {init}");
+    send_notification(
+        &mut stdin,
+        &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    );
+
+    let discover = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "server/discover",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        }),
+    );
+    assert!(discover["result"].is_object(), "discover: {discover}");
+
+    let (_notifications, call) = send_recv_skip_notifications(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": { "name": "zhtw", "arguments": { "text": "這個軟件的質量" } }
+        }),
+    );
+    let body: Value = serde_json::from_str(
+        call["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected tool output: {call}")),
+    )
+    .expect("tool output is JSON");
+
+    assert!(
+        body.get("text").is_none() && body.get("trace").is_none(),
+        "the client was still claude-code, so the answer should stay compact: {body}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_every_termination_path_reports_the_code_it_promises() {
+    // The exit contract in one place, because its cells have been wrong
+    // separately: a reply queued and then abandoned, a drain that never
+    // returned, a code that did not match. `shutdown` before `exit` means a
+    // clean 0 and an answered shutdown; `exit` alone means 1; end of input
+    // means 0. Each holds before the handshake and after it, and those are
+    // different code paths: the framing layer answers one, the SDK the other.
+    struct Case {
+        what: &'static str,
+        handshake_first: bool,
+        script: String,
+        code: i32,
+        expects_ack: bool,
+    }
+
+    let shutdown = json!({"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": {}});
+    let exit = json!({"jsonrpc": "2.0", "method": "exit"});
+    let cases = vec![
+        Case {
+            what: "pre-handshake: exit alone",
+            handshake_first: false,
+            script: format!("{exit}\n"),
+            code: 1,
+            expects_ack: false,
+        },
+        Case {
+            what: "pre-handshake: shutdown then exit, pipelined",
+            handshake_first: false,
+            script: format!("{shutdown}\n{exit}\n"),
+            code: 0,
+            expects_ack: true,
+        },
+        Case {
+            what: "post-handshake: exit alone",
+            handshake_first: true,
+            script: format!("{exit}\n"),
+            code: 1,
+            expects_ack: false,
+        },
+        Case {
+            what: "post-handshake: shutdown then exit, pipelined",
+            handshake_first: true,
+            script: format!("{shutdown}\n{exit}\n"),
+            code: 0,
+            expects_ack: true,
+        },
+        Case {
+            what: "post-handshake: shutdown then end of input",
+            handshake_first: true,
+            script: format!("{shutdown}\n"),
+            code: 0,
+            expects_ack: true,
+        },
+        Case {
+            what: "pre-handshake: end of input",
+            handshake_first: false,
+            script: String::new(),
+            code: 0,
+            expects_ack: false,
+        },
+        Case {
+            what: "post-handshake: end of input",
+            handshake_first: true,
+            script: String::new(),
+            code: 0,
+            expects_ack: false,
+        },
+    ];
+
+    for case in cases {
+        let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+        if case.handshake_first {
+            handshake(&mut stdin, &mut stdout);
+        }
+        write!(stdin, "{}", case.script).unwrap();
+        stdin.flush().unwrap();
+        drop(stdin);
+
+        let mut acknowledged = false;
+        let mut line = String::new();
+        while stdout.read_line(&mut line).unwrap_or(0) > 0 {
+            if let Ok(msg) = serde_json::from_str::<Value>(line.trim()) {
+                if msg["id"] == 99 {
+                    // Shape as well as presence: the answer to `shutdown` is
+                    // an empty result, not merely something bearing its id.
+                    assert_eq!(msg["result"], json!({}), "{}: shutdown reply", case.what);
+                    acknowledged = true;
+                }
+            }
+            line.clear();
+        }
+        let status = child.wait().unwrap();
+
+        assert_eq!(
+            status.code(),
+            Some(case.code),
+            "{}: wrong exit code",
+            case.what
+        );
+        assert_eq!(
+            acknowledged, case.expects_ack,
+            "{}: shutdown acknowledgement",
+            case.what
+        );
+    }
+}
+
+#[test]
+fn e2e_cancelling_a_call_stops_it_waiting_on_sampling() {
+    // A cancelled request is not owed an answer and the client that cancelled
+    // it will not send one, so the sampling deadline is time spent for
+    // nothing, with the server lock held throughout. The discriminator is how
+    // soon the next call that needs that lock is served. Waiting the deadline
+    // out costs five seconds a question and the budget allows three, measured
+    // at just over fifteen seconds; observing the cancellation ends the wait
+    // at once and the remaining scan is milliseconds. The threshold sits well
+    // below the five-second deadline rather than at it, so a single call that
+    // had already burned part of its deadline would still be caught.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    let init = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": { "sampling": {} },
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
+    );
+    assert!(init["result"].is_object(), "initialize: {init}");
+    send_notification(
+        &mut stdin,
+        &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    );
+
+    let text = "這個項目的質量和性能都很好，軟件的並行處理和內存管理需要優化。".repeat(3);
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "zhtw",
+                "arguments": { "text": text, "profile": "strict", "output": "summary" }
+            }
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    // Wait for the first question, then cancel rather than answering it.
+    loop {
+        let mut line = String::new();
+        stdout.read_line(&mut line).expect("server closed early");
+        let Ok(msg) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if msg["method"] == "sampling/createMessage" {
+            break;
+        }
+    }
+    send_notification(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": { "requestId": 2, "reason": "user cancelled" }
+        }),
+    );
+
+    // The next call needs the same lock the cancelled scan is holding.
+    let started = std::time::Instant::now();
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": { "name": "zhtw", "arguments": { "text": "軟件", "output": "summary" } }
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    loop {
+        let mut line = String::new();
+        stdout.read_line(&mut line).expect("server closed early");
+        let Ok(msg) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if msg["id"] == 3 {
+            break;
+        }
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "the cancelled call held the server for {elapsed:?}, so it waited out \
+         its sampling deadlines instead of noticing the cancellation"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_framing_replies_survive_concurrent_responses() {
+    // The framing layer's own replies are produced inside `receive`, which
+    // RMCP polls in a select! and drops whenever another arm wins. Writing
+    // from in there loses the reply and the line that caused it is already
+    // consumed, so the client waits on an answer that was never written. It
+    // only shows up under concurrent traffic: one bad line on an idle server
+    // is always answered.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    handshake(&mut stdin, &mut stdout);
+
+    const N: usize = 50;
+    for i in 0..N {
+        // Unparsable: answered by the framing layer with -32700.
+        writeln!(stdin, "{{not json at all").unwrap();
+        // Answered by RMCP, which is what keeps the select! busy.
+        writeln!(
+            stdin,
+            "{}",
+            json!({"jsonrpc": "2.0", "id": 1000 + i, "method": "tools/list", "params": {}})
+        )
+        .unwrap();
+    }
+    stdin.flush().unwrap();
+
+    let mut parse_errors = 0usize;
+    let mut results = 0usize;
+    while parse_errors + results < N * 2 {
+        let mut line = String::new();
+        if stdout.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        let Ok(msg) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if msg["error"]["code"] == -32700 {
+            parse_errors += 1;
+        } else if msg.get("result").is_some() {
+            results += 1;
+        }
+    }
+    assert_eq!(results, N, "every tools/list should be answered");
+    assert_eq!(
+        parse_errors, N,
+        "every unparsable line should be answered too, not dropped when the \
+         transport happens to be writing something else"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_initialize_after_discover_answers_the_version_asked_for() {
+    // RMCP patches the negotiated version onto the result only when the
+    // session began with the handshake. Opening with `server/discover` first
+    // takes the other path, where the reply used to name the server default
+    // rather than the version requested.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    let discover = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "server/discover",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        }),
+    );
+    assert!(discover["result"].is_object(), "discover: {discover}");
+
+    let init = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
+    );
+    assert_eq!(
+        init["result"]["protocolVersion"], "2025-06-18",
+        "answered a different revision than the one asked for: {init}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_bad_params_on_a_known_method_is_not_method_not_found() {
+    // `ClientRequest` is untagged with `CustomRequest` last, so a known method
+    // whose params are the wrong shape falls through to the custom handler.
+    // Answering METHOD_NOT_FOUND there tells a client its tool does not exist.
+    let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
+
+    for method in ["tools/call", "resources/read", "prompts/get"] {
+        let (_notifications, resp) = send_recv_skip_notifications(
+            &mut stdin,
+            &mut stdout,
+            &json!({"jsonrpc": "2.0", "id": 42, "method": method, "params": {}}),
+        );
+        assert_eq!(
+            resp["error"]["code"], -32602,
+            "{method} with bad params should be invalid params: {resp}"
+        );
+    }
+
+    // A method that genuinely does not exist still says so.
+    let (_notifications, resp) = send_recv_skip_notifications(
+        &mut stdin,
+        &mut stdout,
+        &json!({"jsonrpc": "2.0", "id": 43, "method": "no/such/method", "params": {}}),
+    );
+    assert_eq!(resp["error"]["code"], -32601, "{resp}");
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_stray_response_before_initialize_does_not_end_the_session() {
+    // Nothing can be outstanding before the handshake, so a response-shaped
+    // line there matches no request. Forwarding it makes RMCP read the session
+    // as a failed handshake and end it, taking the real initialize with it.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 99, "result": {}})
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    let init = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
+    );
+    assert!(
+        init["result"].is_object(),
+        "the handshake must still be answered: {init}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_sampling_reply_reaches_the_server() {
+    // Tier 3 asks the client to disambiguate and waits for the answer. The
+    // reply is a response-shaped message, which the framing layer must hand to
+    // the SDK rather than discard: the SDK owns the ids it has outstanding and
+    // is the only thing that can match a reply to its request.
+    //
+    // The discriminator is time, with a wide margin. A reply that never
+    // arrives costs a full DEFAULT_SAMPLING_TIMEOUT (5s) per call and yields
+    // no answer, while a reply that lands ends the wait immediately, so the
+    // whole exchange is milliseconds of scanning either way. Anything under
+    // the timeout means the answer was received.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+
+    let init = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": { "sampling": {} },
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
+    );
+    assert!(init["result"].is_object(), "initialize: {init}");
+    send_notification(
+        &mut stdin,
+        &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    );
+
+    let text = "這個項目的質量和性能都很好，軟件的並行處理和內存管理需要優化。".repeat(3);
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "zhtw",
+                "arguments": { "text": text, "profile": "strict", "output": "summary" }
+            }
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    let started = std::time::Instant::now();
+    let mut answered = 0usize;
+    let result = loop {
+        let mut line = String::new();
+        stdout.read_line(&mut line).expect("server closed early");
+        let msg: Value = serde_json::from_str(line.trim())
+            .unwrap_or_else(|e| panic!("expected a message, got {line:?}: {e}"));
+
+        if msg["method"] == "sampling/createMessage" {
+            answered += 1;
+            writeln!(
+                stdin,
+                "{}",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": msg["id"],
+                    "result": {
+                        "role": "assistant",
+                        "model": "test",
+                        "content": { "type": "text", "text": "平行" }
+                    }
+                })
+            )
+            .unwrap();
+            stdin.flush().unwrap();
+        } else if msg["id"] == 2 {
+            break msg;
+        }
+    };
+    let elapsed = started.elapsed();
+
+    assert!(answered > 0, "the server never asked the client to sample");
+    assert!(
+        result["result"].is_object(),
+        "the call should succeed: {result}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "{answered} sampling repl(ies) sent but the call took {elapsed:?}, \
+         so the server waited out its timeout instead of reading them"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_resource_templates_list_is_empty_not_missing() {
+    // `resources/templates/list` is a standard request under the `resources`
+    // capability this server advertises, and one of the ten 2026-07-28
+    // defines. Having no templates is not the same as not implementing the
+    // method, so the answer is an empty list rather than METHOD_NOT_FOUND.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    let init = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
+    );
+    assert!(init.get("result").is_some(), "initialize: {init}");
+
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "resources/templates/list"}),
+    );
+    assert_eq!(
+        resp["result"]["resourceTemplates"].as_array().map(Vec::len),
+        Some(0),
+        "{resp}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_closing_stdin_still_answers_a_request_in_flight() {
+    // A batch caller writes its requests, closes the write half, and waits for
+    // the answers. RMCP ends its service loop as soon as the transport reports
+    // end of input, so a handler still running has to be waited for or its
+    // response is lost. The text is repetitive on purpose: that shape is slow
+    // enough to still be scanning when stdin closes.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+
+    let init = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
+    );
+    assert!(init.get("result").is_some(), "initialize: {init}");
+
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件的性能優化".repeat(2000), "output": "summary" }
+            }
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    // The whole point: no more input is coming.
     drop(stdin);
 
-    let out = child.wait_with_output().unwrap();
-    assert!(out.status.success());
-    let stderr_output = String::from_utf8_lossy(&out.stderr);
+    let mut line = String::new();
+    stdout
+        .read_line(&mut line)
+        .expect("the response outlives end of input");
+    let resp: Value = serde_json::from_str(line.trim())
+        .unwrap_or_else(|e| panic!("expected a response, got {line:?}: {e}"));
+    assert_eq!(resp["id"], 2, "{resp}");
+    assert!(resp.get("result").is_some(), "{resp}");
 
-    // Verify warning log printed to stderr (Note: this warning is deliberately).
-    assert!(
-        stderr_output.contains("MCP protocol version mismatch"),
-        "stderr should contain warning message, got: {stderr_output}"
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_refused_handshake_does_not_open_the_gate() {
+    // The gate opens when a handshake succeeds, not when one is attempted.
+    // A version this server does not serve is refused, and the request behind
+    // it must not be served as though the session were established.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "1900-01-01",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
     );
+    assert_eq!(resp["error"]["code"], -32022, "{resp}");
+
+    // The refused handshake ends the session, and ends it cleanly: the client
+    // got a definite protocol answer, which is not a server failure.
+    drop(stdin);
+    let status = child.wait().expect("server exits");
+    assert!(
+        status.success(),
+        "refusing a version is not a crash: {status}"
+    );
+}
+
+#[test]
+fn e2e_server_discover_before_handshake_lists_versions() {
+    // Discovery is pre-handshake by definition: a client asks what the server
+    // speaks before committing to a revision.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "server/discover",
+            "id": 0,
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        }),
+    );
+
+    let versions = resp["result"]["supportedVersions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("discover lists supported versions: {resp}"));
+    assert!(versions.contains(&json!("2026-07-28")), "{resp}");
+    assert!(versions.contains(&json!("2024-11-05")), "{resp}");
+    assert!(
+        resp["result"]["capabilities"]["tools"].is_object(),
+        "{resp}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
 }
 
 #[test]
@@ -1886,201 +2701,6 @@ fn e2e_explain_mode_and_determinism() {
     drop(stdin);
     let status = child.wait().unwrap();
     assert!(status.success());
-}
-
-#[test]
-fn e2e_shutdown_returns_empty_and_clean_exit() {
-    let bin = binary_path();
-    if !bin.exists() {
-        panic!("binary not found at {:?}; run `cargo build` first", bin);
-    }
-
-    let tmp_dir = tempfile::tempdir().expect("create temp dir");
-    let overrides_path = tmp_dir.path().join("overrides.json");
-    let suppressions_path = tmp_dir.path().join("suppressions.json");
-
-    let mut child = Command::new(&bin)
-        .args([
-            "--overrides",
-            overrides_path.to_str().unwrap(),
-            "--suppressions",
-            suppressions_path.to_str().unwrap(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to spawn zhtw-mcp");
-
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-
-    // Initialize
-    let resp = send_recv(
-        &mut stdin,
-        &mut stdout,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "initialize",
-            "id": 1,
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": { "name": "test", "version": "0.1" }
-            }
-        }),
-    );
-    assert_eq!(resp["id"], 1);
-    assert!(resp["result"].is_object());
-
-    // Shutdown: must respond with empty result {}
-    let resp = send_recv(
-        &mut stdin,
-        &mut stdout,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "shutdown",
-            "id": 2
-        }),
-    );
-    assert_eq!(resp["id"], 2);
-    assert_eq!(resp["result"], json!({}));
-    assert!(resp.get("error").is_none());
-
-    // After shutdown, the server exits the serve loop cleanly.
-    drop(stdin);
-    let status = child.wait().unwrap();
-    assert!(status.success());
-}
-
-#[test]
-fn e2e_exit_terminates_process() {
-    let bin = binary_path();
-    if !bin.exists() {
-        panic!("binary not found at {:?}; run `cargo build` first", bin);
-    }
-
-    let tmp_dir = tempfile::tempdir().expect("create temp dir");
-    let overrides_path = tmp_dir.path().join("overrides.json");
-    let suppressions_path = tmp_dir.path().join("suppressions.json");
-
-    let mut child = Command::new(&bin)
-        .args([
-            "--overrides",
-            overrides_path.to_str().unwrap(),
-            "--suppressions",
-            suppressions_path.to_str().unwrap(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to spawn zhtw-mcp");
-
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-
-    // Initialize
-    send_recv(
-        &mut stdin,
-        &mut stdout,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "initialize",
-            "id": 1,
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": { "name": "test", "version": "0.1" }
-            }
-        }),
-    );
-
-    // Shutdown first (proper lifecycle)
-    let resp = send_recv(
-        &mut stdin,
-        &mut stdout,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "shutdown",
-            "id": 2
-        }),
-    );
-    assert_eq!(resp["result"], json!({}));
-
-    // Exit notification — process should terminate with code 0
-    send_notification(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "exit"
-        }),
-    );
-
-    let status = child.wait().unwrap();
-    assert!(
-        status.success(),
-        "exit after shutdown should exit with code 0"
-    );
-}
-
-#[test]
-fn e2e_exit_without_shutdown_exits_nonzero() {
-    let bin = binary_path();
-    if !bin.exists() {
-        panic!("binary not found at {:?}; run `cargo build` first", bin);
-    }
-
-    let tmp_dir = tempfile::tempdir().expect("create temp dir");
-    let overrides_path = tmp_dir.path().join("overrides.json");
-    let suppressions_path = tmp_dir.path().join("suppressions.json");
-
-    let mut child = Command::new(&bin)
-        .args([
-            "--overrides",
-            overrides_path.to_str().unwrap(),
-            "--suppressions",
-            suppressions_path.to_str().unwrap(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to spawn zhtw-mcp");
-
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-
-    // Initialize
-    send_recv(
-        &mut stdin,
-        &mut stdout,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "initialize",
-            "id": 1,
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": { "name": "test", "version": "0.1" }
-            }
-        }),
-    );
-
-    // Exit without shutdown — process should terminate with code 1
-    send_notification(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "exit"
-        }),
-    );
-
-    let status = child.wait().unwrap();
-    assert!(
-        !status.success(),
-        "exit without prior shutdown should exit with non-zero code"
-    );
 }
 
 // -- Reject unknown parameters in tools/call --

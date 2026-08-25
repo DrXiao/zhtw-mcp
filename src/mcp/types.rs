@@ -4,8 +4,6 @@
 // tools/list, tools/call, resources/list, resources/read, prompts/list,
 // prompts/get.
 
-use std::string::FromUtf8Error;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -121,19 +119,6 @@ impl JsonRpcResponse {
             }),
         }
     }
-
-    pub fn error_with_data(id: Option<RequestId>, code: i64, message: String, data: Value) -> Self {
-        Self {
-            jsonrpc: JSONRPC_VERSION,
-            id,
-            result: None,
-            error: Some(JsonRpcError {
-                code,
-                message,
-                data: Some(data),
-            }),
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -146,309 +131,39 @@ pub struct JsonRpcError {
 
 // MCP protocol types
 
-/// Initialize request params.
-#[derive(Debug, Deserialize)]
-pub struct InitializeParams {
-    #[serde(rename = "protocolVersion")]
-    pub protocol_version: String,
-    #[serde(default)]
-    pub capabilities: ClientCapabilitiesRaw,
-    #[serde(rename = "clientInfo", default)]
-    pub client_info: Option<ClientInfo>,
-}
-
-/// Raw client capabilities from the initialize request.
-/// Each field indicates whether the client supports that MCP feature.
-#[derive(Debug, Default, Deserialize)]
-pub struct ClientCapabilitiesRaw {
-    #[serde(default)]
-    pub sampling: Option<Value>,
-    #[serde(default)]
-    pub roots: Option<Value>,
-    #[serde(default)]
-    pub logging: Option<Value>,
-}
-
-/// Parsed client capabilities stored by the server.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ClientCapabilities {
-    /// Client supports sampling/createMessage (server -> client requests).
-    pub sampling: bool,
-    /// Client supports roots/list.
-    pub roots: bool,
-    /// Client supports notifications/message.
-    pub logging: bool,
-}
-
-impl From<&ClientCapabilitiesRaw> for ClientCapabilities {
-    fn from(raw: &ClientCapabilitiesRaw) -> Self {
-        Self {
-            sampling: raw.sampling.is_some(),
-            roots: raw.roots.is_some(),
-            logging: raw.logging.is_some(),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ClientInfo {
-    pub name: String,
-    #[serde(default)]
-    pub version: Option<String>,
-}
-
-/// Initialize response result.
-#[derive(Debug, Serialize)]
-pub struct InitializeResult {
-    #[serde(rename = "protocolVersion")]
-    pub protocol_version: &'static str,
-    pub capabilities: ServerCapabilities,
-    #[serde(rename = "serverInfo")]
-    pub server_info: ServerInfo,
-}
-
-/// Server capabilities declared to the client during initialization.
-#[derive(Debug, Serialize)]
-pub struct ServerCapabilities {
-    pub tools: ToolCapability,
-    pub resources: ResourceCapability,
-    pub prompts: PromptCapability,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ToolCapability {
-    #[serde(rename = "listChanged")]
-    pub list_changed: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ResourceCapability {
-    #[serde(rename = "listChanged")]
-    pub list_changed: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PromptCapability {
-    #[serde(rename = "listChanged")]
-    pub list_changed: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ServerInfo {
-    pub name: String,
-    pub version: String,
-}
-
-/// A tool definition returned by tools/list.
-#[derive(Debug, Serialize)]
-pub struct ToolDef {
-    pub name: String,
-    pub description: String,
-    #[serde(rename = "inputSchema")]
-    pub input_schema: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub annotations: Option<ToolAnnotations>,
-}
-
-/// MCP tool annotations (hints for clients about tool behavior).
-#[derive(Debug, Serialize)]
-pub struct ToolAnnotations {
-    // MCP wire names are the `*Hint` forms; spec-compliant clients drop any
-    // other spelling. Field idents stay short; serde rename carries the wire name.
-    #[serde(rename = "destructiveHint", skip_serializing_if = "Option::is_none")]
-    pub destructive: Option<bool>,
-    #[serde(rename = "idempotentHint", skip_serializing_if = "Option::is_none")]
-    pub idempotent: Option<bool>,
-    #[serde(rename = "readOnlyHint", skip_serializing_if = "Option::is_none")]
-    pub read_only: Option<bool>,
-    #[serde(rename = "openWorldHint", skip_serializing_if = "Option::is_none")]
-    pub open_world: Option<bool>,
-}
-
-/// Result of tools/list.
-#[derive(Debug, Serialize)]
-pub struct ToolsListResult {
-    pub tools: Vec<ToolDef>,
-}
-
-/// Parameters for tools/call.
-#[derive(Debug, Deserialize)]
-pub struct CallToolParams {
-    pub name: String,
-    #[serde(default)]
-    pub arguments: Value,
-}
-
-/// A content block in a tool result.
-#[derive(Debug, Serialize)]
-pub struct Content {
-    #[serde(rename = "type")]
-    pub content_type: String,
-    pub text: String,
-}
-
-/// Result of tools/call.
-#[derive(Debug, Serialize)]
-pub struct CallToolResult {
-    pub content: Vec<Content>,
-    #[serde(rename = "isError", skip_serializing_if = "Option::is_none")]
-    pub is_error: Option<bool>,
-}
-
-impl CallToolResult {
-    pub fn text(text: String) -> Self {
-        Self {
-            content: vec![Content {
-                content_type: "text".into(),
-                text,
-            }],
-            is_error: None,
-        }
-    }
-
-    pub fn error(message: String) -> Self {
-        Self {
-            content: vec![Content {
-                content_type: "text".into(),
-                text: message,
-            }],
-            is_error: Some(true),
-        }
-    }
-}
-
-// MCP Resources types
-
-/// A resource definition returned by resources/list.
-#[derive(Debug, Serialize)]
-pub struct ResourceDef {
-    pub uri: String,
-    pub name: String,
-    pub description: String,
-    #[serde(rename = "mimeType")]
-    pub mime_type: String,
-}
-
-/// Result of resources/list.
-#[derive(Debug, Serialize)]
-pub struct ResourcesListResult {
-    pub resources: Vec<ResourceDef>,
-}
-
-/// Parameters for resources/read.
-#[derive(Debug, Deserialize)]
-pub struct ResourceReadParams {
-    pub uri: String,
-}
-
-/// A resource content item returned by resources/read.
-#[derive(Debug, Serialize)]
-pub struct ResourceContent {
-    pub uri: String,
-    #[serde(rename = "mimeType")]
-    pub mime_type: String,
-    pub text: String,
-}
-
-/// Result of resources/read.
-#[derive(Debug, Serialize)]
-pub struct ResourceReadResult {
-    pub contents: Vec<ResourceContent>,
-}
-
-// MCP Prompts types
-
-/// A prompt definition returned by prompts/list.
-#[derive(Debug, Serialize)]
-pub struct PromptDef {
-    pub name: String,
-    pub description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<Vec<PromptArgDef>>,
-}
-
-/// An argument definition for a prompt.
-#[derive(Debug, Serialize)]
-pub struct PromptArgDef {
-    pub name: String,
-    pub description: String,
-    pub required: bool,
-}
-
-/// Parameters for prompts/get.
-#[derive(Debug, Deserialize)]
-pub struct PromptGetParams {
-    pub name: String,
-    #[serde(default)]
-    pub arguments: Value,
-}
-
-/// A message in a prompt result.
-#[derive(Debug, Serialize)]
-pub struct PromptMessage {
-    pub role: String,
-    pub content: PromptContent,
-}
-
-/// Content of a prompt message.
-#[derive(Debug, Serialize)]
-pub struct PromptContent {
-    #[serde(rename = "type")]
-    pub content_type: String,
-    pub text: String,
-}
-
-/// Result of prompts/get.
-#[derive(Debug, Serialize)]
-pub struct PromptGetResult {
-    pub description: String,
-    pub messages: Vec<PromptMessage>,
-}
-
 // Transport error types
 
 /// Structured transport error for distinguishing failure modes in the
 /// dispatch loop. Maps to specific JSON-RPC error codes:
-///   - Closed → graceful exit (break loop)
 ///   - Parse → -32700 (PARSE_ERROR)
-///   - InvalidUtf8 → -32700 (PARSE_ERROR)
 ///   - InvalidRequest → -32600 (INVALID_REQUEST)
-///   - Io → -32000 (server error) with log
+///   - PeerResponse → no reply, and passed to the SDK to correlate
 #[derive(Debug)]
 pub enum TransportError {
-    /// Underlying I/O failure (read/write error).
-    Io(std::io::Error),
-    /// Transport closed (EOF or channel dropped).
-    Closed,
     /// Input is not valid JSON (malformed syntax).
     Parse(serde_json::Error),
-    /// Input contains invalid UTF-8 sequences.
-    InvalidUtf8(FromUtf8Error),
     /// Valid JSON but not a valid JSON-RPC request (missing method, wrong
     /// version, response-shaped message with id, etc.).  Carries the
     /// extracted request id (if any) for error response correlation.
     InvalidRequest(Option<RequestId>, String),
-    /// Response-shaped message (has result/error, no method).
-    /// Silently discarded per JSON-RPC 2.0: "The Server MUST NOT reply
-    /// to a Response."  Covers both late sampling responses and orphaned
-    /// messages, regardless of whether they carry an id.
-    StaleResponse,
+    /// Response-shaped message (has result/error, no method): a reply to a
+    /// request this server sent, not a request to serve.
+    ///
+    /// Not an error so much as a different kind of message. It gets no reply
+    /// of its own, per JSON-RPC 2.0 ("The Server MUST NOT reply to a
+    /// Response"), but it is not discarded either: the caller hands it to the
+    /// SDK, which owns the ids it has outstanding and is the only thing that
+    /// can match a reply to its request.
+    PeerResponse,
 }
 
 impl TransportError {
-    /// Whether this error represents a closed/EOF condition.
-    pub fn is_closed(&self) -> bool {
-        matches!(self, TransportError::Closed)
-    }
-
     /// JSON-RPC error code for this transport error, if applicable.
-    /// Returns None for Closed and StaleResponse (no error response sent).
+    /// Returns None for PeerResponse, which is not answered at all.
     pub fn error_code(&self) -> Option<i64> {
         match self {
-            TransportError::Io(_) => Some(-32000),
-            TransportError::Closed | TransportError::StaleResponse => None,
+            TransportError::PeerResponse => None,
             TransportError::Parse(_) => Some(PARSE_ERROR),
-            TransportError::InvalidUtf8(_) => Some(PARSE_ERROR),
             TransportError::InvalidRequest(..) => Some(INVALID_REQUEST),
         }
     }
@@ -456,13 +171,8 @@ impl TransportError {
     /// Human-readable error message for JSON-RPC error responses.
     pub fn error_message(&self) -> String {
         match self {
-            TransportError::Io(e) => format!("transport I/O error: {e}"),
-            TransportError::Closed => "transport closed".into(),
-            TransportError::StaleResponse => "stale response (discarded)".into(),
+            TransportError::PeerResponse => "response to a server request".into(),
             TransportError::Parse(e) => format!("parse error: {e}"),
-            TransportError::InvalidUtf8(_) => {
-                "request contains malformed UTF-8 character(s)".into()
-            }
             TransportError::InvalidRequest(_, msg) => format!("invalid request: {msg}"),
         }
     }
@@ -471,12 +181,9 @@ impl TransportError {
 impl std::fmt::Display for TransportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TransportError::Io(e) => write!(f, "transport I/O: {e}"),
-            TransportError::Closed => write!(f, "transport closed"),
             TransportError::Parse(e) => write!(f, "JSON parse: {e}"),
-            TransportError::InvalidUtf8(e) => write!(f, "invalid UTF-8: {e}"),
             TransportError::InvalidRequest(_, msg) => write!(f, "invalid request: {msg}"),
-            TransportError::StaleResponse => write!(f, "stale response (discarded)"),
+            TransportError::PeerResponse => write!(f, "response to a server request"),
         }
     }
 }
@@ -484,40 +191,20 @@ impl std::fmt::Display for TransportError {
 impl std::error::Error for TransportError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            TransportError::Io(e) => Some(e),
             TransportError::Parse(e) => Some(e),
-            TransportError::InvalidUtf8(e) => Some(e),
             _ => None,
         }
     }
 }
 
-impl From<std::io::Error> for TransportError {
-    fn from(e: std::io::Error) -> Self {
-        TransportError::Io(e)
-    }
-}
-
-impl From<serde_json::Error> for TransportError {
-    fn from(e: serde_json::Error) -> Self {
-        TransportError::Parse(e)
-    }
-}
-
-impl From<FromUtf8Error> for TransportError {
-    fn from(e: FromUtf8Error) -> Self {
-        TransportError::InvalidUtf8(e)
-    }
-}
-
 impl TransportError {
     /// Build a JSON-RPC error response for this transport error, if one
-    /// should be sent.  Returns None for Closed and StaleResponse.
+    /// should be sent.  Returns None for PeerResponse.
     ///
     /// For InvalidRequest, the carried id (extracted during parsing) is
     /// used so the client can correlate the error with its original request.
-    /// The `fallback_id` is used for other error variants (Parse, Io, etc.)
-    /// where no id could be extracted.
+    /// The `fallback_id` is used for Parse, where the input never parsed far
+    /// enough to yield an id.
     pub fn into_response(self, fallback_id: Option<RequestId>) -> Option<JsonRpcResponse> {
         let code = self.error_code()?;
         let id = match &self {
@@ -575,7 +262,7 @@ pub fn parse_jsonrpc_line(line: &str) -> Result<JsonRpcRequest, TransportError> 
             // JSON-RPC 2.0: "The Server MUST NOT reply to a Response."
             // Covers late sampling responses (with id) and orphaned responses
             // (without id).
-            return Err(TransportError::StaleResponse);
+            return Err(TransportError::PeerResponse);
         }
         if id_present {
             // Has id, no method, not response-shaped — genuinely invalid.
@@ -613,51 +300,16 @@ pub fn parse_jsonrpc_line(line: &str) -> Result<JsonRpcRequest, TransportError> 
 // Protocol constants
 
 pub const JSONRPC_VERSION: &str = "2.0";
-pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
 // Standard JSON-RPC error codes.
 pub const PARSE_ERROR: i64 = -32700;
 pub const INVALID_REQUEST: i64 = -32600;
-pub const METHOD_NOT_FOUND: i64 = -32601;
-pub const INVALID_PARAMS: i64 = -32602;
-pub const INTERNAL_ERROR: i64 = -32603;
 pub const SERVER_NOT_INITIALIZED: i64 = -32002;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    // -- ToolAnnotations wire format --
-
-    /// Every annotation must serialize under its MCP-spec `*Hint` wire name and
-    /// never under a bare spelling. All four fields are set so each rename
-    /// attribute is exercised (a skipped `None` field would hide a regression).
-    #[test]
-    fn tool_annotations_all_fields_use_spec_hint_wire_names() {
-        let v = serde_json::to_value(ToolAnnotations {
-            destructive: Some(true),
-            idempotent: Some(false),
-            read_only: Some(true),
-            open_world: Some(false),
-        })
-        .unwrap();
-        assert_eq!(v["destructiveHint"], true);
-        assert_eq!(v["idempotentHint"], false);
-        assert_eq!(v["readOnlyHint"], true);
-        assert_eq!(v["openWorldHint"], false);
-        for bare in [
-            "destructive",
-            "idempotent",
-            "readOnly",
-            "openWorld",
-            "open_world",
-        ] {
-            assert!(v.get(bare).is_none(), "unexpected bare wire name: {bare}");
-        }
-    }
-
-    // -- RequestId serde round-trips --
 
     #[test]
     fn request_id_int_roundtrip() {
@@ -754,43 +406,6 @@ mod tests {
         assert!(parsed.get("data").is_none());
     }
 
-    // -- ClientCapabilities serde --
-
-    #[test]
-    fn client_capabilities_empty_object() {
-        let raw: ClientCapabilitiesRaw = serde_json::from_str("{}").unwrap();
-        let caps = ClientCapabilities::from(&raw);
-        assert!(!caps.sampling);
-        assert!(!caps.roots);
-    }
-
-    #[test]
-    fn client_capabilities_with_sampling_only() {
-        let raw: ClientCapabilitiesRaw = serde_json::from_str(r#"{"sampling": {}}"#).unwrap();
-        let caps = ClientCapabilities::from(&raw);
-        assert!(caps.sampling);
-        assert!(!caps.roots);
-    }
-
-    #[test]
-    fn client_capabilities_with_extra_fields_ignored() {
-        let raw: ClientCapabilitiesRaw = serde_json::from_str(
-            r#"{"sampling": {}, "roots": {"listChanged": true}, "experimental": 42}"#,
-        )
-        .unwrap();
-        let caps = ClientCapabilities::from(&raw);
-        assert!(caps.sampling);
-        assert!(caps.roots);
-    }
-
-    #[test]
-    fn client_capabilities_null_sampling_is_none() {
-        // JSON null for sampling should be treated as absent
-        let raw: ClientCapabilitiesRaw = serde_json::from_str(r#"{"sampling": null}"#).unwrap();
-        let caps = ClientCapabilities::from(&raw);
-        assert!(!caps.sampling);
-    }
-
     // -- JsonRpcResponse serde --
 
     #[test]
@@ -846,7 +461,7 @@ mod tests {
         // discarded regardless of whether they carry an id.
         let line = r#"{"jsonrpc":"2.0","id":1,"result":"ok"}"#;
         let err = parse_jsonrpc_line(line).unwrap_err();
-        assert!(matches!(err, TransportError::StaleResponse));
+        assert!(matches!(err, TransportError::PeerResponse));
         assert_eq!(err.error_code(), None);
         assert!(err.into_response(None).is_none());
     }
@@ -855,7 +470,7 @@ mod tests {
     fn parse_response_shaped_without_id_returns_stale() {
         let line = r#"{"jsonrpc":"2.0","result":"stale"}"#;
         let err = parse_jsonrpc_line(line).unwrap_err();
-        assert!(matches!(err, TransportError::StaleResponse));
+        assert!(matches!(err, TransportError::PeerResponse));
         assert_eq!(err.error_code(), None);
         assert!(err.into_response(None).is_none());
     }
@@ -1000,18 +615,4 @@ mod tests {
     }
 
     // -- TransportError --
-
-    #[test]
-    fn transport_error_closed_has_no_code() {
-        let err = TransportError::Closed;
-        assert!(err.is_closed());
-        assert_eq!(err.error_code(), None);
-        assert!(err.into_response(None).is_none());
-    }
-
-    #[test]
-    fn transport_error_io_has_server_code() {
-        let err = TransportError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe"));
-        assert_eq!(err.error_code(), Some(-32000));
-    }
 }
