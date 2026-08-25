@@ -102,3 +102,48 @@ fn convert_rejects_unknown_flag() {
         "expected a flag error; got {stderr:?}"
     );
 }
+
+/// A file name that means Markdown means it everywhere.
+///
+/// `convert` used to decide this itself, case-sensitively and on the `md`
+/// extension alone, so `.markdown` and `README.MD` were read as plain text and
+/// the fixer rewrote terminology inside code fences that Markdown protects.
+#[test]
+fn convert_reads_markdown_file_names_the_way_lint_does() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let body = "正文软件\n\n```\n代码软件\n```\n";
+
+    let mut outputs = Vec::new();
+    for name in ["t.md", "t.markdown", "T.MD"] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, body).unwrap();
+        let out = Command::new(binary_path())
+            .arg("convert")
+            .arg(&path)
+            .output()
+            .expect("run convert");
+        assert!(out.status.success(), "convert {name} failed");
+        outputs.push((name, String::from_utf8_lossy(&out.stdout).into_owned()));
+    }
+
+    // The fence content is what distinguishes the two readings: Markdown
+    // leaves the term inside it alone, plain text rewrites it.
+    for (name, text) in &outputs {
+        assert!(
+            text.contains("代碼軟件"),
+            "{name}: the fenced term should be left alone, got: {text:?}"
+        );
+        assert!(
+            !text.contains("程式碼軟體"),
+            "{name}: the fixer reached inside a code fence, got: {text:?}"
+        );
+    }
+    assert_eq!(
+        outputs[0].1, outputs[1].1,
+        ".md and .markdown must convert alike"
+    );
+    assert_eq!(
+        outputs[0].1, outputs[2].1,
+        "the extension is not case-sensitive"
+    );
+}
