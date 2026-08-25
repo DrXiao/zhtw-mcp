@@ -134,7 +134,7 @@ pub struct SpellingRule {
     /// Optional tags for categorization and filtering in rule packs.
     #[serde(default)]
     pub tags: Option<Vec<String>>,
-    /// Per-rule editorial confidence (35.2).  Distinguishes binary
+    /// Per-rule editorial confidence.  Distinguishes binary
     /// corrections from style-preference suggestions.  When set to
     /// `Low`, the explain pipeline marks issues from this rule as
     /// `auto_fix_safe = false` AND `needs_review = true` -- these are
@@ -161,7 +161,7 @@ pub struct ContextSuggestion {
     pub to: Vec<String>,
 }
 
-/// Editorial confidence tier surfaced in explain output (35.2).
+/// Editorial confidence tier surfaced in explain output.
 ///
 /// Per-issue field that distinguishes binary corrections (`線程` ->
 /// `執行緒`, high) from editorial-judgment terms (`場景` is correct zh-TW

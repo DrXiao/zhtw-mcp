@@ -5,13 +5,17 @@ on:
     branches: ["main"]
   pull_request:
     branches: ["main"]
-  workflow_call:
+  workflow_dispatch:
 
+# Read by default.  Only `publish-latest` widens this, and only for itself, so
+# no job that executes pull-request-controlled code ever holds a write token.
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  EXTENSION_PACKAGE_DIR: extension-package/zhtw-mcp-extension
+  EXTENSION_ZIP: zhtw-mcp-extension.zip
 
 concurrency:
   group: "ci-${{ github.ref }}"
@@ -46,6 +50,12 @@ jobs:
       uses: actions/setup-python@v7
       with:
         python-version: "3.x"
+
+    # `make check` gained a `black --check`, and the runner image does not
+    # carry black.  Only this job needs it; the build jobs run the table
+    # generator, which black never sees.
+    - name: Install black
+      run: pip install black
 
     - name: make check
       run: make check
@@ -95,11 +105,84 @@ jobs:
     - name: make check-size
       run: make check-size
 
-  # Rolling binaries for the `latest` tag.  Versioned releases come from
-  # release.yml (cargo-dist), which covers more targets and ships installers;
-  # this one stays marked as a prerelease so it never wins the /releases/latest
-  # computation away from them.
-  build-prerelease:
+  # Builds the WASM scanner, runs the extension's own tests, and packages the
+  # unpacked and zipped extension.  It lives here rather than in a workflow of
+  # its own because the zip ships on the same `latest` release as the binaries,
+  # and one release wants one owner: `publish-latest` below checksums it,
+  # uploads it, and verifies it alongside everything else.
+  package-extension:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install Rust toolchain
+      run: |
+        rustup toolchain install stable --profile minimal --component rustfmt
+        rustup target add wasm32-unknown-unknown
+
+    - name: Rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: "v1-extension-rust"
+        shared-key: "ubuntu-24.04"
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v7
+      with:
+        node-version: "22"
+
+    # Prebuilt, like cargo-audit above.  `cargo install wasm-pack` builds it
+    # from source, which only stayed cheap because rust-cache happened to carry
+    # ~/.cargo/bin across runs.
+    - name: Install wasm-pack
+      uses: taiki-e/install-action@wasm-pack
+
+    - name: Build scanner WASM
+      run: sh extension/build-wasm.sh
+
+    - name: Test extension helpers
+      run: npm test --prefix extension
+
+    - name: Assemble distributable extension
+      run: |
+        rm -rf extension-package "$EXTENSION_ZIP"
+        mkdir -p "$EXTENSION_PACKAGE_DIR"/{dist,icons}
+        cp -R \
+          extension/src \
+          extension/styles \
+          extension/manifest.json \
+          extension/popup.html \
+          "$EXTENSION_PACKAGE_DIR"/
+        cp extension/dist/*.js extension/dist/*.wasm "$EXTENSION_PACKAGE_DIR"/dist/
+        if [ -d extension/dist/snippets ]; then
+          cp -R extension/dist/snippets "$EXTENSION_PACKAGE_DIR"/dist/
+        fi
+        cp extension/icons/icon-{16,32,48,128}.png "$EXTENSION_PACKAGE_DIR"/icons/
+        (cd extension-package && zip -r "../$EXTENSION_ZIP" zhtw-mcp-extension)
+
+    # Deliberately NOT named `zhtw-mcp-*`: publish-latest downloads that
+    # pattern into ./dist, and an unpacked tree there would be checksummed and
+    # uploaded file by file.
+    - name: Upload unpacked extension artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: extension-unpacked
+        path: ${{ env.EXTENSION_PACKAGE_DIR }}
+        if-no-files-found: error
+
+    - name: Upload zipped extension artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: zhtw-mcp-extension
+        path: ${{ env.EXTENSION_ZIP }}
+        if-no-files-found: error
+
+  # Rolling binaries for the `latest` tag.  This is the project's release: it
+  # is not a prerelease, so it carries the "Latest" badge and /releases/latest
+  # resolves to it.  Nothing here needs a version tag to be pushed.
+  build-latest:
     name: build (${{ matrix.name }})
     needs: check
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -110,6 +193,9 @@ jobs:
           - name: Linux x86_64
             os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+          - name: Linux arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
           - name: macOS arm64
             os: macos-15
             target: aarch64-apple-darwin
@@ -126,14 +212,15 @@ jobs:
     - name: Install Rust toolchain
       run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
 
-    # A key of its own: sharing one with the check jobs on ubuntu-24.04 means
-    # whichever finishes first saves, and rust-cache never overwrites, so the
-    # release target tree would rarely survive.
+    # Keyed on the target, not the runner.  rust-cache never overwrites an
+    # existing entry, so a key shared with the check jobs on the same runner
+    # would save whichever tree finished first and then never refresh, and the
+    # release tree is not the one that wins that race.
     - name: Rust cache
       uses: Swatinem/rust-cache@v2
       with:
         prefix-key: "v1-rust"
-        shared-key: "${{ matrix.os }}-release"
+        shared-key: "${{ matrix.target }}-release"
 
     - name: Set up Python
       uses: actions/setup-python@v7
@@ -154,9 +241,11 @@ jobs:
         mkdir pkg
         cp "target/${{ matrix.target }}/release/$bin" LICENSE README.md pkg/
 
-        # Prove the binary we are shipping actually starts.  The check matrix is
-        # ubuntu + macos, so this is the only place the Windows build is run.
-        # 0 is a clean verdict and 1 is a prose gate; both mean it worked.
+        # Prove the binary we are shipping actually starts.  Every target here
+        # builds on its own architecture, so every archive gets run once; the
+        # check matrix is ubuntu + macos, which makes this the only place the
+        # Windows and arm64 Linux builds execute at all.  0 is a clean verdict
+        # and 1 is a prose gate; both mean it worked.
         printf '\xe6\xb8\xac\xe8\xa9\xa6\xe6\xaa\x94\xe6\xa1\x88\n' > smoke.txt
         rc=0; "pkg/$bin" lint smoke.txt || rc=$?
         [ "$rc" -le 1 ] || { echo "smoke test failed with exit $rc" >&2; exit 1; }
@@ -170,8 +259,8 @@ jobs:
         if-no-files-found: error
         retention-days: 1
 
-  prerelease:
-    needs: [audit, check-size, build-prerelease]
+  publish-latest:
+    needs: [audit, check-size, build-latest, package-extension]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     # Without this the job inherits the 360 minute default, and since main runs
@@ -204,7 +293,7 @@ jobs:
       shell: bash
       run: |
         cd dist
-        sha256sum -- *.tar.gz > SHA256SUMS
+        sha256sum -- zhtw-mcp-* > SHA256SUMS
 
         # The queue already runs pushes in order, so what this actually catches
         # is a manual re-run of an older run, plus main moving while this run is
@@ -229,12 +318,15 @@ jobs:
           # Notes name a commit, so they go up only once the archives from that
           # commit are in place.  Letting a failed upload through to here would
           # leave the notes advertising binaries that are not on the release.
+          # --prerelease=false is spelled out rather than left off: the flag is
+          # sticky, and the release was published as a prerelease originally.
           if [ "$upload_rc" -eq 0 ]; then
-            gh release edit latest --notes "$notes" --prerelease --draft=false
+            gh release edit latest --notes "$notes" \
+              --prerelease=false --latest --draft=false
           fi
         else
           gh release create latest ./* --target "$GITHUB_SHA" \
-            --title latest --notes "$notes" --prerelease
+            --title latest --notes "$notes" --latest
         fi
 
         # Trust the published set, not the exit status.  Scratch files go to
@@ -243,7 +335,8 @@ jobs:
         # leftover from a renamed target, and failing on that would wedge every
         # later run.
         printf '%s\n' * | sort > "$RUNNER_TEMP/want"
-        gh release view latest --json assets --jq '.assets[].name' | sort > "$RUNNER_TEMP/got"
+        gh release view latest --json assets --jq '.assets[].name' \
+          | sort > "$RUNNER_TEMP/got"
         missing=$(comm -23 "$RUNNER_TEMP/want" "$RUNNER_TEMP/got")
         extra=$(comm -13 "$RUNNER_TEMP/want" "$RUNNER_TEMP/got")
         [ -z "$extra" ] || echo "::warning::latest carries assets this build did not produce: $(printf %s "$extra" | tr '\n' ' ')"

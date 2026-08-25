@@ -1,9 +1,9 @@
+// chrome.scripting.executeScript injects classic scripts, so this file cannot
+// use ESM exports and publishes onto the global instead.  content.js reads it
+// from `window`; the tests import this file and read the same global, so they
+// exercise the same seam the browser does.
 (function initShared(root, factory) {
-  const api = factory();
-  if (typeof module === "object" && module.exports) {
-    module.exports = api;
-  }
-  root.ZhtwExtensionShared = api;
+  root.ZhtwExtensionShared = factory();
 })(typeof globalThis !== "undefined" ? globalThis : self, function buildShared() {
   const encoder =
     typeof TextEncoder !== "undefined" ? new TextEncoder() : undefined;
@@ -39,19 +39,6 @@
     return text.length;
   }
 
-  function countBadgeIssues(issues) {
-    return issues.filter(
-      (issue) => issue.severity === "warning" || issue.severity === "error",
-    ).length;
-  }
-
-  function formatBadgeText(count) {
-    if (!count) {
-      return "";
-    }
-    return count > 99 ? "99+" : String(count);
-  }
-
   function normalizeIssue(issue) {
     return {
       offset: Number(issue.offset) || 0,
@@ -65,11 +52,67 @@
     };
   }
 
+  // The scanner reports UTF-8 byte offsets into one concatenated string; the
+  // DOM wants code-unit offsets into individual text nodes.  An issue can also
+  // straddle several nodes, so one issue becomes zero or more segments.
+  //
+  // Kept here rather than in content.js because this is the only arithmetic in
+  // the extension that can be wrong in a way nobody sees: a highlight landing
+  // one character off still looks like a highlight.  Everything it needs is a
+  // plain number or string, so it is testable without a DOM.
+  //
+  // `spans` are `{ byteStart, byteEnd, text }` in document order.  Each
+  // returned segment is `{ index, start, end }`, code units into
+  // `spans[index].text`, and `end` is always greater than `start`.
+  function issueSegments(spans, issue) {
+    if (!issue.length) {
+      return [];
+    }
+    const endByte = issue.offset + issue.length;
+    const startIndex = spans.findIndex(
+      (span) => issue.offset >= span.byteStart && issue.offset < span.byteEnd,
+    );
+    const endIndex = spans.findIndex(
+      (span) => endByte > span.byteStart && endByte <= span.byteEnd,
+    );
+    if (startIndex < 0 || endIndex < startIndex) {
+      return [];
+    }
+
+    const segments = [];
+    for (let index = startIndex; index <= endIndex; index += 1) {
+      const span = spans[index];
+      const segmentStartByte = index === startIndex ? issue.offset : span.byteStart;
+      const segmentEndByte = index === endIndex ? endByte : span.byteEnd;
+      if (segmentStartByte >= segmentEndByte) {
+        continue;
+      }
+
+      const text = span.text || "";
+      const start = byteOffsetToCodeUnit(text, segmentStartByte - span.byteStart);
+      const end = byteOffsetToCodeUnit(text, segmentEndByte - span.byteStart);
+      if (start >= end) {
+        continue;
+      }
+      segments.push({ index, start, end });
+    }
+    return segments;
+  }
+
+  function tooltipForIssue(issue) {
+    const suggestion = issue.suggestions.length
+      ? `建議：${issue.suggestions.join("、")}`
+      : "無自動建議";
+    const context = issue.context ? `\n說明：${issue.context}` : "";
+    const english = issue.english ? `\nEnglish：${issue.english}` : "";
+    return `${issue.found} — ${issue.rule_type} / ${issue.severity}\n${suggestion}${context}${english}`;
+  }
+
   return {
     byteOffsetToCodeUnit,
-    countBadgeIssues,
-    formatBadgeText,
+    issueSegments,
     normalizeIssue,
+    tooltipForIssue,
     utf8ByteLength,
   };
 });

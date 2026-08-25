@@ -61,8 +61,7 @@ pub struct Server {
     suppression_store: SuppressionStore,
     /// Translation memory: persistent correction tracking.
     tm_store: Option<TranslationMemoryStore>,
-    /// Span-level judgment cache for persistent LLM disambiguation results
-    /// (51.4).
+    /// Span-level judgment cache for persistent LLM disambiguation results.
     judgment_cache: crate::rules::judgment_cache::JudgmentCache,
     /// Client name from initialize handshake, used for auto-compact detection.
     client_name: Option<String>,
@@ -1304,7 +1303,7 @@ fn parse_ignore_terms(args: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Parse the optional `glossary` object (35.9).  Shape:
+/// Parse the optional `glossary` object.  Shape:
 /// `{ "banned": [...], "preferred": [...], "proper_nouns": [...] }`.
 /// Each field is optional.  Missing object → empty glossary.
 fn parse_glossary(args: &Value) -> crate::rules::glossary::ProjectGlossary {
@@ -1452,7 +1451,7 @@ struct AnchorProvenance<'a> {
 // type. Re-exported here for the explain pipeline.
 use crate::rules::ruleset::EditorialConfidence;
 
-/// Structured per-issue explain metadata (35.2).
+/// Structured per-issue explain metadata.
 ///
 /// Surfaced only when `explain` is requested.  Helps reviewers understand
 /// the confidence behind each suggestion without parsing free-form prose.
@@ -1594,7 +1593,7 @@ struct AnnotatedIssue<'a> {
     explanation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     anchor_provenance: Option<AnchorProvenance<'a>>,
-    /// Structured per-issue explain metadata (35.2).  Present only in
+    /// Structured per-issue explain metadata.  Present only in
     /// explain mode.  Carries domain, false-friend flag, auto-fix
     /// safety, review burden, and editorial confidence.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1671,7 +1670,7 @@ struct FullOutput<'a> {
     telemetry: Option<&'a TelemetryMetrics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     summary_metrics: Option<&'a SummaryMetrics>,
-    /// Document-wide consistency report (35.1).  Present only when the
+    /// Document-wide consistency report.  Present only when the
     /// caller passed `consistency: true` AND mixed regional usage
     /// (both `線程` and `執行緒`, etc.) is detected in the document.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1819,7 +1818,7 @@ struct CheckOutputParams<'a> {
     telemetry: Option<TelemetryMetrics>,
     /// Whether to include per-issue resolution tier and summary_metrics.
     include_stats: bool,
-    /// Document-wide consistency report (35.1).  Some only when the
+    /// Document-wide consistency report.  Some only when the
     /// caller requested `consistency: true` AND mixed regional usage
     /// is detected.
     consistency: Option<&'a crate::engine::consistency::ConsistencyReport>,

@@ -1,8 +1,13 @@
 import { scanText } from "./scanner.js";
+import {
+  formatBadgeText,
+  isInspectableUrl,
+  storageKey,
+  storageResult,
+} from "./format.js";
 
 const latestResults = new Map();
 const DEFAULT_OPTIONS = { profile: "base", relaxed: false };
-const MAX_STORED_ISSUES = 200;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "RUN_SCAN_ACTIVE_TAB") {
@@ -65,7 +70,10 @@ async function runScanForActiveTab(options) {
     throw new Error(highlighted?.error || "Could not highlight scan results.");
   }
 
-  const badgeCount = scanResult.badge_count ?? countBadgeIssues(scanResult.issues);
+  // `badge_count` is a plain usize on the wasm side (src/wasm.rs), computed as
+  // warning + error, so it is always present and always authoritative.  A JS
+  // fallback here was a second copy of that rule that could disagree silently.
+  const badgeCount = scanResult.badge_count;
   await setBadge(tab.id, badgeCount);
 
   const result = {
@@ -96,10 +104,6 @@ async function getActiveTab() {
   return tab;
 }
 
-function isInspectableUrl(url = "") {
-  return /^(https?|file):/i.test(url);
-}
-
 function sendTabMessage(tabId, message) {
   return new Promise((resolve, reject) => {
     chrome.tabs.sendMessage(tabId, message, (response) => {
@@ -114,8 +118,7 @@ function sendTabMessage(tabId, message) {
 }
 
 async function setBadge(tabId, count) {
-  const text = count > 99 ? "99+" : count > 0 ? String(count) : "";
-  await chrome.action.setBadgeText({ tabId, text });
+  await chrome.action.setBadgeText({ tabId, text: formatBadgeText(count) });
   await chrome.action.setBadgeBackgroundColor({
     tabId,
     color: count > 0 ? "#b3261e" : "#40614f",
@@ -160,27 +163,6 @@ async function getStoredResult(tabId) {
   return null;
 }
 
-function storageKey(tabId) {
-  return `tab:${tabId}:scan`;
-}
-
-function storageResult(result) {
-  const issues = Array.isArray(result.issues) ? result.issues : [];
-  return {
-    ...result,
-    issues: issues.slice(0, MAX_STORED_ISSUES),
-    stored_issue_count: Math.min(issues.length, MAX_STORED_ISSUES),
-    total_issue_count: issues.length,
-    storage_truncated: issues.length > MAX_STORED_ISSUES,
-  };
-}
-
 function reportAsyncError(error) {
   console.warn("Background task failed.", error);
-}
-
-function countBadgeIssues(issues = []) {
-  return issues.filter(
-    (issue) => issue.severity === "warning" || issue.severity === "error",
-  ).length;
 }

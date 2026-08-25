@@ -93,7 +93,7 @@ pub struct ProfileConfig {
     /// When true (Markdown content only), exclude pulldown-cmark
     /// `Tag::BlockQuote` ranges from scanning.  Off by default — adopted
     /// blockquote prose is real content.  Opt-in via `--exempt-blockquotes`
-    /// or `[markdown] exempt_blockquotes = true` (35.7).
+    /// or `[markdown] exempt_blockquotes = true`.
     pub exempt_blockquotes: bool,
 }
 
@@ -513,7 +513,7 @@ pub struct Issue {
     /// integrations and SARIF region output.  `None` when not in a table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table_cell: Option<TableCell>,
-    /// Per-issue editorial confidence (35.2).  Copied from the source
+    /// Per-issue editorial confidence.  Copied from the source
     /// `SpellingRule` during inflation; surfaces in MCP explain output
     /// via `derive_explain_meta`.  `None` means heuristic derivation.
     #[serde(default, skip_serializing_if = "Option::is_none")]

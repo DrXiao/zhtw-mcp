@@ -1,4 +1,4 @@
-// Regression corpus for token-accuracy co-optimization (51.5).
+// Regression corpus for token-accuracy co-optimization.
 //
 // Four benchmark datasets validating that the three-tier pipeline produces
 // stable, correct results:

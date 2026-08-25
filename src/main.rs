@@ -1013,7 +1013,7 @@ struct CliFileOutput {
     /// is active.
     #[serde(skip_serializing_if = "Option::is_none")]
     style_scorecard: Option<zhtw_mcp::engine::style_score::StyleScorecard>,
-    /// Document-wide consistency report (35.1).  Present only when
+    /// Document-wide consistency report.  Present only when
     /// --consistency is set AND mixed regional usage is detected.
     #[serde(skip_serializing_if = "Option::is_none")]
     consistency: Option<zhtw_mcp::engine::consistency::ConsistencyReport>,
@@ -1148,7 +1148,7 @@ struct LintBatchParams<'a> {
     /// stop failing the error and warning gates.  Same semantics as the
     /// MCP tool's `ignore_terms` argument.
     ignore_terms: &'a [String],
-    /// When true, append a `consistency` block to JSON output (35.1):
+    /// When true, append a `consistency` block to JSON output:
     /// per-equivalence-class diagnostic when both the calque and the
     /// canonical TW form appear in the same document.
     consistency: bool,
@@ -1521,7 +1521,6 @@ fn collect_sarif(
 struct LintSetup {
     cfg: zhtw_mcp::rules::ruleset::ProfileConfig,
     scanner: zhtw_mcp::engine::scan::Scanner,
-    ruleset_hash: String,
     /// Built on first Simplified input rather than during setup.  Its
     /// Aho-Corasick over ST_PHRASES dominated startup, and a zh-TW linter
     /// reading zh-TW never needs it: building it eagerly cost 183 ms per
@@ -1536,6 +1535,11 @@ struct LintSetup {
     s2t: std::sync::OnceLock<zhtw_mcp::engine::s2t::S2TConverter>,
     tm_store: Option<zhtw_mcp::rules::store::TranslationMemoryStore>,
     scan_cache: Option<std::sync::Mutex<zhtw_mcp::cache::ScanCache>>,
+    /// Cache key template.  Every field is batch-wide except `content_type`,
+    /// which is left empty here and filled per file by `scan_one_file`.
+    /// Building it once means the per-file path clones strings instead of
+    /// re-running six `format!`s that cannot produce a different answer.
+    cache_params: zhtw_mcp::cache::ScanParams,
 }
 
 /// Convert `text` when it reads as Simplified, building the converter on the
@@ -1623,10 +1627,34 @@ fn build_lint_setup(
     let scan_cache =
         use_cache.then(|| std::sync::Mutex::new(zhtw_mcp::cache::ScanCache::open_default()));
 
+    let cache_params = zhtw_mcp::cache::ScanParams {
+        ruleset_hash,
+
+        // The whole effective config, not `profile.name()`. The name is the
+        // profile the user asked for; the scanner is built from this
+        // struct, and flags such as --relaxed change it without changing
+        // the name. Keying on the name let a --relaxed run answer for a
+        // strict one and vice versa, so a strict gate could report clean.
+        // Debug covers every field, so a new one cannot be forgotten here.
+        profile: format!("{cfg:?}"),
+        content_type: String::new(),
+        fix_mode: format!("{:?}", params.fix_mode),
+        detect_ai: params.detect_ai,
+        detect_translationese: cfg.translationese_detection,
+        translationese_domain: cfg.translationese_domain.name().to_owned(),
+        ai_threshold: format!("{:.1}", params.ai_threshold_multiplier),
+        exempt_blockquotes: cfg.exempt_blockquotes,
+        engine_version: format!(
+            "{}+{}",
+            env!("CARGO_PKG_VERSION"),
+            env!("ZHTW_ENGINE_FINGERPRINT")
+        ),
+    };
+
     Ok(LintSetup {
+        cache_params,
         cfg,
         scanner,
-        ruleset_hash,
         s2t: std::sync::OnceLock::new(),
         tm_store,
         scan_cache,
@@ -1676,6 +1704,149 @@ fn content_type_for(
         .unwrap_or_else(|| ContentType::from_file_name(file_arg))
 }
 
+/// Maximum file size for CLI lint mode (16 MiB).
+const MAX_CLI_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Phase 1 for one file: read, S2T-convert, consult the cache, scan.
+///
+/// Split out of `run_lint_batch` because it is the one part of the batch that
+/// is genuinely per-file and order-independent, which is what lets the caller
+/// run it under rayon.  It touches `setup` only through shared references plus
+/// the Mutex-wrapped cache, so it is Send + Sync by construction rather than by
+/// a closure's inference.
+fn scan_one_file(setup: &LintSetup, params: &LintBatchParams<'_>, file_arg: &str) -> ScanResult {
+    let scanner = &setup.scanner;
+    let cfg = setup.cfg;
+    let content_type = content_type_for(params.content_type_override, file_arg);
+
+    let cache_params = zhtw_mcp::cache::ScanParams {
+        content_type: format!("{content_type:?}"),
+        ..setup.cache_params.clone()
+    };
+
+    // Open file via fd, stat from the fd (TOCTOU-safe). Check cache BEFORE
+    // reading — fast path avoids file I/O entirely.
+    if file_arg != "--" {
+        let file =
+            std::fs::File::open(file_arg).with_context(|| format!("open file: {file_arg}"))?;
+        let meta = file
+            .metadata()
+            .with_context(|| format!("stat file: {file_arg}"))?;
+        anyhow::ensure!(
+            meta.len() <= MAX_CLI_FILE_BYTES,
+            "{file_arg}: file too large ({} bytes, limit {MAX_CLI_FILE_BYTES})",
+            meta.len()
+        );
+
+        // Fast-path: check mtime+size before reading the file.
+        let fast_hit = setup.scan_cache.as_ref().and_then(|mtx| {
+            let mut c = mtx.lock().ok()?;
+            let mtime = zhtw_mcp::cache::mtime_secs(&meta);
+            c.check_fast(file_arg, mtime, meta.len(), &cache_params)
+                .into_hit()
+        });
+
+        // Glossary banned-term injection and the consistency report both
+        // scan the original text buffer; the fast path can only
+        // short-circuit when neither feature needs it. Same story for
+        // fix/SC/verify.
+        let need_text_post_scan = params.fix_mode != zhtw_mcp::fixer::FixMode::None
+            || !params.glossary.is_empty()
+            || params.consistency
+            || {
+                #[cfg(feature = "translate")]
+                {
+                    params.verify
+                }
+                #[cfg(not(feature = "translate"))]
+                {
+                    false
+                }
+            };
+        if let Some(hit) = fast_hit {
+            if !hit.input_was_sc && !need_text_post_scan {
+                // Cache hit AND no later phase needs the text: skip file
+                // read and scan.
+                return Ok((
+                    String::new(),
+                    false,
+                    hit.text_char_count,
+                    hit.output,
+                    content_type,
+                ));
+            }
+
+            // SC files need the text for S2T write-back; glossary /
+            // consistency / fix / verify need the original buffer. Fall
+            // through to the slow path so we read the file and reuse the
+            // cached scan output below.
+        }
+
+        // Slow path: read file from the same fd.
+        let mut text = String::with_capacity(meta.len() as usize);
+        std::io::BufReader::new(file)
+            .read_to_string(&mut text)
+            .with_context(|| format!("read file: {file_arg}"))?;
+
+        let input_was_sc = s2t_convert_if_simplified(&setup.s2t, &mut text);
+        let text_char_count = text.chars().count();
+
+        // Slow-path cache: check content hash (mtime missed but content may
+        // be unchanged, e.g. after `touch`).
+        let content_hit = setup.scan_cache.as_ref().and_then(|mtx| {
+            let mut c = mtx.lock().ok()?;
+            c.check_content(file_arg, text.as_bytes(), &cache_params)
+        });
+        let output = match content_hit {
+            Some(hit) => hit.output,
+            None => {
+                let o = scanner.scan_for_content_type_with_config(&text, content_type, cfg);
+                if let Some(Ok(mut c)) = setup.scan_cache.as_ref().map(|mtx| mtx.lock()) {
+                    let mtime = zhtw_mcp::cache::mtime_secs(&meta);
+                    c.put(
+                        file_arg,
+                        text.as_bytes(),
+                        mtime,
+                        meta.len(),
+                        &cache_params,
+                        o.clone(),
+                        input_was_sc,
+                        text_char_count,
+                    );
+                }
+                o
+            }
+        };
+
+        // Drop text eagerly when not needed for fix/write-back/verify to
+        // avoid accumulating all files' text in parallel scans. SC input
+        // additionally needs it for the S2T write-back.
+        let need_text = input_was_sc || need_text_post_scan;
+        if !need_text {
+            text = String::new();
+        }
+
+        return Ok((text, input_was_sc, text_char_count, output, content_type));
+    }
+
+    // stdin path.
+    let mut text = String::new();
+    std::io::stdin()
+        .take(MAX_CLI_FILE_BYTES + 1)
+        .read_to_string(&mut text)
+        .context("read stdin")?;
+    anyhow::ensure!(
+        text.len() as u64 <= MAX_CLI_FILE_BYTES,
+        "stdin input exceeds {MAX_CLI_FILE_BYTES} byte limit"
+    );
+
+    let input_was_sc = s2t_convert_if_simplified(&setup.s2t, &mut text);
+    let text_char_count = text.chars().count();
+    let output = scanner.scan_for_content_type_with_config(&text, content_type, cfg);
+
+    Ok((text, input_was_sc, text_char_count, output, content_type))
+}
+
 fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     let c = if use_color() { &COLORS_ON } else { &COLORS_OFF };
 
@@ -1686,14 +1857,6 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     };
 
     let setup = build_lint_setup(params, profile)?;
-    let LintSetup {
-        cfg,
-        ref scanner,
-        ref ruleset_hash,
-        ref s2t,
-        ref scan_cache,
-        ..
-    } = setup;
 
     // --diff-from: resolve changed files via git, use as file args.
     let diff_files: Vec<String>;
@@ -1717,164 +1880,8 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
         ..Default::default()
     };
 
-    /// Maximum file size for CLI lint mode (16 MiB).
-    const MAX_CLI_FILE_BYTES: u64 = 16 * 1024 * 1024;
-
-    // Phase 1: Read + S2T + cache check + scan.
-    //
-    // This closure is shared between sequential and parallel (rayon) paths. It
-    // captures only &-refs to immutable state plus the Mutex-wrapped cache,
-    // making it Fn + Send + Sync.
-    let fix_mode_str = format!("{:?}", params.fix_mode);
-    let scan_file = |file_arg: &str| -> ScanResult {
-        let content_type = content_type_for(params.content_type_override, file_arg);
-
-        let cache_params = zhtw_mcp::cache::ScanParams {
-            ruleset_hash: ruleset_hash.clone(),
-
-            // The whole effective config, not `profile.name()`. The name is the
-            // profile the user asked for; the scanner is built from this
-            // struct, and flags such as --relaxed change it without changing
-            // the name. Keying on the name let a --relaxed run answer for a
-            // strict one and vice versa, so a strict gate could report clean.
-            // Debug covers every field, so a new one cannot be forgotten here.
-            profile: format!("{cfg:?}"),
-            content_type: format!("{content_type:?}"),
-            fix_mode: fix_mode_str.clone(),
-            detect_ai: params.detect_ai,
-            detect_translationese: cfg.translationese_detection,
-            translationese_domain: cfg.translationese_domain.name().to_owned(),
-            ai_threshold: format!("{:.1}", params.ai_threshold_multiplier),
-            exempt_blockquotes: cfg.exempt_blockquotes,
-            engine_version: format!(
-                "{}+{}",
-                env!("CARGO_PKG_VERSION"),
-                env!("ZHTW_ENGINE_FINGERPRINT")
-            ),
-        };
-
-        // Open file via fd, stat from the fd (TOCTOU-safe). Check cache BEFORE
-        // reading — fast path avoids file I/O entirely.
-        if file_arg != "--" {
-            let file =
-                std::fs::File::open(file_arg).with_context(|| format!("open file: {file_arg}"))?;
-            let meta = file
-                .metadata()
-                .with_context(|| format!("stat file: {file_arg}"))?;
-            anyhow::ensure!(
-                meta.len() <= MAX_CLI_FILE_BYTES,
-                "{file_arg}: file too large ({} bytes, limit {MAX_CLI_FILE_BYTES})",
-                meta.len()
-            );
-
-            // Fast-path: check mtime+size before reading the file.
-            let fast_hit = scan_cache.as_ref().and_then(|mtx| {
-                let mut c = mtx.lock().ok()?;
-                let mtime = zhtw_mcp::cache::mtime_secs(&meta);
-                c.check_fast(file_arg, mtime, meta.len(), &cache_params)
-                    .into_hit()
-            });
-
-            // Glossary banned-term injection and the consistency report both
-            // scan the original text buffer; the fast path can only
-            // short-circuit when neither feature needs it. Same story for
-            // fix/SC/verify.
-            let need_text_post_scan = params.fix_mode != zhtw_mcp::fixer::FixMode::None
-                || !params.glossary.is_empty()
-                || params.consistency
-                || {
-                    #[cfg(feature = "translate")]
-                    {
-                        params.verify
-                    }
-                    #[cfg(not(feature = "translate"))]
-                    {
-                        false
-                    }
-                };
-            if let Some(hit) = fast_hit {
-                if !hit.input_was_sc && !need_text_post_scan {
-                    // Cache hit AND no later phase needs the text: skip file
-                    // read and scan.
-                    return Ok((
-                        String::new(),
-                        false,
-                        hit.text_char_count,
-                        hit.output,
-                        content_type,
-                    ));
-                }
-
-                // SC files need the text for S2T write-back; glossary /
-                // consistency / fix / verify need the original buffer. Fall
-                // through to the slow path so we read the file and reuse the
-                // cached scan output below.
-            }
-
-            // Slow path: read file from the same fd.
-            let mut text = String::with_capacity(meta.len() as usize);
-            std::io::BufReader::new(file)
-                .read_to_string(&mut text)
-                .with_context(|| format!("read file: {file_arg}"))?;
-
-            let input_was_sc = s2t_convert_if_simplified(s2t, &mut text);
-            let text_char_count = text.chars().count();
-
-            // Slow-path cache: check content hash (mtime missed but content may
-            // be unchanged, e.g. after `touch`).
-            let content_hit = scan_cache.as_ref().and_then(|mtx| {
-                let mut c = mtx.lock().ok()?;
-                c.check_content(file_arg, text.as_bytes(), &cache_params)
-            });
-            let output = match content_hit {
-                Some(hit) => hit.output,
-                None => {
-                    let o = scanner.scan_for_content_type_with_config(&text, content_type, cfg);
-                    if let Some(Ok(mut c)) = scan_cache.as_ref().map(|mtx| mtx.lock()) {
-                        let mtime = zhtw_mcp::cache::mtime_secs(&meta);
-                        c.put(
-                            file_arg,
-                            text.as_bytes(),
-                            mtime,
-                            meta.len(),
-                            &cache_params,
-                            o.clone(),
-                            input_was_sc,
-                            text_char_count,
-                        );
-                    }
-                    o
-                }
-            };
-
-            // Drop text eagerly when not needed for fix/write-back/verify to
-            // avoid accumulating all files' text in parallel scans. SC input
-            // additionally needs it for the S2T write-back.
-            let need_text = input_was_sc || need_text_post_scan;
-            if !need_text {
-                text = String::new();
-            }
-
-            return Ok((text, input_was_sc, text_char_count, output, content_type));
-        }
-
-        // stdin path.
-        let mut text = String::new();
-        std::io::stdin()
-            .take(MAX_CLI_FILE_BYTES + 1)
-            .read_to_string(&mut text)
-            .context("read stdin")?;
-        anyhow::ensure!(
-            text.len() as u64 <= MAX_CLI_FILE_BYTES,
-            "stdin input exceeds {MAX_CLI_FILE_BYTES} byte limit"
-        );
-
-        let input_was_sc = s2t_convert_if_simplified(s2t, &mut text);
-        let text_char_count = text.chars().count();
-        let output = scanner.scan_for_content_type_with_config(&text, content_type, cfg);
-
-        Ok((text, input_was_sc, text_char_count, output, content_type))
-    };
+    // Phase 1 runs per file, in parallel when there is more than one.
+    let scan_file = |file_arg: &str| scan_one_file(&setup, params, file_arg);
 
     // Parallel scan when multiple files and no stdin pipe. Rayon parallelism
     // gives N/cores speedup on multi-file lint.
@@ -1958,7 +1965,7 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     }
 
     // Flush scan cache before potential process::exit (which skips Drop).
-    if let Some(ref cache_mtx) = scan_cache {
+    if let Some(ref cache_mtx) = setup.scan_cache {
         if let Ok(mut c) = cache_mtx.lock() {
             c.flush();
         }

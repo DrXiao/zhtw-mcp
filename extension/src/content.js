@@ -5,8 +5,9 @@
   window.__zhtwMcpContentLoaded = true;
 
   const {
-    byteOffsetToCodeUnit,
+    issueSegments,
     normalizeIssue,
+    tooltipForIssue,
     utf8ByteLength,
   } = window.ZhtwExtensionShared;
 
@@ -106,6 +107,14 @@
         node,
         byteStart: byteCursor,
         byteEnd: byteCursor + byteLength,
+        // Read through to the live node rather than snapshotting the value.
+        // surroundContents splits a text node when a highlight lands in it, so
+        // a copy taken here goes stale partway through a highlight pass.  The
+        // getter also makes this array directly usable as `issueSegments`
+        // input, with no per-issue copy.
+        get text() {
+          return this.node.nodeValue || "";
+        },
       });
       text += value;
       byteCursor += byteLength;
@@ -196,55 +205,20 @@
   }
 
   function issueToRanges(issue) {
-    if (!issue.length) {
-      return [];
-    }
-    const endByte = issue.offset + issue.length;
-    const startIndex = lastTextMap.findIndex(
-      (item) => issue.offset >= item.byteStart && issue.offset < item.byteEnd,
-    );
-    const endIndex = lastTextMap.findIndex(
-      (item) => endByte > item.byteStart && endByte <= item.byteEnd,
-    );
-    if (startIndex < 0 || endIndex < startIndex) {
-      return [];
-    }
-
     const ranges = [];
-    for (let index = startIndex; index <= endIndex; index += 1) {
-      const span = lastTextMap[index];
-      if (!span.node.isConnected) {
+    for (const segment of issueSegments(lastTextMap, issue)) {
+      const node = lastTextMap[segment.index].node;
+      // A node that left the document since COLLECT_TEXT invalidates the whole
+      // issue, not just this segment: a partial highlight is worse than none.
+      if (!node.isConnected) {
         return [];
       }
-
-      const segmentStartByte = index === startIndex ? issue.offset : span.byteStart;
-      const segmentEndByte = index === endIndex ? endByte : span.byteEnd;
-      if (segmentStartByte >= segmentEndByte) {
-        continue;
-      }
-
-      const text = span.node.nodeValue || "";
-      const start = byteOffsetToCodeUnit(text, segmentStartByte - span.byteStart);
-      const end = byteOffsetToCodeUnit(text, segmentEndByte - span.byteStart);
-      if (start >= end) {
-        continue;
-      }
-
       const range = document.createRange();
-      range.setStart(span.node, start);
-      range.setEnd(span.node, end);
+      range.setStart(node, segment.start);
+      range.setEnd(node, segment.end);
       ranges.push(range);
     }
     return ranges;
-  }
-
-  function tooltipForIssue(issue) {
-    const suggestion = issue.suggestions.length
-      ? `建議：${issue.suggestions.join("、")}`
-      : "無自動建議";
-    const context = issue.context ? `\n說明：${issue.context}` : "";
-    const english = issue.english ? `\nEnglish：${issue.english}` : "";
-    return `${issue.found} — ${issue.rule_type} / ${issue.severity}\n${suggestion}${context}${english}`;
   }
 
   function clearHighlights() {

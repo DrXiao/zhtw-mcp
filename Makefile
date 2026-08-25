@@ -53,6 +53,7 @@ check: $(S2T_STAMP)
 	cargo clippy --lib --no-default-features -- -D warnings
 	cargo clippy --lib --no-default-features --features browser-wasm -- -D warnings
 	cargo fmt --check
+	black --check .
 	python3 scripts/check-ruleset.py --lint
 
 check-size: all
@@ -69,7 +70,7 @@ indent: $(S2T_STAMP)
 	cargo fmt
 	python3 scripts/check-ruleset.py
 	python3 scripts/check-ruleset.py --lint
-	black scripts/*.py
+	black .
 
 corpus: $(S2T_STAMP)
 	cargo test --test corpus-evaluation -- --nocapture

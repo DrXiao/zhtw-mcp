@@ -186,7 +186,7 @@ fn cli_lint_content_type_plain_overrides_md_extension() {
     );
 }
 
-// -- max_warnings tests (TODO 14.5) ----------------------------------------
+// -- max_warnings tests ----------------------------------------------------
 
 #[test]
 fn cli_lint_unreadable_file_skips_rather_than_aborting() {
@@ -311,7 +311,7 @@ fn cli_lint_md_file_auto_detects_markdown() {
     assert_eq!(sw.len(), 1, ".md auto-detection should exclude code block");
 }
 
-// -- Multi-file / directory linting tests (19.4) ----------------------------
+// -- Multi-file / directory linting tests -----------------------------------
 
 fn run_lint_args(args: &[&str]) -> Output {
     let bin = binary_path();
@@ -1068,7 +1068,7 @@ fn cli_lint_human_format_multi_file() {
     );
 }
 
-// -- Compact format tests (33.1) -------------------------------------------
+// -- Compact format tests --------------------------------------------------
 
 #[test]
 fn cli_lint_compact_format_single_issue() {

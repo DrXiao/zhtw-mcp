@@ -7,8 +7,7 @@
 // positional clues, negative clues) through the production Scanner::scan*
 // methods to confirm the IR path handles them correctly.
 //
-// After confirming parity, the old process_match_dispatch_legacy was deleted
-// (48.6).
+// After confirming parity, the old process_match_dispatch_legacy was deleted.
 
 use zhtw_mcp::engine::scan::{ContentType, Scanner};
 use zhtw_mcp::rules::loader::load_embedded_ruleset;
