@@ -2221,7 +2221,8 @@ fn scan_ai_negative_parallel(
 /// Boundaries are decided from the text alone, because the content type does
 /// not reach this far: `scan_with_config_into` takes exclusion ranges, not a
 /// `ContentType`. A heading-shaped line therefore opens a section even in plain
-/// text, where nothing is a heading. See TODO item 21.
+/// text, where nothing is a heading. Threading a `ContentType` this far
+/// would fix that, at the cost of a parameter on every scanner entry point.
 enum SectionBoundary {
     /// The next non-blank line opens a new section.
     Heading,

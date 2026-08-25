@@ -1,4 +1,4 @@
-// Span-level judgment cache (51.4).
+// Span-level judgment cache.
 //
 // Persists LLM disambiguation results so repeated encounters of the same term
 // in similar contexts skip the LLM entirely. Keyed on a 9-field composite:
@@ -122,7 +122,7 @@ pub struct JudgmentCache {
     store: CacheStore,
     dirty: bool,
     ttl: Duration,
-    /// Cache access statistics for telemetry (51.1).
+    /// Cache access statistics for telemetry.
     pub hits: u64,
     pub misses: u64,
 }

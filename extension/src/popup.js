@@ -1,3 +1,5 @@
+import { formatBreakdown } from "./format.js";
+
 const form = document.querySelector("#scan-form");
 const statusNode = document.querySelector("#status");
 const countNode = document.querySelector("#count");
@@ -101,11 +103,6 @@ function renderIssues(issues) {
     item.append(found, detail);
     issueListNode.append(item);
   }
-}
-
-function formatBreakdown(result) {
-  const counts = result.severity_counts || {};
-  return `錯誤 ${counts.error || 0}，警告 ${counts.warning || 0}，資訊 ${counts.info || 0}`;
 }
 
 function renderStatus(text, tone) {

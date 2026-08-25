@@ -83,7 +83,7 @@ impl S2TConverter {
 
     /// Convert Simplified Chinese text to Traditional Chinese (Taiwan variant).
     ///
-    /// Protected-zone tracking (52.2): phrase substitutions produce pre-normalized
+    /// Protected-zone tracking: phrase substitutions produce pre-normalized
     /// output (TWVariants baked in at build time). Their byte ranges in the output
     /// buffer are recorded as protected zones. The TWVariants pass skips characters
     /// inside protected zones, preventing double-conversion while still normalizing

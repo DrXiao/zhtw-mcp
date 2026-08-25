@@ -844,7 +844,7 @@ fn grammar_clean_text_produces_no_issues() {
     assert!(!has_grammar, "clean text should not trigger grammar checks");
 }
 
-// AI writing detection (40.1)
+// AI writing detection
 
 use zhtw_mcp::rules::ruleset::IssueType;
 

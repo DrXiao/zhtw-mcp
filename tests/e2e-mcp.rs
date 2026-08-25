@@ -2783,7 +2783,7 @@ fn e2e_all_known_params_accepted() {
     let _ = child.wait();
 }
 
-// -- Structured error data for invalid parameter values (25.4) --
+// -- Structured error data for invalid parameter values --
 
 #[test]
 fn e2e_invalid_profile_structured_error_data() {

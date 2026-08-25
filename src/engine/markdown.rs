@@ -27,7 +27,7 @@ pub struct MdScanOptions {
     /// events are excluded.  Implemented via cmark events so that nested
     /// blockquotes (`> >`), lazy continuation lines, and blockquotes
     /// inside list items behave correctly.  Off by default — adopted
-    /// blockquote prose is real content (35.7).
+    /// blockquote prose is real content.
     pub exempt_blockquotes: bool,
 }
 
@@ -333,7 +333,7 @@ pub fn extract_heading_ranges(text: &str) -> Vec<ByteRange> {
 /// `---` line, per-line key+colon spans, and bare ASCII `"` / `'` quote
 /// bytes used as scalar delimiters.  Values remain scannable; only the
 /// 1-byte delimiters are masked from the punctuation scanner so that
-/// downstream YAML parsers continue to see ASCII quotes (35.7).
+/// downstream YAML parsers continue to see ASCII quotes.
 fn collect_frontmatter_structural_ranges(text: &str, fm_end: usize, ranges: &mut Vec<ByteRange>) {
     let fm = &text[..fm_end];
     let mut pos = 0usize;

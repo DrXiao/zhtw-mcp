@@ -76,23 +76,29 @@ Throughout the codebase, `cn` and `tw` denote regional writing conventions, not 
 
 ### Pre-built binaries
 
-Every successful push to `main` refreshes the rolling [`latest`](https://github.com/sysprog21/zhtw-mcp/releases/tag/latest) prerelease. It is flagged as a prerelease deliberately, so that tagged versions remain what GitHub reports as the latest release; the commands below therefore pin the `latest` tag rather than going through `/releases/latest/`. Each archive holds the binary, `LICENSE`, and `README.md`, and `SHA256SUMS` ships next to them.
+Every successful push to `main` refreshes the rolling [`latest`](https://github.com/sysprog21/zhtw-mcp/releases/tag/latest) release, which is what GitHub reports as the latest release. No version tag is involved. Each archive holds the binary, `LICENSE`, and `README.md`, and `SHA256SUMS` ships next to them.
 
 | Platform | Asset |
 | --- | --- |
 | Linux x86_64 (glibc 2.39 or newer) | `zhtw-mcp-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64 (glibc 2.39 or newer) | `zhtw-mcp-aarch64-unknown-linux-gnu.tar.gz` |
 | macOS arm64 | `zhtw-mcp-aarch64-apple-darwin.tar.gz` |
 | Windows x86_64 | `zhtw-mcp-x86_64-pc-windows-msvc.tar.gz` |
 
-On any other platform, use Nix below or build from source. Tagged releases additionally carry shell and PowerShell installer scripts and cover more targets; the rolling build does not.
+On any other platform, use Nix below or build from source.
+
+The browser extension is packaged onto the same release as
+`zhtw-mcp-extension.zip`.  Unpack it and load it through `chrome://extensions`
+with developer mode on.
 
 #### macOS / Linux
 
 ```bash
 base=https://github.com/sysprog21/zhtw-mcp/releases/download/latest
 case "$(uname -sm)" in
-  "Darwin arm64") asset=zhtw-mcp-aarch64-apple-darwin.tar.gz ;;
-  "Linux x86_64") asset=zhtw-mcp-x86_64-unknown-linux-gnu.tar.gz ;;
+  "Darwin arm64")  asset=zhtw-mcp-aarch64-apple-darwin.tar.gz ;;
+  "Linux x86_64")  asset=zhtw-mcp-x86_64-unknown-linux-gnu.tar.gz ;;
+  "Linux aarch64") asset=zhtw-mcp-aarch64-unknown-linux-gnu.tar.gz ;;
   *) asset=""; echo "no pre-built binary for $(uname -sm)" >&2 ;;
 esac
 [ -n "$asset" ] &&
@@ -222,7 +228,6 @@ The server also exposes two read-only resources for assistants to consult: `zh-t
 - [docs/mcp.md](docs/mcp.md) -- MCP tool parameters, resources, prompts, sampling, usage examples
 - [docs/internals.md](docs/internals.md) -- processing pipeline, script detection, design decisions, testing
 - [docs/rules.md](docs/rules.md) -- rule type reference, extending the ruleset, runtime overrides
-- [docs/release.md](docs/release.md) -- cargo-dist release workflow, upgrading, custom build setup
 
 ## License
 

@@ -1,7 +1,7 @@
-// Project-level glossary (35.9) — `banned`, `preferred`, `proper_nouns`.
+// Project-level glossary — `banned`, `preferred`, `proper_nouns`.
 //
 // Layered above the embedded ruleset and pack store but below banned-term
-// enforcement and translation memory. Precedence per TODO 35.9: glossary
+// enforcement and translation memory. Full precedence order: glossary
 // `banned` > TM > glossary `preferred` > domain pack > embedded ruleset.
 //
 // `banned` — terms that must always fire, regardless of context_clues.
@@ -30,7 +30,8 @@ pub fn mark_glossary_banned(issue: &mut Issue) {
     issue.glossary_banned = true;
 }
 
-/// Per TODO 35.9 precedence (banned > TM), TM must NOT downgrade these.
+/// Glossary `banned` outranks translation memory, so TM must NOT downgrade
+/// these.
 pub fn is_glossary_banned(issue: &Issue) -> bool {
     issue.glossary_banned
 }

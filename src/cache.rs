@@ -948,7 +948,8 @@ mod tests {
     }
 
     /// Build a ScanOutput carrying `n` issues, for the entry-size caps.
-    fn output_with_issues(n: usize) -> ScanOutput {
+    /// `n` identical issues, each reporting `found`.
+    fn output_of(n: usize, found: &str) -> ScanOutput {
         use crate::rules::ruleset::{Issue, IssueType, Severity};
         let mut out = empty_output();
         out.issues = (0..n)
@@ -956,7 +957,7 @@ mod tests {
                 Issue::new(
                     i,
                     6,
-                    "軟件",
+                    found,
                     vec!["軟體".to_owned()],
                     IssueType::CrossStrait,
                     Severity::Warning,
@@ -964,6 +965,10 @@ mod tests {
             })
             .collect();
         out
+    }
+
+    fn output_with_issues(n: usize) -> ScanOutput {
+        output_of(n, "軟件")
     }
 
     #[test]
@@ -1215,6 +1220,20 @@ mod tests {
         );
     }
 
+    /// One issue carrying `bytes` of filler, for the tests that need a cache
+    /// over `MAX_TOTAL_BYTES`.  Those tests assert on the byte cap, and the
+    /// byte cap does not care how the bytes arrived.  Reaching 32 MiB through
+    /// issue *count* instead means serializing a few hundred thousand structs
+    /// three times over in a debug build, which cost more wall clock than the
+    /// rest of the unit suite combined.  `MAX_ENTRY_ISSUES` caps the count and
+    /// is tested separately.
+    fn output_with_bytes(bytes: usize) -> ScanOutput {
+        output_of(1, &"x".repeat(bytes))
+    }
+
+    /// Filler per entry that puts 300 entries comfortably over the 32 MiB cap.
+    const OVERSIZE_FILLER: usize = 120 * 1024;
+
     #[test]
     fn total_size_cap_evicts_oldest() {
         let dir = TempDir::new().unwrap();
@@ -1227,13 +1246,30 @@ mod tests {
         let base = now_secs() - 300;
         for i in 0..300 {
             let name = format!("file_{i}.md");
-            cache.put(&name, b"x", 100, 1, &p, output_with_issues(1000), false, 1);
+            cache.put(
+                &name,
+                b"x",
+                100,
+                1,
+                &p,
+                output_with_bytes(OVERSIZE_FILLER),
+                false,
+                1,
+            );
             let key = fast_key(&name, &p);
             if let Some(e) = cache.entries_mut().get_mut(&key) {
                 e.timestamp_secs = base + i as u64;
             }
         }
         cache.flush();
+
+        // Prove eviction actually ran.  Without this the test passes trivially
+        // whenever the fixture fails to exceed the cap, which is one edit to
+        // `OVERSIZE_FILLER` or one bump of `MAX_TOTAL_BYTES` away.
+        assert!(
+            cache.entries().len() < 300,
+            "nothing was evicted: the fixture never exceeded {MAX_TOTAL_BYTES} bytes"
+        );
 
         let written = std::fs::metadata(&path).unwrap().len() as usize;
         assert!(
@@ -1262,7 +1298,7 @@ mod tests {
                     size: 1,
                 },
                 params: p.clone(),
-                output: output_with_issues(1000),
+                output: output_with_bytes(OVERSIZE_FILLER),
                 input_was_sc: false,
                 text_char_count: 1,
                 timestamp_secs: base + i,

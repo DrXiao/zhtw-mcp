@@ -386,7 +386,7 @@ fn corpus_evaluation_suite() {
     };
 
     println!();
-    println!("=== Corpus Evaluation Suite (36.0) ===");
+    println!("=== Corpus Evaluation Suite ===");
     println!();
     println!("{:<24} {:<}", "corpus", "metrics");
     println!("{}", "-".repeat(112));

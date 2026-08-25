@@ -125,6 +125,8 @@
               openssl
               pkg-config
               python3
+              # `make check` runs `black --check .` over the Python helpers.
+              black
               self.formatter.${system}
             ];
           };

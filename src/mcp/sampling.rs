@@ -544,7 +544,7 @@ pub(crate) fn refine_issues_with_sampling(
             continue;
         }
 
-        // Use semantic chunking (51.7): extract a structurally bounded chunk
+        // Use semantic chunking: extract a structurally bounded chunk
         // rather than a raw ±120 char window.
         let chunk =
             crate::engine::disambig::extract_semantic_chunk(text, issue.offset, issue.length);
@@ -567,7 +567,7 @@ pub(crate) fn refine_issues_with_sampling(
         }
         let issue = &mut issues[*idx];
 
-        // Check persistent judgment cache first (51.4).
+        // Check persistent judgment cache first.
         if let Some(ref mut ctx) = cache_ctx {
             let jkey = build_judgment_key(ctx, context_window, issue);
             if let Some(cached) = ctx.cache.get(&jkey) {
@@ -1136,7 +1136,7 @@ mod tests {
         assert!(issues[0].context.as_ref().unwrap().contains("timeout"));
     }
 
-    // Input sanitization tests (39.1)
+    // Input sanitization tests
 
     #[test]
     fn nonce_is_unique_across_calls() {

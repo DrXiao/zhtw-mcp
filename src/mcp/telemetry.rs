@@ -1,4 +1,4 @@
-// Per-request token telemetry for LLM cost accounting (51.1).
+// Per-request token telemetry for LLM cost accounting.
 //
 // Accumulates counters during scan + disambig + sampling, then derives
 // three ratio metrics plus cache/tier2 counters for the response.
@@ -24,9 +24,9 @@ pub struct TokenTelemetry {
     pub completion_tokens: u64,
     /// Number of issues resolved by Tier 2 local disambiguation.
     pub tier2_resolved: u64,
-    /// Judgment cache hits (51.4).
+    /// Judgment cache hits.
     pub cache_hits: u64,
-    /// Judgment cache misses (51.4).
+    /// Judgment cache misses.
     pub cache_misses: u64,
     /// Final fix count (issues that resulted in changes).
     pub final_fixes: u64,

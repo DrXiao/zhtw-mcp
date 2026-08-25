@@ -105,33 +105,11 @@ harness = false
 lto = true
 strip = true
 
-# Config for CI release builds via cargo-dist
-[profile.dist]
-inherits = "release"
+# Optimize dependencies even in debug builds, but leave this crate at
+# opt-level 0 so it stays debuggable.  serde_json unoptimized moves single-digit
+# MB/s, and the cache tests have to push 32 MiB through it to reach
+# `MAX_TOTAL_BYTES` at all; blake3, regex, and aho-corasick are on every scanner
+# test's hot path for the same reason.  Costs one dependency rebuild.
+[profile.dev.package."*"]
+opt-level = 2
 
-[workspace.metadata.dist]
-cargo-dist-version = "0.32.0"
-ci = "github"
-installers = ["shell", "powershell"]
-targets = [
-    "x86_64-unknown-linux-gnu",
-    "x86_64-unknown-linux-musl",
-    "aarch64-unknown-linux-gnu",
-    "aarch64-unknown-linux-musl",
-    "x86_64-apple-darwin",
-    "aarch64-apple-darwin",
-    "x86_64-pc-windows-msvc",
-]
-unix-archive = ".tar.gz"
-checksum = "sha256"
-github-build-setup = "../build-setup.yml"
-pr-run-mode = "skip"
-plan-jobs = ["./main"]
-
-[workspace.metadata.dist.github-custom-runners.aarch64-unknown-linux-gnu]
-runner = "ubuntu-24.04"
-host = "x86_64-unknown-linux-gnu"
-
-[workspace.metadata.dist.github-custom-runners.aarch64-unknown-linux-musl]
-runner = "ubuntu-24.04"
-host = "x86_64-unknown-linux-gnu"

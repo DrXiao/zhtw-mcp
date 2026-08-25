@@ -198,7 +198,7 @@ pub struct CompiledSpellingDb {
     /// its automaton is a handful of short words, so construction stays far
     /// under the cold-start budget.
     pub spelling_context_suggestions: Vec<Option<CompiledContextSelector>>,
-    /// Per-rule editorial confidence (35.2).  Plain copy at inflation
+    /// Per-rule editorial confidence.  Plain copy at inflation
     /// time — `EditorialConfidence` is `Copy`, so no Arc needed.
     pub spelling_editorial_confidence: Vec<Option<crate::rules::ruleset::EditorialConfidence>>,
     /// Per-rule positive clue IDs into the clue AC pattern list.

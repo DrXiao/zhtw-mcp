@@ -30,7 +30,7 @@ pub struct ProjectConfig {
     pub glossary: Option<GlossaryConfig>,
 }
 
-/// Markdown-specific scanning options (35.7).
+/// Markdown-specific scanning options.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct MarkdownConfig {
@@ -40,7 +40,7 @@ pub struct MarkdownConfig {
     pub exempt_blockquotes: Option<bool>,
 }
 
-/// Project glossary section (35.9).  Layered above the embedded ruleset
+/// Project glossary section.  Layered above the embedded ruleset
 /// and pack store but below banned-term enforcement and translation
 /// memory.  Precedence: glossary `banned` > TM > glossary `preferred` >
 /// domain pack > embedded ruleset.
@@ -52,7 +52,7 @@ pub struct GlossaryConfig {
     /// otherwise ambiguous prose.
     pub banned: Option<Vec<String>>,
     /// Project-preferred zh-TW forms.  Used by the consistency report
-    /// (35.1) to choose the canonical suggestion when both TW-preferred
+    /// to choose the canonical suggestion when both TW-preferred
     /// and CN-preferred variants appear in the same document.
     pub preferred: Option<Vec<String>>,
     /// Names that should never be flagged (added to the suppression

@@ -1094,7 +1094,7 @@ impl Scanner {
     /// during the NFC-rebuild slow path (Markdown, YAML, or plain text).
     ///
     /// CALLER CONTRACT: config-driven Markdown options like
-    /// [`ProfileConfig::exempt_blockquotes`] (35.7) only take effect on
+    /// [`ProfileConfig::exempt_blockquotes`] only take effect on
     /// the NFC-rebuild path, where exclusions are recomputed from the
     /// supplied [`ProfileConfig`].  On the fast path the caller-supplied
     /// `excluded` slice is used verbatim — if the caller wants

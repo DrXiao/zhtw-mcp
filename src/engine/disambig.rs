@@ -920,7 +920,7 @@ fn annotate_issue(issue: &mut Issue, annotation: &str) {
     issue.context = Some(Arc::from(new_ctx));
 }
 
-// Semantic chunking for Tier 3 context windows (51.7)
+// Semantic chunking for Tier 3 context windows
 
 /// Maximum chunk size in characters for Tier 3 LLM context.
 const MAX_CHUNK_CHARS: usize = 500;
@@ -1360,7 +1360,7 @@ mod tests {
         );
     }
 
-    // -- Semantic chunking tests (51.7) --
+    // -- Semantic chunking tests --
 
     #[test]
     fn semantic_chunk_paragraph_boundary() {

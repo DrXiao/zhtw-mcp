@@ -225,7 +225,7 @@ fn bench_apply_fixes(c: &mut Criterion) {
         });
     });
 
-    // 4b. End-to-end scan+fix on 10KB (the regression target from TODO 30.1).
+    // 4b. End-to-end scan+fix on 10KB, the original regression target.
     group.bench_function("scan_and_fix_10kb", |b| {
         b.iter(|| {
             let output = scanner.scan_profiled_md(black_box(&text), Profile::Base, false);
