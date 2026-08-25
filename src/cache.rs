@@ -1263,7 +1263,7 @@ mod tests {
         }
         cache.flush();
 
-        // Prove eviction actually ran.  Without this the test passes trivially
+        // Prove eviction actually ran. Without this the test passes trivially
         // whenever the fixture fails to exceed the cap, which is one edit to
         // `OVERSIZE_FILLER` or one bump of `MAX_TOTAL_BYTES` away.
         assert!(

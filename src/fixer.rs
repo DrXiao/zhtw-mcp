@@ -111,6 +111,173 @@ pub fn apply_fixes(
     apply_fixes_with_context(text, issues, mode, excluded, None)
 }
 
+/// What the fixer decided about one issue.
+enum Verdict<'a> {
+    /// Write this in place of the issue's span.
+    Apply(&'a String),
+    /// Out of scope at this tier. Nothing about the issue was weighed, so it
+    /// is not a decline: the count the CLI prints would otherwise read as
+    /// "wrong tier" on ordinary prose.
+    Skip,
+    /// Weighed and turned down.
+    Decline,
+}
+
+/// Decide one issue's fate, given the tier and what the ruleset says about it.
+///
+/// Separate from the write loop because it is pure: the loop owns the cursor
+/// and the barrier state, this owns the judgment, and neither can corrupt the
+/// other's half.
+fn fix_verdict<'a>(
+    issue: &'a Issue,
+    end: usize,
+    text: &str,
+    excluded: &[ByteRange],
+    mode: FixMode,
+    segmenter: Option<&Segmenter>,
+) -> Verdict<'a> {
+    // Tier-based fix eligibility.
+    //
+    // Orthographic issue types can be fixed mechanically (no lexical
+    // ambiguity). Lexical types (CrossStrait, Typo, PoliticalColoring,
+    // Confusable) need progressively higher fix tiers. AiStyle zero-width
+    // artifact removal (empty suggestion on invisible chars only) is safe for
+    // orthographic tier: it deletes invisible junk. The found-content check
+    // prevents future AiStyle rules with empty suggestions from being
+    // misclassified as orthographic. Narrower check than
+    // ai_score::is_zero_width: only ZWSP (U+200B) and mid-text BOM (U+FEFF) are
+    // pure tokenizer junk safe to strip unconditionally. ZWJ/ZWNJ/LRM/RLM have
+    // legitimate uses in bidi text and emoji sequences; the broader set in
+    // ai_score.rs is appropriate for detection/scoring but too aggressive for
+    // fixing.
+    let ai_zero_width_removal = issue.rule_type == IssueType::AiStyle
+        && crate::rules::ruleset::is_delete_suggestion(&issue.suggestions)
+        && !issue.found.is_empty()
+        && issue.found.chars().all(|ch| {
+            ch == '\u{200B}' || (ch == '\u{FEFF}' && issue.offset > 0) // preserve file-start BOM
+        });
+    let orthographic = issue.rule_type.is_orthographic() || ai_zero_width_removal;
+
+    // Orthographic tier: skip all lexical issues.
+    if mode == FixMode::Orthographic && !orthographic {
+        return Verdict::Skip;
+    }
+
+    // Tier 2 can suppress lexical issues as likely false positives. Respect
+    // that suppression during auto-fix so we do not rewrite general prose like
+    // "學習的進程" into OS terminology.
+    if !orthographic && issue.tier2_outcome == Tier2Outcome::Suppressed {
+        return Verdict::Decline;
+    }
+
+    // Pre-compute context-clue presence for gating decisions below.
+    let has_clues = issue.context_clues.as_ref().is_some_and(|c| !c.is_empty());
+
+    // Judgment calls belong to the top tier. A clue-gated term needs the
+    // segmenter to confirm its domain, and a rule the ruleset annotates
+    // editorial_confidence low stays valid zh-TW in some senses, so every tier
+    // below LexicalContextual leaves both alone.
+    //
+    // Only the explicit annotation counts here. The MCP explain path
+    // (heuristic_editorial_confidence in mcp/tools.rs) falls back to a
+    // heuristic that calls every Translationese, AiStyle, Grammar,
+    // Severity::Info and anchor-rejected issue low. That fallback exists to
+    // decide what to tell a human reviewer, not what to write to a file:
+    // applying it here would key the write path on a severity field that
+    // suppression mutates, and would duplicate the anchor gate below without
+    // its clue-gated escape hatch.
+    if !orthographic && mode < FixMode::LexicalContextual {
+        // A clue-gated term below the top tier is out of scope, not turned
+        // down: the segmenter never ran, so nothing about this issue was
+        // weighed, and the tier that handles the class exists one step up. 349
+        // shipped rules carry context_clues, so calling these declines would
+        // make the count the CLI prints mean "wrong tier" again on ordinary
+        // technical prose.
+        if has_clues {
+            return Verdict::Skip;
+        }
+
+        // A low-confidence annotation is the opposite: the ruleset already
+        // reached a verdict on the term, and this tier is honoring it.
+        if issue.editorial_confidence == Some(EditorialConfidence::Low) {
+            return Verdict::Decline;
+        }
+    }
+
+    // Anchor-match gating for lexical issues: when calibration has run
+    // (--verify), anchor_match carries the verdict. If calibration explicitly
+    // rejected the term (Some(false)), skip the fix: both LexicalSafe and
+    // LexicalContextual respect anchor rejection for non-clue issues (no
+    // independent disambiguation available). Context-clue-gated issues in
+    // LexicalContextual can override rejection because the segmenter provides
+    // independent confirmation. When anchor_match is None (no calibration),
+    // apply unconditionally.
+    if !orthographic && issue.anchor_match == Some(false) && !has_clues {
+        return Verdict::Decline;
+    }
+
+    // Context-clue gating for lexical issues. Only LexicalContextual reaches
+    // here with clues; the merged tier gate above skipped the rest.
+    if has_clues && !orthographic {
+        // Threshold is type-aware: confusable rules (both forms valid in
+        // different contexts) need 2 clues for confidence; cross-strait and
+        // other rules need only 1 (the match itself is a strong regional
+        // signal, one nearby clue is sufficient to confirm domain).
+        let min_clues = if issue.rule_type == IssueType::Confusable {
+            MIN_CLUE_MATCHES_CONFUSABLE
+        } else {
+            MIN_CLUE_MATCHES_DEFAULT
+        };
+        let confirmed = segmenter.is_some_and(|seg| {
+            let window =
+                crate::engine::scan::surrounding_window_bounded(text, issue.offset, end, excluded);
+            let clue_strs: Vec<&str> = issue
+                .context_clues
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+            seg.count_context_clues(window, &clue_strs) >= min_clues
+        });
+        if !confirmed {
+            return Verdict::Decline;
+        }
+    }
+
+    // Suggestion selection: exactly one candidate, for every issue type.
+    //
+    // Orthographic issues used to take the first of however many were offered,
+    // on the reasoning that punctuation and case are mechanical. The premise is
+    // true of the issues the engine builds (punctuation, grammar and case all
+    // construct a single-element vec) but not of the rules a user can load: a
+    // variant rule with "to": ["a", "b"] in a pack or an overrides file reached
+    // that arm and wrote "a" at --fix=orthographic, the most conservative tier
+    // there is.
+    //
+    // So the arity test is the write condition and the orthographic split
+    // governs only tier eligibility, which is what it was ever about. One
+    // candidate means the answer is determined; more than one is a judgment
+    // call regardless of which pass produced it.
+    if issue.suggestions.len() == 1 {
+        return Verdict::Apply(&issue.suggestions[0]);
+    }
+
+    // Several candidates and no way to choose: a judgment call left to the
+    // author, not an out-of-scope issue.
+    //
+    // An empty suggestion list is the other way to land here, and it is not a
+    // judgment call: the rule had nothing to offer, so there was no verdict to
+    // reach. Counting it would report a decline for a malformed rule, which
+    // only a pack can carry since check-ruleset.py rejects the shape in the
+    // shipped ruleset.
+    if issue.suggestions.len() > 1 {
+        Verdict::Decline
+    } else {
+        Verdict::Skip
+    }
+}
+
 /// Apply fixes to text using an optional segmenter for context-clue analysis.
 ///
 /// Issues must be sorted by offset (ascending) and non-overlapping
@@ -252,152 +419,13 @@ pub fn apply_fixes_with_context(
             continue;
         }
 
-        // Tier-based fix eligibility.
-        //
-        // Orthographic issue types can be fixed mechanically (no lexical
-        // ambiguity). Lexical types (CrossStrait, Typo, PoliticalColoring,
-        // Confusable) need progressively higher fix tiers. AiStyle zero-width
-        // artifact removal (empty suggestion on invisible chars only) is safe
-        // for orthographic tier -- deletes invisible junk. The found-content
-        // check prevents future AiStyle rules with empty suggestions from being
-        // misclassified as orthographic. Narrower check than
-        // ai_score::is_zero_width: only ZWSP (U+200B) and mid-text BOM (U+FEFF)
-        // are pure tokenizer junk safe to strip unconditionally.
-        // ZWJ/ZWNJ/LRM/RLM have legitimate uses in bidi text and emoji
-        // sequences; the broader set in ai_score.rs is appropriate for
-        // detection/scoring but too aggressive for fixing.
-        let ai_zero_width_removal = issue.rule_type == IssueType::AiStyle
-            && crate::rules::ruleset::is_delete_suggestion(&issue.suggestions)
-            && !issue.found.is_empty()
-            && issue.found.chars().all(|ch| {
-                ch == '\u{200B}' || (ch == '\u{FEFF}' && issue.offset > 0) // preserve file-start BOM
-            });
-        let orthographic = issue.rule_type.is_orthographic() || ai_zero_width_removal;
-
-        // Orthographic tier: skip all lexical issues.
-        if mode == FixMode::Orthographic && !orthographic {
-            continue;
-        }
-
-        // Tier 2 can suppress lexical issues as likely false positives. Respect
-        // that suppression during auto-fix so we do not rewrite general prose
-        // like "學習的進程" into OS terminology.
-        if !orthographic && issue.tier2_outcome == Tier2Outcome::Suppressed {
-            declined += 1;
-            continue;
-        }
-
-        // Pre-compute context-clue presence for gating decisions below.
-        let has_clues = issue.context_clues.as_ref().is_some_and(|c| !c.is_empty());
-
-        // Judgment calls belong to the top tier. A clue-gated term needs the
-        // segmenter to confirm its domain, and a rule the ruleset annotates
-        // editorial_confidence low stays valid zh-TW in some senses, so every
-        // tier below LexicalContextual leaves both alone.
-        //
-        // Only the explicit annotation counts here. The MCP explain path
-        // (heuristic_editorial_confidence in mcp/tools.rs) falls back to a
-        // heuristic that calls every Translationese, AiStyle, Grammar,
-        // Severity::Info and anchor-rejected issue low. That fallback exists to
-        // decide what to tell a human reviewer, not what to write to a file:
-        // applying it here would key the write path on a severity field that
-        // suppression mutates, and would duplicate the anchor gate below
-        // without its clue-gated escape hatch.
-        if !orthographic && mode < FixMode::LexicalContextual {
-            // A clue-gated term below the top tier is out of scope, not turned
-            // down: the segmenter never ran, so nothing about this issue was
-            // weighed, and the tier that handles the class exists one step up.
-            // Structurally the same as the orthographic-tier gate above, and
-            // counted the same way. 349 shipped rules carry context_clues, so
-            // calling these declines would make the count the CLI prints mean
-            // "wrong tier" again on ordinary technical prose.
-            if has_clues {
-                continue;
-            }
-
-            // A low-confidence annotation is the opposite: the ruleset already
-            // reached a verdict on the term, and this tier is honoring it.
-            if issue.editorial_confidence == Some(EditorialConfidence::Low) {
+        let rep = match fix_verdict(issue, end, text, excluded, mode, segmenter) {
+            Verdict::Apply(rep) => rep,
+            Verdict::Skip => continue,
+            Verdict::Decline => {
                 declined += 1;
                 continue;
             }
-        }
-
-        // Anchor-match gating for lexical issues: when calibration has run
-        // (--verify), anchor_match carries the verdict. If calibration
-        // explicitly rejected the term (Some(false)), skip the fix — both
-        // LexicalSafe and LexicalContextual respect anchor rejection for
-        // non-clue issues (no independent disambiguation available).
-        // Context-clue-gated issues in LexicalContextual can override rejection
-        // because the segmenter provides independent confirmation. When
-        // anchor_match is None (no calibration), apply unconditionally.
-        if !orthographic && issue.anchor_match == Some(false) && !has_clues {
-            declined += 1;
-            continue;
-        }
-
-        // Context-clue gating for lexical issues. Only LexicalContextual
-        // reaches here with clues; the merged tier gate above skipped the rest.
-        if has_clues && !orthographic {
-            // Threshold is type-aware: confusable rules (both forms valid in
-            // different contexts) need 2 clues for confidence; cross-strait and
-            // other rules need only 1 (the match itself is a strong regional
-            // signal, one nearby clue is sufficient to confirm domain).
-            let min_clues = if issue.rule_type == IssueType::Confusable {
-                MIN_CLUE_MATCHES_CONFUSABLE
-            } else {
-                MIN_CLUE_MATCHES_DEFAULT
-            };
-            let confirmed = segmenter.is_some_and(|seg| {
-                let window = crate::engine::scan::surrounding_window_bounded(
-                    text,
-                    issue.offset,
-                    end,
-                    excluded,
-                );
-                let clue_strs: Vec<&str> = issue
-                    .context_clues
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect();
-                seg.count_context_clues(window, &clue_strs) >= min_clues
-            });
-            if !confirmed {
-                declined += 1;
-                continue;
-            }
-        }
-
-        // Suggestion selection: exactly one candidate, for every issue type.
-        //
-        // Orthographic issues used to take the first of however many were
-        // offered, on the reasoning that punctuation and case are mechanical.
-        // The premise is true of the issues the engine builds (punctuation,
-        // grammar and case all construct a single-element vec) but not of the
-        // rules a user can load: a variant rule with "to": ["a", "b"] in a pack
-        // or an overrides file reached that arm and wrote "a" at
-        // --fix=orthographic, the most conservative tier there is.
-        //
-        // So the arity test is the write condition and the orthographic split
-        // governs only tier eligibility, which is what it was ever about. One
-        // candidate means the answer is determined; more than one is a judgment
-        // call regardless of which pass produced it.
-        let rep = (issue.suggestions.len() == 1).then(|| &issue.suggestions[0]);
-        let Some(rep) = rep else {
-            // Several candidates and no way to choose: a judgment call left to
-            // the author, not an out-of-scope issue.
-            //
-            // An empty suggestion list is the other way to land here, and it is
-            // not a judgment call: the rule had nothing to offer, so there was
-            // no verdict to reach. Counting it would report a decline for a
-            // malformed rule, which only a pack can carry since
-            // check-ruleset.py rejects the shape in the shipped ruleset.
-            if issue.suggestions.len() > 1 {
-                declined += 1;
-            }
-            continue;
         };
 
         out.push_str(&text[cursor..issue.offset]);

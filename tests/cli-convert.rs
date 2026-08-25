@@ -126,8 +126,8 @@ fn convert_reads_markdown_file_names_the_way_lint_does() {
         outputs.push((name, String::from_utf8_lossy(&out.stdout).into_owned()));
     }
 
-    // The fence content is what distinguishes the two readings: Markdown
-    // leaves the term inside it alone, plain text rewrites it.
+    // The fence content is what distinguishes the two readings: Markdown leaves
+    // the term inside it alone, plain text rewrites it.
     for (name, text) in &outputs {
         assert!(
             text.contains("代碼軟件"),

@@ -1,8 +1,8 @@
 // Project config file support (.zhtw-mcp.toml).
 //
 // Discovery: resolve once from cwd upward, stopping at VCS root (.git) or
-// filesystem root.  Apply globally to all files in the run.
-// CLI flags override config file values.  Config file overrides defaults.
+// filesystem root. Apply globally to all files in the run. CLI flags override
+// config file values. Config file overrides defaults.
 
 use std::path::{Path, PathBuf};
 

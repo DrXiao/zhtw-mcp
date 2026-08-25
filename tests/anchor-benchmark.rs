@@ -1,14 +1,14 @@
 // Benchmark for calibration-based anchor verification.
 //
-// Measures: anchor coverage, match/unmatch rate, latency overhead,
-// and multi-run convergence.
+// Measures: anchor coverage, match/unmatch rate, latency overhead, and
+// multi-run convergence.
 //
-// Requires network access (Google Translate API) so marked #[ignore] by default.
-// Run explicitly:
+// Requires network access (Google Translate API) so marked #[ignore] by
+// default. Run explicitly:
 //   cargo test --test anchor_benchmark -- --ignored --nocapture
 //
-// Set CORPUS_DIR=path/to/dir to lint real-world .md/.txt files instead of
-// the built-in synthetic corpus.
+// Set CORPUS_DIR=path/to/dir to lint real-world .md/.txt files instead of the
+// built-in synthetic corpus.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -140,7 +140,8 @@ fn collect_metrics(corpus: &str) -> BenchmarkMetrics {
         m.no_signal = no_signal;
     }
 
-    // Convergence: both verify runs should produce identical anchor_match values
+    // Convergence: both verify runs should produce identical anchor_match
+    // values
     let v2 = parse_issues(&verify2_json);
     m.convergence_identical = v1["issues"] == v2["issues"];
 
@@ -267,8 +268,8 @@ fn anchor_benchmark_corpus_dir() {
     let baseline_json = String::from_utf8_lossy(&baseline_output.stdout);
     let verify_json = String::from_utf8_lossy(&verify_output.stdout);
 
-    // zhtw lint exits 0 (clean) or 1 (issues found).  Both are expected for
-    // benchmark corpora.  Any other exit code indicates a crash or usage error.
+    // zhtw lint exits 0 (clean) or 1 (issues found). Both are expected for
+    // benchmark corpora. Any other exit code indicates a crash or usage error.
     let baseline_code = baseline_output.status.code().unwrap_or(-1);
     assert!(
         baseline_code == 0 || baseline_code == 1,

@@ -1262,20 +1262,62 @@ impl Scanner {
         self.scan_with_config_into(text, excluded, cfg, &mut scratch)
     }
 
-    /// Scan with a fully-specified ProfileConfig, reusing a caller-provided
-    /// [`ScratchSpace`] to avoid per-scan allocations.
+    /// Lexical and procedural passes: everything that matches on the text
+    /// itself, before overlap resolution decides which spans survive.
     ///
-    /// The scratch buffers are cleared at entry; on return the issues live
-    /// in the returned `ScanOutput` (moved out of `scratch.issues`).
-    pub fn scan_with_config_into(
+    /// All of these emit issues in offset order, which is what lets the
+    /// caller skip a sort in the common case.
+    #[allow(clippy::too_many_arguments)]
+    fn run_lexical_passes(
         &self,
         text: &str,
         excluded: &[ByteRange],
-        cfg: ProfileConfig,
-        scratch: &mut ScratchSpace,
-    ) -> ScanOutput {
-        // Verify scan-time config doesn't re-enable rule types excluded at
-        // build time.
+        zh_type: ChineseType,
+        issues: &mut Vec<Issue>,
+        cfg: &ProfileConfig,
+        clue_index: &mut Vec<(usize, u16)>,
+        boundary_bitmap: &BoundaryBitmap,
+    ) {
+        if cfg.spelling {
+            self.scan_spelling(
+                text,
+                excluded,
+                zh_type,
+                issues,
+                cfg,
+                clue_index,
+                boundary_bitmap,
+            );
+        }
+        if cfg.casing {
+            self.scan_case(text, excluded, issues);
+        }
+        if cfg.basic_punctuation {
+            self.scan_punctuation(text, excluded, issues, cfg);
+        }
+        if cfg.dunhao_detection {
+            self.scan_dunhao(text, excluded, issues);
+        }
+        if cfg.range_normalization {
+            self.scan_range_indicators(text, excluded, issues, cfg);
+        }
+        if cfg.ellipsis_normalization {
+            scan_ellipsis(text, excluded, issues);
+        }
+        if cfg.basic_punctuation {
+            self.scan_cn_curly_quotes(text, excluded, issues);
+            self.scan_spacing(text, excluded, issues);
+        }
+        // Repetition detection (CJK duplicates + Latin duplicates).
+        repetition::scan_repetition(text, excluded, issues);
+        // Spaced-acronym rejoining (C P U to CPU).
+        acronym::scan_spaced_acronyms(text, excluded, issues);
+    }
+
+    /// Catch a scan config that re-enables a rule type the scanner was built
+    /// without. The rules are simply absent, so the pass would silently find
+    /// nothing rather than fail, which reads as clean text.
+    fn debug_assert_config_within_build(&self, cfg: &ProfileConfig) {
         debug_assert!(
             !(self.build_filter.exclude_variant && cfg.variant_normalization),
             "scan config enables variant_normalization but scanner was built without variant rules"
@@ -1288,27 +1330,46 @@ impl Scanner {
             !(self.build_filter.exclude_translationese && cfg.translationese_detection),
             "scan config enables translationese_detection but scanner was built without translationese rules"
         );
+    }
+
+    /// Spelling rules this profile actually consults, for coverage reporting.
+    ///
+    /// Case and punctuation are procedural rather than discrete rules, so they
+    /// do not count. One pass, subtracting each rule whose type the config
+    /// gates off.
+    fn count_active_spelling_rules(&self, cfg: &ProfileConfig) -> usize {
+        if !cfg.spelling {
+            return 0;
+        }
+        self.spelling_db
+            .spelling_rules
+            .iter()
+            .filter(|r| match r.rule_type {
+                RuleType::Variant => cfg.variant_normalization,
+                RuleType::AiFiller => cfg.ai_filler_detection,
+                RuleType::Translationese => cfg.translationese_detection,
+                _ => true,
+            })
+            .count()
+    }
+
+    /// Scan with a fully-specified ProfileConfig, reusing a caller-provided
+    /// [`ScratchSpace`] to avoid per-scan allocations.
+    ///
+    /// The scratch buffers are cleared at entry; on return the issues live
+    /// in the returned `ScanOutput` (moved out of `scratch.issues`).
+    pub fn scan_with_config_into(
+        &self,
+        text: &str,
+        excluded: &[ByteRange],
+        cfg: ProfileConfig,
+        scratch: &mut ScratchSpace,
+    ) -> ScanOutput {
+        self.debug_assert_config_within_build(&cfg);
 
         scratch.clear();
 
-        // Compute rules_checked: count spelling rules active under this profile
-        // (case/punctuation are procedural, not discrete rules). Single pass
-        // over spelling_rules — subtract any rule whose type is gated off by
-        // the current config.
-        let rules_checked = if cfg.spelling {
-            self.spelling_db
-                .spelling_rules
-                .iter()
-                .filter(|r| match r.rule_type {
-                    RuleType::Variant => cfg.variant_normalization,
-                    RuleType::AiFiller => cfg.ai_filler_detection,
-                    RuleType::Translationese => cfg.translationese_detection,
-                    _ => true,
-                })
-                .count()
-        } else {
-            0
-        };
+        let rules_checked = self.count_active_spelling_rules(&cfg);
 
         if text.is_empty() {
             return ScanOutput {
@@ -1347,40 +1408,15 @@ impl Scanner {
             ref mut overlap_accepted,
         } = *scratch;
 
-        if cfg.spelling {
-            self.scan_spelling(
-                text,
-                excluded,
-                zh_type,
-                issues,
-                &cfg,
-                clue_index,
-                &boundary_bitmap,
-            );
-        }
-        if cfg.casing {
-            self.scan_case(text, excluded, issues);
-        }
-        if cfg.basic_punctuation {
-            self.scan_punctuation(text, excluded, issues, &cfg);
-        }
-        if cfg.dunhao_detection {
-            self.scan_dunhao(text, excluded, issues);
-        }
-        if cfg.range_normalization {
-            self.scan_range_indicators(text, excluded, issues, &cfg);
-        }
-        if cfg.ellipsis_normalization {
-            scan_ellipsis(text, excluded, issues);
-        }
-        if cfg.basic_punctuation {
-            self.scan_cn_curly_quotes(text, excluded, issues);
-            self.scan_spacing(text, excluded, issues);
-        }
-        // Repetition detection (CJK duplicates + Latin duplicates).
-        repetition::scan_repetition(text, excluded, issues);
-        // Spaced-acronym rejoining (C P U → CPU).
-        acronym::scan_spaced_acronyms(text, excluded, issues);
+        self.run_lexical_passes(
+            text,
+            excluded,
+            zh_type,
+            issues,
+            &cfg,
+            clue_index,
+            &boundary_bitmap,
+        );
 
         // All scanners (AC, punctuation, spacing, ellipsis, quotes) emit issues
         // in offset order. Skip the O(n log n) sort when already sorted (common
@@ -1424,74 +1460,7 @@ impl Scanner {
             rule_ir::inflate_spelling_issues(&self.spelling_db, text, excluded, issues);
         }
 
-        // Grammar checks run AFTER overlap resolution so broad grammar spans
-        // (e.g. 是不是…嗎) do not suppress narrower spelling/case issues that
-        // happen to fall inside the grammar match range.
-        if cfg.grammar_checks {
-            grammar::scan_grammar(text, excluded, issues);
-        }
-
-        // AI writing detection grammar checks: semantic safety words, copula
-        // avoidance, passive voice overuse. Separate from base grammar checks —
-        // gated by ai_semantic_safety profile flag.
-        if cfg.ai_semantic_safety {
-            grammar::scan_ai_grammar(text, excluded, issues);
-        }
-
-        // Structural AI pattern detection: binary contrast density, paragraph
-        // endings, dash overuse, formulaic headings, list density.
-        if cfg.ai_structural_patterns {
-            grammar::scan_ai_structural(text, excluded, issues, cfg.ai_threshold_multiplier);
-        }
-
-        // Density-based AI phrase detection: post-scan frequency pass counts
-        // tracked phrases across the full document and flags when density
-        // exceeds per-phrase thresholds. Distinct from per-occurrence filler
-        // detection — catches the statistical signature of AI writing.
-        if cfg.ai_density_detection {
-            grammar::scan_ai_density(text, excluded, issues, cfg.ai_threshold_multiplier);
-        }
-
-        // Build sentence/paragraph boundary index for structural detectors.
-        // Computed lazily -- only when boundary-aware detectors are active.
-        let needs_boundary_index = cfg.ai_structural_patterns || cfg.translationese_detection;
-        let boundary_index = if needs_boundary_index {
-            Some(BoundaryIndex::build(text, excluded))
-        } else {
-            None
-        };
-
-        // Structural AI pattern detectors (S1-S8, V2 density). Requires
-        // sentence/paragraph boundary index.
-        if cfg.ai_structural_patterns {
-            if let Some(ref idx) = boundary_index {
-                grammar::scan_ai_structural_phase2(text, excluded, issues, idx);
-            }
-        }
-
-        // Syntactic translationese detectors (G1-G8, Y1-Y2, S3, V7, V13).
-        // Requires sentence/paragraph boundary index.
-        if cfg.translationese_detection {
-            if let Some(ref idx) = boundary_index {
-                grammar::scan_translationese_syntactic(text, excluded, issues, idx);
-
-                // Boundary-aware translationese detectors (ZY1b/ZY2b/ZY3b/ZY5).
-                // `cfg.translationese_domain` selects the per-domain threshold
-                // table that drives firing behavior at scan time.
-                grammar::scan_translationese_indexed(
-                    text,
-                    excluded,
-                    issues,
-                    idx,
-                    cfg.translationese_domain,
-                );
-            }
-
-            // Substring-only translationese detectors (ZY1a/ZY2a/ZY3a/ ZY4a) —
-            // no boundary index required.
-            grammar::scan_translationese_lexical(text, excluded, issues);
-            dedup_translationese_phase_duplicates(issues);
-        }
+        run_structural_passes(text, excluded, issues, &cfg);
 
         // Fix CN quotation mark pairing with depth-based nesting: well-formed
         // quotes use character-based depth tracking; misordered or
@@ -1533,26 +1502,11 @@ impl Scanner {
 
         let oral_density = compute_oral_density(text);
 
-        // Skip O(n) line index construction when no issues found (common case).
-        if issues.is_empty() {
-            let mut quality_flags = Vec::new();
-            if oral_density.is_some_and(|d| d > 0.05) {
-                quality_flags.push("high_oral_density".into());
-            }
-            return ScanOutput {
-                issues: std::mem::take(issues),
-                detected_script: zh_type,
-                ai_signature,
-                translationese_signature,
-                coverage: Some(CoverageReport {
-                    rules_checked,
-                    rules_matched: 0,
-                }),
-                oral_density,
-                quality_flags,
-            };
-        }
-
+        // No empty-issues shortcut here on purpose: with no issues the sort,
+        // the line/col fill, and `build_quality_flags` are all no-ops and
+        // `rules_matched` is already 0, so a special case would only be a
+        // second copy of this same tail.
+        //
         // Deterministic output contract: issues are sorted by byte offset
         // ascending, then severity descending, then rule_type discriminant for
         // stable, diffable output.
@@ -1588,6 +1542,82 @@ impl Scanner {
             oral_density,
             quality_flags,
         }
+    }
+}
+
+/// Grammar, AI, and translationese passes.
+///
+/// These run after overlap resolution, not with the lexical passes: a broad
+/// grammar span such as 是不是…嗎 would otherwise swallow the narrower
+/// spelling or case issue sitting inside its range.
+fn run_structural_passes(
+    text: &str,
+    excluded: &[ByteRange],
+    issues: &mut Vec<Issue>,
+    cfg: &ProfileConfig,
+) {
+    if cfg.grammar_checks {
+        grammar::scan_grammar(text, excluded, issues);
+    }
+
+    // AI writing detection grammar checks: semantic safety words, copula
+    // avoidance, passive voice overuse. Separate from the base grammar checks
+    // above, and gated by its own profile flag.
+    if cfg.ai_semantic_safety {
+        grammar::scan_ai_grammar(text, excluded, issues);
+    }
+
+    // Structural AI pattern detection: binary contrast density, paragraph
+    // endings, dash overuse, formulaic headings, list density.
+    if cfg.ai_structural_patterns {
+        grammar::scan_ai_structural(text, excluded, issues, cfg.ai_threshold_multiplier);
+    }
+
+    // Density-based AI phrase detection: a post-scan frequency pass counting
+    // tracked phrases across the whole document, flagging when density passes
+    // per-phrase thresholds. Distinct from per-occurrence filler detection,
+    // since this catches the statistical signature rather than one phrase.
+    if cfg.ai_density_detection {
+        grammar::scan_ai_density(text, excluded, issues, cfg.ai_threshold_multiplier);
+    }
+
+    // Built lazily: only the boundary-aware detectors below need it, and it
+    // costs a pass over the text.
+    let needs_boundary_index = cfg.ai_structural_patterns || cfg.translationese_detection;
+    let boundary_index = if needs_boundary_index {
+        Some(BoundaryIndex::build(text, excluded))
+    } else {
+        None
+    };
+
+    // Structural AI pattern detectors (S1-S8, V2 density).
+    if cfg.ai_structural_patterns {
+        if let Some(ref idx) = boundary_index {
+            grammar::scan_ai_structural_phase2(text, excluded, issues, idx);
+        }
+    }
+
+    // Syntactic translationese detectors (G1-G8, Y1-Y2, S3, V7, V13).
+    if cfg.translationese_detection {
+        if let Some(ref idx) = boundary_index {
+            grammar::scan_translationese_syntactic(text, excluded, issues, idx);
+
+            // Boundary-aware translationese detectors (ZY1b/ZY2b/ZY3b/ZY5).
+            // `cfg.translationese_domain` selects the per-domain threshold
+            // table that drives firing behavior at scan time.
+            grammar::scan_translationese_indexed(
+                text,
+                excluded,
+                issues,
+                idx,
+                cfg.translationese_domain,
+            );
+        }
+
+        // Substring-only translationese detectors (ZY1a/ZY2a/ZY3a/ZY4a), which
+        // need no boundary index.
+        grammar::scan_translationese_lexical(text, excluded, issues);
+        dedup_translationese_phase_duplicates(issues);
     }
 }
 

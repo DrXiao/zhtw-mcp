@@ -718,4 +718,69 @@ mod tests {
             assert!(supported.contains(&revision.version));
         }
     }
+
+    #[test]
+    fn an_unadvertised_method_is_not_listed_as_implemented() {
+        // The list is maintained by hand, and this is the entry that costs
+        // something when it drifts. `completion/complete` is refused because
+        // the `completions` capability is unadvertised; listing it here would
+        // make the same method answer method-not-found on good parameters and
+        // invalid-params on bad ones, which is the bug the list exists to
+        // prevent rather than one it should introduce.
+        assert!(
+            !IMPLEMENTED_METHODS.contains(&"completion/complete"),
+            "completion/complete is refused, so it must not count as implemented"
+        );
+    }
+
+    #[test]
+    fn implemented_methods_has_no_duplicates() {
+        // A duplicate is invisible at the call site (contains() still says
+        // true) but means someone edited the list twice for one method, which
+        // is the state where the next edit removes only one of them.
+        let unique: std::collections::BTreeSet<_> = IMPLEMENTED_METHODS.iter().collect();
+        assert_eq!(
+            unique.len(),
+            IMPLEMENTED_METHODS.len(),
+            "duplicate entry in IMPLEMENTED_METHODS"
+        );
+    }
+
+    /// A client reply carrying the given text blocks, in order.
+    ///
+    /// Written as the wire payload and parsed back, the same way the sampling
+    /// tests script their canned replies: a shape a real client could send is
+    /// then a shape this test can build.
+    // Deprecated by SEP-2577 along with the sampling API this exercises; the
+    // allow matches the one on `reply_text` itself.
+    #[allow(deprecated)]
+    fn sampling_reply(blocks: &[&str]) -> rmcp::model::CreateMessageResult {
+        let content: Vec<_> = blocks
+            .iter()
+            .map(|t| serde_json::json!({"type": "text", "text": t}))
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "role": "assistant",
+            "model": "test-model",
+            "content": content,
+        }))
+        .expect("a CreateMessageResult payload")
+    }
+
+    #[test]
+    fn a_sampling_reply_yields_its_first_non_blank_text() {
+        // The model is free to lead with an empty or whitespace-only block,
+        // and taking it would hand the caller "" as though that were the
+        // judgment. First block with something in it wins, trimmed.
+        assert_eq!(
+            reply_text(sampling_reply(&["  ", "", "  軟體  ", "檔案"])),
+            Some("軟體".to_string())
+        );
+    }
+
+    #[test]
+    fn a_sampling_reply_with_nothing_to_say_is_none() {
+        assert_eq!(reply_text(sampling_reply(&[])), None);
+        assert_eq!(reply_text(sampling_reply(&["", "   ", "\n\t"])), None);
+    }
 }

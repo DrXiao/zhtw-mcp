@@ -1,9 +1,8 @@
 // 35.10 high-frequency calque coverage audit (real-world corpus).
 //
-// Anchored to ai-muninn.com calque blindspot sweep (2026-05).  Pins
-// the linter behavior on the 14 mainland-Chinese terms reported as
-// missed in published zh-TW articles, plus the boundary collocations
-// that must NOT fire.
+// Anchored to ai-muninn.com calque blindspot sweep (2026-05). Pins the linter
+// behavior on the 14 mainland-Chinese terms reported as missed in published
+// zh-TW articles, plus the boundary collocations that must NOT fire.
 
 use std::path::{Path, PathBuf};
 
@@ -58,12 +57,11 @@ fn assert_term_fires(issues: &[Issue], line: usize, expected_english: &str) {
 }
 
 fn assert_term_silent(issues: &[Issue], line: usize, forbidden_from: &str) {
-    // Match by containment, not equality: a regression where the
-    // scanner emits a longer phrase that contains the forbidden bare
-    // term (e.g. `好消息` slipping through as a phrase-level hit
-    // covering the inner `消息` calque) would still violate the
-    // collocation invariant the test guards.  Equality would let
-    // those slip past.
+    // Match by containment, not equality: a regression where the scanner emits
+    // a longer phrase that contains the forbidden bare term (e.g. `好消息`
+    // slipping through as a phrase-level hit covering the inner `消息` calque)
+    // would still violate the collocation invariant the test guards. Equality
+    // would let those slip past.
     let line_issues = issues_on_line(issues, line);
     let hit = line_issues.iter().any(|i| i.found.contains(forbidden_from));
     assert!(
@@ -84,11 +82,10 @@ fn phase1_high_frequency_terms_fire() {
     let body = std::fs::read_to_string(fixture_path()).expect("fixture exists");
     let issues = scan_text(&body);
 
-    // Each (line, expected term) anchors a section in the fixture.
-    // Each anchor is (line, expected english field on a CrossStrait issue
-    // covering some span of that line).  Concept-level coverage — the
-    // longer compound rule is allowed to win over the bare term as long
-    // as english anchors match.
+    // Each (line, expected term) anchors a section in the fixture. Each anchor
+    // is (line, expected english field on a CrossStrait issue covering some
+    // span of that line). Concept-level coverage — the longer compound rule is
+    // allowed to win over the bare term as long as english anchors match.
     let anchors: &[(usize, &str)] = &[
         (10, "data"),
         (11, "data"),
@@ -140,14 +137,13 @@ fn phase2_metadata_parent_rule_keeps_firing_with_english_anchor() {
         "元數據 rule must surface english anchor 'metadata' verbatim"
     );
 
-    // The 元數據 rule uses `to: []`, so `effective_suggestions` falls
-    // back to the english anchor.  The user-visible suggestion must be
-    // exactly "metadata" — neither the rejected mainland form `元資料`
-    // nor the acceptable-but-not-preferred coinages `詮釋資料` /
-    // `後設資料`.  Asserting the suggestion list literally catches a
-    // regression where someone adds `to: ["後設資料"]` thinking it's
-    // a friendlier translation; the engine would surface that instead
-    // of "metadata", silently violating the gate.
+    // The 元數據 rule uses `to: []`, so `effective_suggestions` falls back to
+    // the english anchor. The user-visible suggestion must be exactly
+    // "metadata" — neither the rejected mainland form `元資料` nor the
+    // acceptable-but-not-preferred coinages `詮釋資料` / `後設資料`. Asserting
+    // the suggestion list literally catches a regression where someone adds
+    // `to: ["後設資料"]` thinking it's a friendlier translation; the engine
+    // would surface that instead of "metadata", silently violating the gate.
     assert_eq!(
         parent.suggestions.as_ref(),
         ["metadata".to_string()].as_slice(),
@@ -155,9 +151,9 @@ fn phase2_metadata_parent_rule_keeps_firing_with_english_anchor() {
         parent.suggestions,
     );
 
-    // Phase 2 invariant: the inner 數據 hit must NOT double-fire on the
-    // same span — overlap resolution + the parent rule should yield
-    // exactly one issue covering the full 元數據 span.
+    // Phase 2 invariant: the inner 數據 hit must NOT double-fire on the same
+    // span — overlap resolution + the parent rule should yield exactly one
+    // issue covering the full 元數據 span.
     let inner_data: Vec<_> = line_31
         .iter()
         .filter(|i| {

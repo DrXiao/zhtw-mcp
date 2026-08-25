@@ -387,6 +387,10 @@ mod tests {
             data: Some(json!({"field": "profile", "accepted": ["base", "strict"]})),
         };
         let json = serde_json::to_string(&err).unwrap();
+        // Read the wire, not the struct. Parsing back through the same derive
+        // that produced the JSON is self-consistent by construction: a stray
+        // rename on a field would survive it, while these pin the key names
+        // JSON-RPC 2.0 actually specifies.
         let parsed: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["code"], INVALID_REQUEST);
         assert_eq!(parsed["message"], "bad request");

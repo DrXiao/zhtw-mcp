@@ -1,11 +1,10 @@
 // Regression corpus for token-accuracy co-optimization.
 //
 // Four benchmark datasets validating that the three-tier pipeline produces
-// stable, correct results:
-// A. Deterministic: fully Tier 1 solvable, stable output.
-// B. Ambiguous: polysemous terms, Tier 2/3 battleground.
-// C. Editorial: AI filler, passive voice, hedging.
-// D. Mixed-content: markdown, code blocks, CJK-Latin interleaving.
+// stable, correct results: A. Deterministic: fully Tier 1 solvable, stable
+// output. B. Ambiguous: polysemous terms, Tier 2/3 battleground. C. Editorial:
+// AI filler, passive voice, hedging. D. Mixed-content: markdown, code blocks,
+// CJK-Latin interleaving.
 
 use serde::Deserialize;
 use zhtw_mcp::engine::disambig::{disambiguate_batch, DisambigConfig};
@@ -136,9 +135,7 @@ fn load_corpus(name: &str) -> CorpusSpec {
     serde_json::from_str(&data).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"))
 }
 
-// ---------------------------------------------------------------------------
 // A. Deterministic corpus: stable output
-// ---------------------------------------------------------------------------
 
 #[test]
 fn deterministic_corpus_stable_output() {
@@ -182,8 +179,9 @@ fn deterministic_corpus_stable_output() {
 
         // First pass: fix the input.
         let fixed1 = fixed_expected;
-        // Second pass: feed fixed output back in. A truly idempotent fixer
-        // must produce identical output when re-run on its own result.
+
+        // Second pass: feed fixed output back in. A truly idempotent fixer must
+        // produce identical output when re-run on its own result.
         let (fixed2, issues2) = scan_and_fix(&scanner, &s2t, &fixed1, content_type, profile, false);
         assert_eq!(
             fixed1, fixed2,
@@ -204,9 +202,7 @@ fn deterministic_corpus_stable_output() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // B. Ambiguous corpus: validates Tier 2/3 behavior
-// ---------------------------------------------------------------------------
 
 #[test]
 fn ambiguous_corpus_basic_validation() {
@@ -257,9 +253,7 @@ fn ambiguous_corpus_basic_validation() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // C. Editorial corpus: AI detection
-// ---------------------------------------------------------------------------
 
 #[test]
 fn editorial_corpus_basic_validation() {
@@ -282,9 +276,7 @@ fn editorial_corpus_basic_validation() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // D. Mixed-content corpus: structural integrity
-// ---------------------------------------------------------------------------
 
 #[test]
 fn mixed_content_corpus_basic_validation() {
@@ -328,8 +320,8 @@ fn mixed_content_corpus_basic_validation() {
             );
         }
 
-        // Verify code blocks are preserved: fenced blocks in input must
-        // appear unchanged in output.
+        // Verify code blocks are preserved: fenced blocks in input must appear
+        // unchanged in output.
         if input.contains("```") {
             for block in input.split("```").skip(1).step_by(2) {
                 assert!(

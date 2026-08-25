@@ -1,8 +1,8 @@
 // Audit tracing: per-invocation reproducibility metadata.
 //
-// Each tool call generates a Trace with a unique trace_id (SHA-256 of
-// timestamp + PID + counter + urandom seed), hashes of input/output text,
-// and the ruleset hash. This enables deterministic replay.
+// Each tool call generates a Trace with a unique trace_id (SHA-256 of timestamp
+// + PID + counter + urandom seed), hashes of input/output text, and the ruleset
+// hash. This enables deterministic replay.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -20,6 +20,7 @@ static URANDOM_SEED: OnceLock<[u8; 16]> = OnceLock::new();
 fn urandom_seed() -> &'static [u8; 16] {
     URANDOM_SEED.get_or_init(|| {
         let mut seed = [0u8; 16];
+
         // Best-effort: if /dev/urandom is unavailable (e.g., sandboxed), fall
         // back to all-zeros (still unique within a process via TRACE_SEQ).
         if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
