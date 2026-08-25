@@ -76,17 +76,46 @@ Throughout the codebase, `cn` and `tw` denote regional writing conventions, not 
 
 ### Pre-built binaries
 
+Every successful push to `main` refreshes the rolling [`latest`](https://github.com/sysprog21/zhtw-mcp/releases/tag/latest) prerelease. It is flagged as a prerelease deliberately, so that tagged versions remain what GitHub reports as the latest release; the commands below therefore pin the `latest` tag rather than going through `/releases/latest/`. Each archive holds the binary, `LICENSE`, and `README.md`, and `SHA256SUMS` ships next to them.
+
+| Platform | Asset |
+| --- | --- |
+| Linux x86_64 (glibc 2.39 or newer) | `zhtw-mcp-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS arm64 | `zhtw-mcp-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `zhtw-mcp-x86_64-pc-windows-msvc.tar.gz` |
+
+On any other platform, use Nix below or build from source. Tagged releases additionally carry shell and PowerShell installer scripts and cover more targets; the rolling build does not.
+
 #### macOS / Linux
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/sysprog21/zhtw-mcp/releases/latest/download/zhtw-mcp-installer.sh | sh
+base=https://github.com/sysprog21/zhtw-mcp/releases/download/latest
+case "$(uname -sm)" in
+  "Darwin arm64") asset=zhtw-mcp-aarch64-apple-darwin.tar.gz ;;
+  "Linux x86_64") asset=zhtw-mcp-x86_64-unknown-linux-gnu.tar.gz ;;
+  *) asset=""; echo "no pre-built binary for $(uname -sm)" >&2 ;;
+esac
+[ -n "$asset" ] &&
+  curl -fsSLO "$base/$asset" -O "$base/SHA256SUMS" &&
+  shasum -a 256 --ignore-missing -c SHA256SUMS &&
+  tar -xzf "$asset" zhtw-mcp
 ```
+
+On Linux without `shasum`, use `sha256sum --ignore-missing -c SHA256SUMS` instead.
 
 #### Windows (PowerShell)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/sysprog21/zhtw-mcp/releases/latest/download/zhtw-mcp-installer.ps1 | iex"
+$base = "https://github.com/sysprog21/zhtw-mcp/releases/download/latest"
+$asset = "zhtw-mcp-x86_64-pc-windows-msvc.tar.gz"
+irm "$base/$asset" -OutFile $asset
+irm "$base/SHA256SUMS" -OutFile SHA256SUMS
+$want = ((Select-String -Path SHA256SUMS -SimpleMatch $asset).Line -split '\s+')[0]
+if ((Get-FileHash -Algorithm SHA256 $asset).Hash -ine $want) { throw "checksum mismatch" }
+tar -xzf $asset zhtw-mcp.exe
 ```
+
+Both snippets leave the binary in the current directory; move it somewhere on your `PATH` to run it by name.
 
 ### Nix
 

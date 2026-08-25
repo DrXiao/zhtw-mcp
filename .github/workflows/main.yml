@@ -15,7 +15,11 @@ env:
 
 concurrency:
   group: "ci-${{ github.ref }}"
-  cancel-in-progress: true
+  # Off for main so a run is never killed mid-publish.  This is not free:
+  # pushes to main now queue behind the previous run's whole pipeline.  Only the
+  # in-progress run is protected; a superseded *pending* run is still cancelled,
+  # which is what keeps the queue to one.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   check:
@@ -39,7 +43,7 @@ jobs:
         shared-key: ${{ matrix.os }}
 
     - name: Set up Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@v7
       with:
         python-version: "3.x"
 
@@ -74,16 +78,178 @@ jobs:
     - name: Install Rust toolchain
       run: rustup toolchain install stable --profile minimal
 
+    # Its own key: sharing "ubuntu-24.04" with the check job meant check saved
+    # its debug tree first and rust-cache never overwrites, so the release tree
+    # this job actually builds was never cached.
     - name: Rust cache
       uses: Swatinem/rust-cache@v2
       with:
         prefix-key: "v1-rust"
-        shared-key: "ubuntu-24.04"
+        shared-key: "ubuntu-24.04-size"
 
     - name: Set up Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@v7
       with:
         python-version: "3.x"
 
     - name: make check-size
       run: make check-size
+
+  # Rolling binaries for the `latest` tag.  Versioned releases come from
+  # release.yml (cargo-dist), which covers more targets and ships installers;
+  # this one stays marked as a prerelease so it never wins the /releases/latest
+  # computation away from them.
+  build-prerelease:
+    name: build (${{ matrix.name }})
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - name: macOS arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - name: Windows x86_64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install Rust toolchain
+      run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+
+    # A key of its own: sharing one with the check jobs on ubuntu-24.04 means
+    # whichever finishes first saves, and rust-cache never overwrites, so the
+    # release target tree would rarely survive.
+    - name: Rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: "v1-rust"
+        shared-key: "${{ matrix.os }}-release"
+
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: "3.x"
+
+    # Runs the generator directly rather than through make, which is not
+    # dependable on the Windows runner.  Unlike the Makefile's $(S2T_STAMP)
+    # recipe this skips rustfmt and the stamp: nothing here fmt-checks, and the
+    # minimal toolchain has no rustfmt.  `python` not `python3` is for Windows;
+    # setup-python provides both elsewhere.
+    - name: Build and package
+      shell: bash
+      run: |
+        bin=zhtw-mcp${{ runner.os == 'Windows' && '.exe' || '' }}
+        python scripts/gen-s2t-tables.py
+        cargo build --locked --release --target ${{ matrix.target }}
+        mkdir pkg
+        cp "target/${{ matrix.target }}/release/$bin" LICENSE README.md pkg/
+
+        # Prove the binary we are shipping actually starts.  The check matrix is
+        # ubuntu + macos, so this is the only place the Windows build is run.
+        # 0 is a clean verdict and 1 is a prose gate; both mean it worked.
+        printf '\xe6\xb8\xac\xe8\xa9\xa6\xe6\xaa\x94\xe6\xa1\x88\n' > smoke.txt
+        rc=0; "pkg/$bin" lint smoke.txt || rc=$?
+        [ "$rc" -le 1 ] || { echo "smoke test failed with exit $rc" >&2; exit 1; }
+
+        tar czf "zhtw-mcp-${{ matrix.target }}.tar.gz" -C pkg "$bin" LICENSE README.md
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: zhtw-mcp-${{ matrix.target }}
+        path: zhtw-mcp-${{ matrix.target }}.tar.gz
+        if-no-files-found: error
+        retention-days: 1
+
+  prerelease:
+    needs: [audit, check-size, build-prerelease]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    # Without this the job inherits the 360 minute default, and since main runs
+    # do not cancel each other a wedged gh call would hold the concurrency group
+    # (and every later push to main) for six hours.
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+    - uses: actions/download-artifact@v8
+      with:
+        pattern: zhtw-mcp-*
+        path: dist
+        merge-multiple: true
+
+    # This never *moves* the `latest` git tag.  A download URL keys on the
+    # release's tag name, not on the commit the ref points at, so force-moving
+    # the ref on every build bought nothing.  `gh release create` does create
+    # the tag when it is missing, and --target applies only in that case; if the
+    # tag already exists the release adopts wherever it points, which is why the
+    # commit a build came from is recorded in the notes instead.
+    #
+    # Nothing here deletes the release either.  The README hands out these URLs,
+    # and a delete-then-create cycle 404s them for as long as the upload takes:
+    # the first run of this workflow left a five and a half minute hole.
+    - name: Publish the latest release
+      shell: bash
+      run: |
+        cd dist
+        sha256sum -- *.tar.gz > SHA256SUMS
+
+        # The queue already runs pushes in order, so what this actually catches
+        # is a manual re-run of an older run, plus main moving while this run is
+        # in flight.  Best effort: main can advance again right after the check.
+        tip=$(gh api "repos/$GH_REPO/commits/main" --jq .sha)
+        if [ "$tip" != "$GITHUB_SHA" ]; then
+          echo "::warning::latest not refreshed: main moved to ${tip:0:7}, this run built ${GITHUB_SHA:0:7}"
+          exit 0
+        fi
+
+        # Notes name a commit, so they go up after the archives built from that
+        # commit.  --clobber deletes every matching asset and re-uploads them
+        # concurrently, and gh warns that a failed upload loses the originals,
+        # so the whole set is briefly absent and can stay that way.  Hence the
+        # retry, and the verification below.  --draft=false also recovers a
+        # release left as a draft by a `create` that died mid-upload.
+        notes="Automated build of $GITHUB_SHA on $(date -u +%Y-%m-%d)."
+        upload_rc=0
+        if gh release view latest >/dev/null 2>&1; then
+          gh release upload latest ./* --clobber ||
+            gh release upload latest ./* --clobber || upload_rc=$?
+          # Notes name a commit, so they go up only once the archives from that
+          # commit are in place.  Letting a failed upload through to here would
+          # leave the notes advertising binaries that are not on the release.
+          if [ "$upload_rc" -eq 0 ]; then
+            gh release edit latest --notes "$notes" --prerelease --draft=false
+          fi
+        else
+          gh release create latest ./* --target "$GITHUB_SHA" \
+            --title latest --notes "$notes" --prerelease
+        fi
+
+        # Trust the published set, not the exit status.  Scratch files go to
+        # RUNNER_TEMP so they cannot land in the glob being compared.  Only a
+        # missing asset is fatal: an extra one is someone else's upload or a
+        # leftover from a renamed target, and failing on that would wedge every
+        # later run.
+        printf '%s\n' * | sort > "$RUNNER_TEMP/want"
+        gh release view latest --json assets --jq '.assets[].name' | sort > "$RUNNER_TEMP/got"
+        missing=$(comm -23 "$RUNNER_TEMP/want" "$RUNNER_TEMP/got")
+        extra=$(comm -13 "$RUNNER_TEMP/want" "$RUNNER_TEMP/got")
+        [ -z "$extra" ] || echo "::warning::latest carries assets this build did not produce: $(printf %s "$extra" | tr '\n' ' ')"
+        [ -z "$missing" ] || {
+          echo "::error::latest is missing assets after publish: $(printf %s "$missing" | tr '\n' ' ')"
+          exit 1
+        }
+        [ "$upload_rc" -eq 0 ] ||
+          { echo "::error::asset upload failed even after a retry"; exit 1; }

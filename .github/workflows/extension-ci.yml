@@ -39,7 +39,7 @@ jobs:
         shared-key: "ubuntu-24.04"
 
     - name: Set up Node.js
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v7
       with:
         node-version: "22"
 
@@ -70,14 +70,14 @@ jobs:
         (cd extension-package && zip -r "../$EXTENSION_ZIP" zhtw-mcp-extension)
 
     - name: Upload unpacked extension artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: zhtw-mcp-extension-unpacked
         path: ${{ env.EXTENSION_PACKAGE_DIR }}
         if-no-files-found: error
 
     - name: Upload zipped extension artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: zhtw-mcp-extension-zip
         path: ${{ env.EXTENSION_ZIP }}

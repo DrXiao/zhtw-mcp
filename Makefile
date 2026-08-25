@@ -40,6 +40,10 @@ distclean: clean
 	rm -rf $(OPENCC_DICT_DIR)
 
 check: $(S2T_STAMP)
+# The release binaries are built with --locked, so a Cargo.toml bump against a
+# stale Cargo.lock has to fail here and not in the last job of a CI run.  Same
+# lock cargo audit reads.
+	cargo metadata --locked --format-version 1 >/dev/null
 	cargo test
 	cargo clippy --all-targets -- -D warnings
 # The default feature set is not the only one that ships: the browser extension
