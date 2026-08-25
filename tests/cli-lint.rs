@@ -324,6 +324,54 @@ fn run_lint_args(args: &[&str]) -> Output {
         .unwrap()
 }
 
+#[test]
+fn cli_lint_diff_from_with_no_changes_succeeds() {
+    let output = run_lint_args(&["--diff-from", "HEAD"]);
+    assert!(
+        output.status.success(),
+        "an empty diff should be a clean lint batch: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn cli_lint_cache_hit_preserves_tier2_disambiguation() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("ambiguous.txt");
+    std::fs::write(&file, "學習的進程需要耐心和毅力。\n").unwrap();
+
+    // The fast cache path only trusts files at least one second old.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let run = || {
+        Command::new(binary_path())
+            .args(["lint", file.to_str().unwrap(), "--format", "json"])
+            .env("XDG_CACHE_HOME", dir.path().join("cache"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap()
+    };
+    let first = run();
+    let second = run();
+    let issue = |output: &Output| {
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        json["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|issue| issue["found"] == "進程")
+            .cloned()
+            .unwrap()
+    };
+
+    assert_eq!(
+        issue(&second),
+        issue(&first),
+        "cache hit changed tier-2 output"
+    );
+}
+
 fn run_bin_args(args: &[&str]) -> Output {
     let bin = binary_path();
     Command::new(&bin)

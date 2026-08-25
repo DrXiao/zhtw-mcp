@@ -1,8 +1,8 @@
 // Benchmark for fix tier precision.
 //
-// Demonstrates how each fix tier applies progressively more fixes on
-// realistic mixed-issue text.  Measures: issues detected, fixes applied,
-// fixes skipped, and residual issues per tier.
+// Demonstrates how each fix tier applies progressively more fixes on realistic
+// mixed-issue text. Measures: issues detected, fixes applied, fixes skipped,
+// and residual issues per tier.
 //
 // Run:
 //   cargo test --test fix_tier_benchmark -- --nocapture
@@ -21,8 +21,8 @@ fn load_scanner() -> (Scanner, Segmenter) {
     (scanner, segmenter)
 }
 
-// Mixed text with orthographic issues (punctuation, spacing) and lexical
-// issues (cross-strait terms, confusable terms with context clues).
+// Mixed text with orthographic issues (punctuation, spacing) and lexical issues
+// (cross-strait terms, confusable terms with context clues).
 const MIXED_TEXT: &str = "\
 軟體工程師需要優化數據庫的性能,通過調試程序來排查代碼中的問題。\
 這個操作系統支持並行計算,能夠充分利用多核處理器的性能優勢。\
@@ -118,8 +118,8 @@ fn fix_tier_precision_gradient() {
         results.push(r);
     }
 
-    // Verify the strict superset property: each tier applies strictly more
-    // than the previous (catches regressions where tiers collapse).
+    // Verify the strict superset property: each tier applies strictly more than
+    // the previous (catches regressions where tiers collapse).
     for i in 1..results.len() {
         assert!(
             results[i].fixes_applied > results[i - 1].fixes_applied,

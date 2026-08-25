@@ -72,14 +72,15 @@ where
             Level::INFO => rmcp::model::LoggingLevel::Info,
             _ => return,
         };
-        // Only this crate's events go to the client. The MCP SDK's own
-        // internal tracing is not something a client asked for, and letting it
-        // through would put unrelated notifications ahead of the ones a
-        // request actually produced.
+
+        // Only this crate's events go to the client. The MCP SDK's own internal
+        // tracing is not something a client asked for, and letting it through
+        // would put unrelated notifications ahead of the ones a request
+        // actually produced.
         //
         // The crate itself or a module inside it, not merely a target that
-        // starts with the same letters: `zhtw_mcp_helper` is a different
-        // crate and its logs are no more ours than the SDK's.
+        // starts with the same letters: `zhtw_mcp_helper` is a different crate
+        // and its logs are no more ours than the SDK's.
         if !is_ours(event.metadata().target()) {
             return;
         }
@@ -185,6 +186,7 @@ mod tests {
         let data = &sent[0].data;
         assert_eq!(data["message"], "scan done");
         assert_eq!(data["target"], "zhtw_mcp::trace::tests");
+
         // Numbers and booleans stay typed rather than being stringified, which
         // is the whole reason the visitor implements more than record_debug.
         assert_eq!(data["fields"]["count"], 3);

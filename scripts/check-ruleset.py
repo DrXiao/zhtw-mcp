@@ -822,6 +822,7 @@ def detect_conflicts(
     23. SC char in non-variant rules (pure SC→TC and mixed SC in from)
     24. Stock IT clues on non-technical domains (copy-paste smell)
     25. Country-name convention in context (use "tw"/"cn", not 台灣/中國/大陸)
+    26. Placeholder or mojibake in a to value (U+FFFD, ? or ？)
 
     Advisories (checks 14-16, 22, 24, informational only):
     14. context_clues / negative_context_clues length convention (<=6 chars)
@@ -1698,6 +1699,25 @@ def detect_conflicts(
                     f'ai-filler-punct: "{frm}" is redundant — '
                     f'base rule "{base}" is a deletion rule and scanner '
                     f"auto-consumes trailing {punct}"
+                )
+
+    # 26. Placeholder or mojibake in a suggestion.  U+FFFD is what a bad
+    #     decode leaves behind, and an ASCII question mark in a zh-TW
+    #     suggestion is a stand-in nobody replaced.  Either way the scanner
+    #     would offer it to users verbatim, so this is corruption.
+    #
+    #     Full-width U+FF1F is deliberately not listed: it is ordinary zh-TW
+    #     punctuation, and a rule normalising the half-width "?" to it would
+    #     be correct rather than corrupt.  Flagging it would fail --lint on a
+    #     legitimate rule.
+    for rule in from_set.values():
+        frm = rule["from"]
+        for target in rule.get("to", []):
+            bad = {c for c in target if c in "�?"}
+            if bad:
+                warnings.append(
+                    f'to-placeholder: "{frm}" has to value "{target}" '
+                    f'containing {"".join(sorted(bad))}'
                 )
 
     return warnings, advisories

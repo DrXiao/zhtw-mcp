@@ -1,7 +1,7 @@
 // End-to-end MCP protocol test.
 //
-// Spawns the zhtw-mcp binary, sends JSON-RPC messages over stdin, and
-// verifies the stdout responses match expected structure and content.
+// Spawns the zhtw-mcp binary, sends JSON-RPC messages over stdin, and verifies
+// the stdout responses match expected structure and content.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -50,8 +50,9 @@ fn send_notification(stdin: &mut impl Write, request: &Value) {
 /// Build the binary path. In cargo test, the binary is in target/debug/.
 fn binary_path() -> std::path::PathBuf {
     let mut path = std::env::current_exe().unwrap();
-    // test binary is in target/debug/deps/e2e_mcp-<hash>
-    // the main binary is in target/debug/zhtw-mcp
+
+    // test binary is in target/debug/deps/e2e_mcp-<hash> the main binary is in
+    // target/debug/zhtw-mcp
     path.pop(); // remove test binary name
     if path.ends_with("deps") {
         path.pop(); // remove deps/
@@ -85,6 +86,7 @@ fn spawn_server() -> (
         .expect("spawn zhtw-mcp");
     let stdin = child.stdin.take().unwrap();
     let stdout = BufReader::new(child.stdout.take().unwrap());
+
     // The caller holds the temp dir: dropping it early would pull the config
     // and cache directories out from under a live server.
     (tmp, child, stdin, stdout)
@@ -440,7 +442,9 @@ fn e2e_initialize_and_tools_list() {
     let content_text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let output: Value = serde_json::from_str(content_text).unwrap();
     let issues = output["issues"].as_array().unwrap();
-    // "軟件" in fenced code block should be excluded; only prose occurrences flagged
+
+    // "軟件" in fenced code block should be excluded; only prose occurrences
+    // flagged
     let software_issues: Vec<_> = issues.iter().filter(|i| i["found"] == "軟件").collect();
     assert_eq!(
         software_issues.len(),
@@ -480,8 +484,8 @@ fn e2e_initialize_and_tools_list() {
         .iter()
         .any(|s| s == "裡"));
 
-    // -- E2E: gate rejection (accepted: false, max_errors exceeded) --
-    // "內地" is political_coloring → Severity::Error, which the gate counts.
+    // -- E2E: gate rejection (accepted: false, max_errors exceeded) -- "內地"
+    // is political_coloring → Severity::Error, which the gate counts.
 
     let resp = send_recv(
         &mut stdin,
@@ -500,7 +504,9 @@ fn e2e_initialize_and_tools_list() {
         }),
     );
     assert_eq!(resp["id"], 22);
-    // Gate rejection: isError=true on the result, output JSON has accepted=false
+
+    // Gate rejection: isError=true on the result, output JSON has
+    // accepted=false
     let result = &resp["result"];
     assert_eq!(
         result["isError"], true,
@@ -512,9 +518,9 @@ fn e2e_initialize_and_tools_list() {
     assert_eq!(output["gate"]["enabled"], true);
     assert!(output["gate"]["residual_errors"].as_u64().unwrap() > 0);
 
-    // -- E2E: fix_mode: "lexical_contextual" --
-    // Uses 代碼 (clue-gated: needs 編譯/函式/函數 nearby) + 軟件 (non-clue).
-    // lexical_safe would fix 軟件 but skip 代碼; lexical_contextual fixes both.
+    // -- E2E: fix_mode: "lexical_contextual" -- Uses 代碼 (clue-gated: needs
+    // 編譯/函式/函數 nearby) + 軟件 (non-clue). lexical_safe would fix 軟件 but
+    // skip 代碼; lexical_contextual fixes both.
 
     let resp = send_recv(
         &mut stdin,
@@ -572,7 +578,8 @@ fn e2e_initialize_and_tools_list() {
         "exactly 256 KiB should be accepted"
     );
 
-    // 256 KiB + 1 byte should be rejected with INVALID_PARAMS and structured data.
+    // 256 KiB + 1 byte should be rejected with INVALID_PARAMS and structured
+    // data.
     let over_text = "a".repeat(256 * 1024 + 1);
     let resp = send_recv(
         &mut stdin,
@@ -708,7 +715,8 @@ fn e2e_initialize_and_tools_list() {
         "rule_type should use snake_case name"
     );
 
-    // -- E2E: output: "compact" with fix_mode — text included when fixes applied --
+    // -- E2E: output: "compact" with fix_mode — text included when fixes
+    // applied --
 
     let resp = send_recv(
         &mut stdin,
@@ -793,8 +801,8 @@ fn e2e_initialize_and_tools_list() {
 
 #[test]
 fn e2e_initialize_negotiates_every_supported_version() {
-    // 2025-06-18 used to be answered with 2024-11-05 and a stderr warning.
-    // It is a version this server serves, so it is answered with itself.
+    // 2025-06-18 used to be answered with 2024-11-05 and a stderr warning. It
+    // is a version this server serves, so it is answered with itself.
     for version in ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"] {
         let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
         let resp = send_recv(
@@ -839,6 +847,7 @@ fn e2e_initialize_rejects_inline_only_version() {
             }
         }),
     );
+
     // Refused, but as a wrong entry point rather than an unsupported version:
     // the alternatives offered must not include the one just refused, or the
     // client is sent back to the method it already failed at.
@@ -883,6 +892,7 @@ fn e2e_initialize_rejects_unsupported_version_with_32022() {
         .as_array()
         .expect("the error names the versions on offer");
     assert!(supported.contains(&json!("2024-11-05")), "{resp}");
+
     // Only the handshake-reachable revisions: 2026-07-28 is served, but not
     // from `initialize`, so offering it here would be a dead end.
     assert!(!supported.contains(&json!("2026-07-28")), "{resp}");
@@ -1046,8 +1056,8 @@ fn e2e_every_termination_path_reports_the_code_it_promises() {
         while stdout.read_line(&mut line).unwrap_or(0) > 0 {
             if let Ok(msg) = serde_json::from_str::<Value>(line.trim()) {
                 if msg["id"] == 99 {
-                    // Shape as well as presence: the answer to `shutdown` is
-                    // an empty result, not merely something bearing its id.
+                    // Shape as well as presence: the answer to `shutdown` is an
+                    // empty result, not merely something bearing its id.
                     assert_eq!(msg["result"], json!({}), "{}: shutdown reply", case.what);
                     acknowledged = true;
                 }
@@ -1073,14 +1083,14 @@ fn e2e_every_termination_path_reports_the_code_it_promises() {
 #[test]
 fn e2e_cancelling_a_call_stops_it_waiting_on_sampling() {
     // A cancelled request is not owed an answer and the client that cancelled
-    // it will not send one, so the sampling deadline is time spent for
-    // nothing, with the server lock held throughout. The discriminator is how
-    // soon the next call that needs that lock is served. Waiting the deadline
-    // out costs five seconds a question and the budget allows three, measured
-    // at just over fifteen seconds; observing the cancellation ends the wait
-    // at once and the remaining scan is milliseconds. The threshold sits well
-    // below the five-second deadline rather than at it, so a single call that
-    // had already burned part of its deadline would still be caught.
+    // it will not send one, so the sampling deadline is time spent for nothing,
+    // with the server lock held throughout. The discriminator is how soon the
+    // next call that needs that lock is served. Waiting the deadline out costs
+    // five seconds a question and the budget allows three, measured at just
+    // over fifteen seconds; observing the cancellation ends the wait at once
+    // and the remaining scan is milliseconds. The threshold sits well below the
+    // five-second deadline rather than at it, so a single call that had already
+    // burned part of its deadline would still be caught.
     let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
     let init = send_recv(
         &mut stdin,
@@ -1177,12 +1187,12 @@ fn e2e_cancelling_a_call_stops_it_waiting_on_sampling() {
 
 #[test]
 fn e2e_framing_replies_survive_concurrent_responses() {
-    // The framing layer's own replies are produced inside `receive`, which
-    // RMCP polls in a select! and drops whenever another arm wins. Writing
-    // from in there loses the reply and the line that caused it is already
-    // consumed, so the client waits on an answer that was never written. It
-    // only shows up under concurrent traffic: one bad line on an idle server
-    // is always answered.
+    // The framing layer's own replies are produced inside `receive`, which RMCP
+    // polls in a select! and drops whenever another arm wins. Writing from in
+    // there loses the reply and the line that caused it is already consumed, so
+    // the client waits on an answer that was never written. It only shows up
+    // under concurrent traffic: one bad line on an idle server is always
+    // answered.
     let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
     handshake(&mut stdin, &mut stdout);
 
@@ -1229,10 +1239,10 @@ fn e2e_framing_replies_survive_concurrent_responses() {
 
 #[test]
 fn e2e_initialize_after_discover_answers_the_version_asked_for() {
-    // RMCP patches the negotiated version onto the result only when the
-    // session began with the handshake. Opening with `server/discover` first
-    // takes the other path, where the reply used to name the server default
-    // rather than the version requested.
+    // RMCP patches the negotiated version onto the result only when the session
+    // began with the handshake. Opening with `server/discover` first takes the
+    // other path, where the reply used to name the server default rather than
+    // the version requested.
     let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
     let discover = send_recv(
         &mut stdin,
@@ -1349,11 +1359,11 @@ fn e2e_sampling_reply_reaches_the_server() {
     // the SDK rather than discard: the SDK owns the ids it has outstanding and
     // is the only thing that can match a reply to its request.
     //
-    // The discriminator is time, with a wide margin. A reply that never
-    // arrives costs a full DEFAULT_SAMPLING_TIMEOUT (5s) per call and yields
-    // no answer, while a reply that lands ends the wait immediately, so the
-    // whole exchange is milliseconds of scanning either way. Anything under
-    // the timeout means the answer was received.
+    // The discriminator is time, with a wide margin. A reply that never arrives
+    // costs a full DEFAULT_SAMPLING_TIMEOUT (5s) per call and yields no answer,
+    // while a reply that lands ends the wait immediately, so the whole exchange
+    // is milliseconds of scanning either way. Anything under the timeout means
+    // the answer was received.
     let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
 
     let init = send_recv(
@@ -1442,9 +1452,9 @@ fn e2e_sampling_reply_reaches_the_server() {
 #[test]
 fn e2e_resource_templates_list_is_empty_not_missing() {
     // `resources/templates/list` is a standard request under the `resources`
-    // capability this server advertises, and one of the ten 2026-07-28
-    // defines. Having no templates is not the same as not implementing the
-    // method, so the answer is an empty list rather than METHOD_NOT_FOUND.
+    // capability this server advertises, and one of the ten 2026-07-28 defines.
+    // Having no templates is not the same as not implementing the method, so
+    // the answer is an empty list rather than METHOD_NOT_FOUND.
     let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
     let init = send_recv(
         &mut stdin,
@@ -1540,9 +1550,9 @@ fn e2e_closing_stdin_still_answers_a_request_in_flight() {
 
 #[test]
 fn e2e_refused_handshake_does_not_open_the_gate() {
-    // The gate opens when a handshake succeeds, not when one is attempted.
-    // A version this server does not serve is refused, and the request behind
-    // it must not be served as though the session were established.
+    // The gate opens when a handshake succeeds, not when one is attempted. A
+    // version this server does not serve is refused, and the request behind it
+    // must not be served as though the session were established.
     let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
     let resp = send_recv(
         &mut stdin,
@@ -2327,8 +2337,8 @@ fn e2e_response_shaped_with_id_discarded() {
     writeln!(stdin, "{response_msg}").unwrap();
     stdin.flush().unwrap();
 
-    // No error response expected — verify the server is still alive by
-    // sending a real request and getting a valid response.
+    // No error response expected — verify the server is still alive by sending
+    // a real request and getting a valid response.
     let resp = send_recv(
         &mut stdin,
         &mut stdout,
@@ -2379,7 +2389,8 @@ fn e2e_response_shaped_without_id_discarded() {
 fn e2e_request_with_id_without_method_rejected() {
     let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
 
-    // Request-shaped message WITH id but WITHOUT method: should be rejected with INVALID_REQUEST.
+    // Request-shaped message WITH id but WITHOUT method: should be rejected
+    // with INVALID_REQUEST.
     let request_msg = r#"{"jsonrpc":"2.0","id":999}"#;
     writeln!(stdin, "{request_msg}").unwrap();
     stdin.flush().unwrap();
@@ -2587,7 +2598,8 @@ fn e2e_auto_compact_for_ai_clients() {
     assert!(status.success());
 }
 
-/// Verify explain mode includes explanation annotations and deterministic results.
+/// Verify explain mode includes explanation annotations and deterministic
+/// results.
 #[test]
 fn e2e_explain_mode_and_determinism() {
     let bin = binary_path();
@@ -2665,8 +2677,10 @@ fn e2e_explain_mode_and_determinism() {
     // Issues should be present with explain-specific annotations.
     let issues = output["issues"].as_array().unwrap();
     assert!(!issues.is_empty());
+
     // Verify explain mode actually produces the explanation annotation
-    // (distinct from the `context` field which exists regardless of explain mode).
+    // (distinct from the `context` field which exists regardless of explain
+    // mode).
     let has_explanation = issues.iter().any(|i| i.get("explanation").is_some());
     assert!(
         has_explanation,
@@ -2709,8 +2723,8 @@ fn e2e_explain_mode_and_determinism() {
 fn e2e_reject_unknown_params() {
     let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
 
-    // Send tools/call with a known typo (max_error instead of max_errors)
-    // and an entirely unknown field.
+    // Send tools/call with a known typo (max_error instead of max_errors) and
+    // an entirely unknown field.
     let resp = send_recv(
         &mut stdin,
         &mut stdout,
@@ -2806,11 +2820,13 @@ fn e2e_invalid_profile_structured_error_data() {
         }),
     );
 
-    // Must be INVALID_PARAMS (-32602) at JSON-RPC level, not a tool-level error.
+    // Must be INVALID_PARAMS (-32602) at JSON-RPC level, not a tool-level
+    // error.
     let err = resp.get("error").expect("expected JSON-RPC error");
     assert_eq!(err["code"].as_i64().unwrap(), -32602);
 
-    // Structured data must identify the field, rejected value, and accepted values.
+    // Structured data must identify the field, rejected value, and accepted
+    // values.
     let data = err.get("data").expect("expected structured data field");
     assert_eq!(data["field"], "profile");
     assert_eq!(data["value"], "nonexistent");
@@ -2839,8 +2855,8 @@ fn e2e_server_reads_store_paths_from_config() {
     // the server would answer from the project's overrides while recording into
     // a different translation memory than lint reads.
     //
-    // Two observable proofs, one per store: a suppressed term and a
-    // TM-rejected term both come back as Info instead of Warning.
+    // Two observable proofs, one per store: a suppressed term and a TM-rejected
+    // term both come back as Info instead of Warning.
     let bin = binary_path();
     let tmp_dir = tempfile::tempdir().expect("create temp dir");
     let suppressions_path = tmp_dir.path().join("suppressions.json");
@@ -2852,6 +2868,7 @@ fn e2e_server_reads_store_paths_from_config() {
         ),
     )
     .unwrap();
+
     // A TM entry whose user_chose equals found is a rejection: the user kept
     // the flagged term, so it must stop being a warning.
     let tm_path = tmp_dir.path().join("project-tm.json");

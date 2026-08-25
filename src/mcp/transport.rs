@@ -30,8 +30,10 @@ use rmcp::model::RequestId as PeerRequestId;
 use rmcp::service::{RxJsonRpcMessage, TxJsonRpcMessage};
 use rmcp::transport::Transport;
 use rmcp::RoleServer;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Stdin};
-use tokio::sync::{mpsc, oneshot};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, Stdin,
+};
+use tokio::sync::{mpsc, oneshot, Notify};
 
 use super::types::{
     parse_jsonrpc_line, JsonRpcResponse, RequestId, TransportError, INVALID_REQUEST,
@@ -42,12 +44,16 @@ use super::types::{
 /// Prevents memory exhaustion from a stream that never sends a newline.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
-/// Lifecycle state shared between the framing layer and the request handler.
+/// State shared between the framing layer, the request handler, and the
+/// writer task.
 ///
 /// The framing layer has to answer some messages before RMCP would see them
 /// (a pre-init request, a call after `shutdown`), and the handler is what
 /// learns that `initialize` and `shutdown` happened. One small shared cell
-/// beats routing either concern through the other.
+/// beats routing either concern through the other. The writer task is here
+/// for the same reason: it is spawned before the transport exists, so the
+/// queue it reads and the accounting it settles have to live somewhere both
+/// can reach.
 #[derive(Default)]
 pub struct Lifecycle {
     initialized: AtomicBool,
@@ -66,18 +72,68 @@ pub struct Lifecycle {
     /// is the SDK's notification handler, which owns the judgment cache and so
     /// has to be the one that terminates.
     outbound: std::sync::Mutex<Option<mpsc::UnboundedSender<Outbound>>>,
-    /// Requests accepted whose response has not been written yet, by id.
+    /// Set once a write to stdout has failed, so nothing waits on a reply
+    /// that can no longer be sent.
     ///
-    /// A set rather than a count: a request can stop being owed a response
-    /// without one being sent, when the client cancels it, and a bare counter
-    /// cannot express "this particular one is settled" without risking a
-    /// double retire that would underflow it.
+    /// Per-frame `io::Result`s do not end the session on their own. RMCP
+    /// routes every response and error through `Event::ToSink`, which spawns
+    /// the send and reduces its result to a log line, so a caller returning
+    /// an error there changes nothing. Without this, a dead stdout leaves the
+    /// server reading stdin and accepting requests it can no longer answer.
+    /// `receive` returning `None` is the one signal RMCP always acts on.
+    ///
+    /// Paired with `write_failed_signal` because the two readers need
+    /// different things: `drain_in_flight` polls this between attempts, while
+    /// the read side has to be woken. A stored permit cannot serve both, since
+    /// taking it to answer a poll would swallow the other's wakeup.
+    write_failed: AtomicBool,
+    /// Wakes a read already parked on stdin once `write_failed` is set.
+    ///
+    /// The flag alone is only consulted between lines, and the read it has to
+    /// interrupt can be parked indefinitely: stdout dying does not close
+    /// stdin, so a redirected stdout hitting ENOSPC would otherwise leave the
+    /// process waiting on input it could never answer. `notify_one` keeps the
+    /// wakeup until it is taken, so a failure landing before the read parks is
+    /// not lost, and a wait dropped in favor of the read puts the permit back.
+    write_failed_signal: Notify,
+    /// Request ids still owed a response.
+    ///
+    /// A set rather than a count, and deliberately so on both sides.
+    ///
+    /// Not a per-id count: RMCP keeps one cancellation-token entry per id
+    /// (`local_ct_pool.insert` in its `service.rs`), so a client that reuses
+    /// an id while the first request is still running gets exactly one
+    /// response, and RMCP drops the other with "dropping response for
+    /// cancelled request". Counting two owed responses would then hold end of
+    /// input open for the full drain deadline waiting for a second response
+    /// that RMCP has already discarded. Measured: 30s versus 0s to exit.
+    ///
+    /// Not one global counter either: a request can stop being owed a
+    /// response without one being sent, when the client cancels it, and a
+    /// bare total cannot express "this particular one is settled" without
+    /// risking a double retire that would underflow it.
     in_flight: std::sync::Mutex<std::collections::HashSet<PeerRequestId>>,
 }
 
 impl Lifecycle {
     fn mark_shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
+    }
+
+    /// Record that stdout is gone. Set by the writer before it stops.
+    fn mark_write_failed(&self) {
+        self.write_failed.store(true, Ordering::Release);
+        self.write_failed_signal.notify_one();
+    }
+
+    /// Resolve once stdout has failed, for the read that has to be woken.
+    async fn write_failed_wait(&self) {
+        self.write_failed_signal.notified().await;
+    }
+
+    /// Whether stdout has failed, for the waits that poll rather than park.
+    fn write_failed(&self) -> bool {
+        self.write_failed.load(Ordering::Acquire)
     }
 
     /// The status `exit` terminates with: 0 when `shutdown` came first, 1
@@ -211,8 +267,19 @@ impl Lifecycle {
             answers: None,
             done: Some(done),
         });
-        if queued.is_ok() && tokio::time::timeout(FLUSH_TIMEOUT, written).await.is_err() {
-            tracing::warn!("exiting with output still queued: the client is not reading");
+        if queued.is_ok() {
+            match tokio::time::timeout(FLUSH_TIMEOUT, written).await {
+                Err(_) => {
+                    tracing::warn!("exiting with output still queued: the client is not reading");
+                }
+                // Worth saying out loud rather than exiting quietly: the queue
+                // emptied because stdout broke, not because it was written.
+                Ok(Ok(Err(e))) => tracing::warn!("exiting with output unwritten: {e}"),
+                // Either it was written, or the writer went away without
+                // answering, which leaves nothing to report but also nothing
+                // still queued.
+                Ok(_) => {}
+            }
         }
     }
 
@@ -252,6 +319,11 @@ impl Lifecycle {
     /// A request RMCP never answers stays counted until the drain deadline.
     /// That costs a slower exit rather than a lost response, which is the
     /// direction to err in, and this server answers every request it accepts.
+    ///
+    /// Idempotent on purpose. A request stops being owed a response twice
+    /// when the client cancels it and the response was already past RMCP's
+    /// cancellation check; removing an absent id is a no-op, where a counter
+    /// would underflow.
     pub(crate) fn retire_request(&self, id: &PeerRequestId) {
         self.in_flight
             .lock()
@@ -324,7 +396,56 @@ struct Outbound {
     /// ahead of it. RMCP awaits `send`, and on a refused handshake it tears
     /// the session down as soon as that returns: without this the process
     /// could exit with the refusal still queued.
-    done: Option<oneshot::Sender<()>>,
+    done: Option<oneshot::Sender<std::io::Result<()>>>,
+}
+
+/// Write queued frames in order. Keeping this independent of stdout makes
+/// partial writes and failures observable to the sender that queued a frame.
+///
+/// Every frame is flushed, not just written. `tokio::io::stdout` buffers, so
+/// `write_all` reports success before the blocking write has run and the real
+/// error surfaces on the following flush. Skipping it would hide the failures
+/// this reports.
+///
+/// A request is retired after its write, not when the handler returned: the
+/// response does not exist until it is on the wire, and end of input consults
+/// this to decide whether anything is still owed.
+async fn write_outbound<W: AsyncWrite + Unpin>(
+    out: &mut W,
+    rx: &mut mpsc::UnboundedReceiver<Outbound>,
+    lifecycle: &Lifecycle,
+) {
+    // The error that stopped the writer, once one has. Everything still
+    // queued is then settled from it rather than written, which is what lets
+    // the frames behind a failure report the errno that actually happened
+    // instead of a synthesized BrokenPipe standing in for all of them.
+    let mut failed: Option<std::io::ErrorKind> = None;
+    while let Some(item) = rx.recv().await {
+        let written = match failed {
+            Some(kind) => Err(std::io::Error::from(kind)),
+            None => match out.write_all(&item.frame).await {
+                Ok(()) => out.flush().await,
+                Err(error) => Err(error),
+            },
+        };
+        if let (None, Err(error)) = (failed, written.as_ref()) {
+            failed = Some(error.kind());
+            // Raised before the sender is woken. That wake can resume RMCP,
+            // which re-enters `receive`, and the read has to see the failure
+            // rather than park on a stdin that may never say anything again.
+            lifecycle.mark_write_failed();
+            // Closing is what makes the rest of this loop terminate: senders
+            // are still held by the lifecycle and the transport, so recv would
+            // otherwise wait forever for a frame that can no longer be written.
+            rx.close();
+        }
+        if let Some(done) = item.done {
+            let _ = done.send(written);
+        }
+        if let Some(id) = &item.answers {
+            lifecycle.retire_request(id);
+        }
+    }
 }
 
 /// Build the stdio transport for `lifecycle`.
@@ -341,21 +462,7 @@ pub fn stdio(lifecycle: Arc<Lifecycle>) -> StdioTransport {
         let lifecycle = lifecycle.clone();
         async move {
             let mut out = tokio::io::stdout();
-            while let Some(item) = rx.recv().await {
-                if out.write_all(&item.frame).await.is_ok() {
-                    let _ = out.flush().await;
-                }
-                if let Some(done) = item.done {
-                    let _ = done.send(());
-                }
-                // Retired after the write, not when the handler returned: the
-                // response does not exist until it is on the wire, and end of
-                // input consults this to decide whether anything is still owed.
-                if let Some(id) = &item.answers {
-                    lifecycle.retire_request(id);
-                }
-            }
-            let _ = out.flush().await;
+            write_outbound(&mut out, &mut rx, &lifecycle).await;
         }
     });
     lifecycle.set_outbound(outbound.clone());
@@ -398,13 +505,24 @@ impl StdioTransport {
         &self,
         frame: Vec<u8>,
         answers: Option<PeerRequestId>,
-    ) -> oneshot::Receiver<()> {
+    ) -> oneshot::Receiver<std::io::Result<()>> {
         let (done, written) = oneshot::channel();
-        let _ = self.outbound.send(Outbound {
+        // A refused send hands the frame back, so the id it answers can be
+        // retired from that rather than from a clone kept for the failure.
+        // Reporting through the same channel the caller already awaits keeps
+        // one path out of here rather than a second one beside it.
+        if let Err(mpsc::error::SendError(mut item)) = self.outbound.send(Outbound {
             frame,
             answers,
             done: Some(done),
-        });
+        }) {
+            if let Some(id) = &item.answers {
+                self.lifecycle.retire_request(id);
+            }
+            if let Some(done) = item.done.take() {
+                let _ = done.send(Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)));
+            }
+        }
         written
     }
 }
@@ -473,6 +591,26 @@ async fn read_line<R: AsyncBufRead + Unpin>(
     Ok(line)
 }
 
+/// Read one line, unless stdout fails first. `None` means the session is over.
+///
+/// Selected rather than awaited bare: stdout dying does not close stdin, so
+/// the read can sit on input that is never coming, and a failure noticed only
+/// between lines would never be noticed at all.
+///
+/// Dropping the read here is safe for the same reason a cancelled read is:
+/// `raw` belongs to the caller, so nothing already read is lost.
+async fn read_line_unless_write_failed<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    raw: &mut Vec<u8>,
+    lifecycle: &Lifecycle,
+) -> Option<std::io::Result<ReadLine>> {
+    tokio::select! {
+        biased;
+        () = lifecycle.write_failed_wait() => None,
+        result = read_line(reader, raw) => Some(result),
+    }
+}
+
 /// Consume and discard bytes until a newline or EOF, so the line after an
 /// oversize one still parses.
 async fn drain_until_newline<R: AsyncBufRead + Unpin>(reader: &mut R) -> std::io::Result<bool> {
@@ -538,6 +676,9 @@ async fn drain_in_flight(lifecycle: &Lifecycle, deadline: &mut Option<tokio::tim
     // traffic would otherwise hold the process open indefinitely.
     let deadline = *deadline.get_or_insert_with(|| tokio::time::Instant::now() + DRAIN_TIMEOUT);
     loop {
+        if lifecycle.write_failed() {
+            return;
+        }
         let outstanding = lifecycle.outstanding();
         if outstanding == 0 {
             return;
@@ -546,7 +687,10 @@ async fn drain_in_flight(lifecycle: &Lifecycle, deadline: &mut Option<tokio::tim
             tracing::warn!("end of input with {outstanding} request(s) still running");
             return;
         }
-        tokio::time::sleep(DRAIN_POLL).await;
+        tokio::select! {
+            () = lifecycle.write_failed_wait() => return,
+            () = tokio::time::sleep(DRAIN_POLL) => {},
+        }
     }
 }
 
@@ -691,7 +835,7 @@ impl Transport<RoleServer> for StdioTransport {
             _ => None,
         };
         let queued = match encode(&item) {
-            Ok(frame) => Ok(self.enqueue_tracked(frame, answers)),
+            Ok(frame) => self.enqueue_tracked(frame, answers),
             Err(e) => {
                 // Nothing will be written, so nothing will retire this one
                 // later. Leaving it outstanding would hold end of input open
@@ -699,15 +843,20 @@ impl Transport<RoleServer> for StdioTransport {
                 if let Some(id) = &answers {
                     self.lifecycle.retire_request(id);
                 }
-                Err(std::io::Error::from(e))
+                // Reported the same way a refused send is, so both ways of
+                // never reaching the wire come back through one channel.
+                let (done, written) = oneshot::channel();
+                let _ = done.send(Err(std::io::Error::from(e)));
+                written
             }
         };
         async move {
-            // Resolves when the frame is on the wire, or immediately if the
-            // writer is already gone, which means nothing more will be written
-            // anyway.
-            let _ = queued?.await;
-            Ok(())
+            // Resolves when the frame is on the wire, or immediately if it
+            // never got queued, which means nothing more will be written
+            // anyway. A dropped sender is the writer already gone.
+            queued
+                .await
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?
         }
     }
 
@@ -718,7 +867,17 @@ impl Transport<RoleServer> for StdioTransport {
             // blocks. Request-scoped logs are flushed by the handler instead,
             // which is what keeps them ahead of their own response.
             self.flush_logs();
-            let line = match read_line(&mut self.reader, &mut self.raw).await {
+            // Nothing can be answered once stdout is gone, and RMCP only logs
+            // the send errors that say so. Reading on would accept requests
+            // whose replies go nowhere until stdin happened to close too.
+            let Some(read) =
+                read_line_unless_write_failed(&mut self.reader, &mut self.raw, &self.lifecycle)
+                    .await
+            else {
+                tracing::error!("stdout write failed, closing the session");
+                return None;
+            };
+            let line = match read {
                 Ok(ReadLine::Line(line)) => line,
                 Ok(ReadLine::Eof) => {
                     // Stdin closing means the client stopped sending, not that
@@ -880,9 +1039,171 @@ impl Transport<RoleServer> for StdioTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    /// Fails at one of the two points a write can fail, with a caller-chosen
+    /// kind so the tests can tell a carried error from a synthesized one.
+    struct FailingWriter {
+        on_flush: bool,
+        kind: io::ErrorKind,
+    }
+
+    impl FailingWriter {
+        fn on_write(kind: io::ErrorKind) -> Self {
+            Self {
+                on_flush: false,
+                kind,
+            }
+        }
+
+        /// The shape `tokio::io::stdout` actually fails in: it buffers, so the
+        /// write reports success and the error arrives on the flush behind it.
+        fn on_flush(kind: io::ErrorKind) -> Self {
+            Self {
+                on_flush: true,
+                kind,
+            }
+        }
+    }
+
+    impl AsyncWrite for FailingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.on_flush {
+                Poll::Ready(Ok(buf.len()))
+            } else {
+                Poll::Ready(Err(io::Error::from(self.kind)))
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            if self.on_flush {
+                Poll::Ready(Err(io::Error::from(self.kind)))
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn frame(answers: Option<PeerRequestId>) -> (Outbound, oneshot::Receiver<io::Result<()>>) {
+        let (done, written) = oneshot::channel();
+        (
+            Outbound {
+                frame: b"frame\n".to_vec(),
+                answers,
+                done: Some(done),
+            },
+            written,
+        )
+    }
 
     fn lifecycle() -> Lifecycle {
         Lifecycle::default()
+    }
+
+    #[tokio::test]
+    async fn a_failure_at_either_point_reaches_the_sender_and_stops_the_read() {
+        // Both points matter. A real stdout buffers, so the write reports
+        // success and the error only shows up when the buffer is pushed out:
+        // losing the flush would leave that case undetected entirely.
+        for mut out in [
+            FailingWriter::on_write(io::ErrorKind::ConnectionReset),
+            FailingWriter::on_flush(io::ErrorKind::PermissionDenied),
+        ] {
+            let kind = out.kind;
+            let lifecycle = lifecycle();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let (item, written) = frame(None);
+            tx.send(item).unwrap();
+            drop(tx);
+
+            write_outbound(&mut out, &mut rx, &lifecycle).await;
+            assert_eq!(written.await.unwrap().unwrap_err().kind(), kind);
+            // RMCP only logs the send errors, so raising this is what stops
+            // the server accepting requests it can no longer answer.
+            tokio::time::timeout(Duration::from_secs(1), lifecycle.write_failed_wait())
+                .await
+                .expect("a write failure has to stop the read side");
+        }
+    }
+
+    #[tokio::test]
+    async fn writer_failure_retires_queued_responses() {
+        let lifecycle = lifecycle();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut queued = Vec::new();
+        for id in [1, 2] {
+            let id = PeerRequestId::Number(id);
+            lifecycle.accept_request(id.clone());
+            let (item, written) = frame(Some(id));
+            tx.send(item).unwrap();
+            queued.push(written);
+        }
+
+        // `tx` stays alive on purpose. Both the lifecycle and the transport
+        // hold sender clones in the real thing, so the drain has to close the
+        // receiver itself; without that this waits forever for a frame that
+        // can no longer be written.
+        let mut out = FailingWriter::on_write(io::ErrorKind::ConnectionReset);
+        let drained = tokio::time::timeout(
+            Duration::from_secs(1),
+            write_outbound(&mut out, &mut rx, &lifecycle),
+        )
+        .await;
+        assert!(drained.is_ok(), "the drain must not wait on a live sender");
+
+        assert_eq!(lifecycle.outstanding(), 0);
+        // Every frame behind the failure learns why, not a stand-in for it.
+        for written in queued {
+            assert_eq!(
+                written.await.unwrap().unwrap_err().kind(),
+                io::ErrorKind::ConnectionReset
+            );
+        }
+        assert!(
+            tx.send(frame(None).0).is_err(),
+            "a closed queue must reject anything sent after the failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_parked_read_gives_up_when_stdout_fails() {
+        // The whole point of the signal. Stdout dying does not close stdin,
+        // so a failure noticed only between lines would never be noticed at
+        // all: this read is parked on a client that has stopped talking.
+        let lifecycle = Arc::new(lifecycle());
+        // Held open, so the read parks rather than seeing end of input.
+        let (client, _server) = tokio::io::duplex(64);
+        let read = tokio::spawn({
+            let lifecycle = lifecycle.clone();
+            async move {
+                let mut reader = BufReader::new(client);
+                let mut raw = Vec::new();
+                read_line_unless_write_failed(&mut reader, &mut raw, &lifecycle)
+                    .await
+                    .is_none()
+            }
+        });
+        // Let the read park before the failure lands, which is the ordering
+        // that has no other way out.
+        tokio::task::yield_now().await;
+
+        lifecycle.mark_write_failed();
+
+        let gave_up = tokio::time::timeout(Duration::from_secs(1), read)
+            .await
+            .expect("a parked read must give up, not wait on input that is not coming")
+            .unwrap();
+        assert!(gave_up, "the failure has to win the select, not the read");
     }
 
     fn req(method: &str, id: Option<i64>) -> super::super::types::JsonRpcRequest {
@@ -1060,6 +1381,78 @@ mod tests {
             .expect("the drain returns once the response exists");
     }
 
+    #[tokio::test]
+    async fn a_reused_id_does_not_hold_the_drain_open() {
+        // RMCP keeps one cancellation-token entry per request id, so a client
+        // that reuses an id while the first request is still running is
+        // answered once and RMCP discards the other response. Counting two
+        // owed responses here would hold end of input open for the full drain
+        // deadline waiting for a reply that no longer exists: measured at 30s
+        // to exit instead of 0s. One entry per id is what RMCP will deliver.
+        let lifecycle = Lifecycle::default();
+        let id = PeerRequestId::Number(7);
+        lifecycle.accept_request(id.clone());
+        lifecycle.accept_request(id.clone());
+        assert_eq!(lifecycle.outstanding(), 1, "one id, one response owed");
+
+        lifecycle.retire_request(&id);
+        assert_eq!(lifecycle.outstanding(), 0);
+        tokio::time::timeout(DRAIN_TIMEOUT, drain_in_flight(&lifecycle, &mut None))
+            .await
+            .expect("the one response RMCP sends must release the drain");
+    }
+
+    #[test]
+    fn retiring_a_request_twice_is_harmless() {
+        // The double retire the set exists to absorb: a cancellation settles
+        // the request, and a response already past RMCP's cancellation check
+        // arrives afterwards and settles it again.
+        let lifecycle = Lifecycle::default();
+        let id = PeerRequestId::Number(1);
+        lifecycle.accept_request(id.clone());
+        lifecycle.retire_request(&id);
+        lifecycle.retire_request(&id);
+        lifecycle.retire_request(&PeerRequestId::Number(99));
+        assert_eq!(lifecycle.outstanding(), 0);
+
+        // Still usable afterwards rather than stuck at a wrapped count.
+        lifecycle.accept_request(id);
+        assert_eq!(lifecycle.outstanding(), 1);
+    }
+
+    #[test]
+    fn distinct_ids_are_tracked_separately() {
+        let lifecycle = Lifecycle::default();
+        lifecycle.accept_request(PeerRequestId::Number(1));
+        lifecycle.accept_request(PeerRequestId::Number(2));
+        assert_eq!(lifecycle.outstanding(), 2);
+
+        lifecycle.retire_request(&PeerRequestId::Number(2));
+        assert_eq!(
+            lifecycle.outstanding(),
+            1,
+            "answering one request must not settle the other"
+        );
+        lifecycle.retire_request(&PeerRequestId::Number(1));
+        assert_eq!(lifecycle.outstanding(), 0);
+    }
+
+    #[tokio::test]
+    async fn end_of_input_stops_when_stdout_fails() {
+        let lifecycle = Lifecycle::default();
+        lifecycle.accept_request(PeerRequestId::Number(1));
+
+        let mut deadline = None;
+        let mut drain = std::pin::pin!(drain_in_flight(&lifecycle, &mut deadline));
+        let waited = tokio::time::timeout(Duration::from_millis(20), &mut drain).await;
+        assert!(waited.is_err(), "an in-flight request starts the EOF drain");
+
+        lifecycle.mark_write_failed();
+        tokio::time::timeout(Duration::from_secs(1), drain)
+            .await
+            .expect("a failed stdout stops the EOF drain immediately");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn end_of_input_gives_up_on_a_request_that_never_finishes() {
         let lifecycle = Lifecycle::default();
@@ -1113,6 +1506,24 @@ mod tests {
             panic!("a line of exactly MAX_LINE_BYTES fits");
         };
         assert_eq!(line.len(), MAX_LINE_BYTES);
+    }
+
+    #[tokio::test]
+    async fn a_read_resumed_mid_character_still_decodes() {
+        // `raw` outlives one call on purpose: RMCP polls `receive` inside a
+        // select! and drops the read whenever another arm wins, which can
+        // land between the bytes of one character. The decode runs once on
+        // the reassembled buffer, so the halves have to be carried as bytes
+        // rather than decoded apart and rejected as malformed.
+        let mut raw = vec![0xE4, 0xBD]; // the first two bytes of 你
+        let rest = [0xA0, b'\n'];
+        let mut reader = BufReader::new(&rest[..]);
+
+        let ReadLine::Line(line) = read_line(&mut reader, &mut raw).await.unwrap() else {
+            panic!("the halves of one character must reassemble");
+        };
+        assert_eq!(line, "你");
+        assert!(raw.is_empty(), "a delivered line must not stay buffered");
     }
 
     #[tokio::test]
