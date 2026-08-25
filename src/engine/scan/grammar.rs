@@ -4272,6 +4272,48 @@ fn scan_zy5_long_premodifier(
     }
 }
 
+/// The smallest right edge at which the region starting at `region_start`
+/// opens a predicate, or `None` if it never does.
+///
+/// ZY5 asks that question of a region whose left edge is fixed (the first 的)
+/// and whose right edge grows with each candidate. Asked directly it rescans
+/// the region every time, which is what kept the walk quadratic. Asked once,
+/// each candidate becomes a comparison.
+///
+/// This works because a marker's verdict does not depend on where the region
+/// ends. `opens_a_predicate` reads its windows out of the region, so a right
+/// edge falling inside a marker's tail window truncates it; here the windows
+/// come from the span, so they read the same whatever the edge. The two agree
+/// for the edges ZY5 actually asks about: the region always ends at a 的, so
+/// a truncated window would have to spell a `MARKER_WORDS` entry containing
+/// 的, and none of them contain it at all. The left edge is fixed, so its own
+/// window is decided once either way.
+fn first_predicate_close(span: &str, region_start: usize) -> Option<usize> {
+    const CHAR_LEN: usize = '就'.len_utf8();
+    const WORD_LEN: usize = 2 * CHAR_LEN;
+    let is_word = |window: Option<&str>| window.is_some_and(|w| MARKER_WORDS.contains(&w));
+
+    let region = &span[region_start..];
+    let mut earliest: Option<usize> = None;
+    for marker in PREDICATE_MARKERS {
+        for (at, matched) in region.match_indices(marker) {
+            let head = at
+                .checked_sub(CHAR_LEN)
+                .and_then(|q| region.get(q..q + WORD_LEN));
+            let p = region_start + at;
+            if is_word(head) || is_word(span.get(p..p + WORD_LEN)) {
+                continue;
+            }
+            // The region has to reach past the marker for it to be in it.
+            let close = p + matched.len();
+            if earliest.is_none_or(|best| close < best) {
+                earliest = Some(close);
+            }
+        }
+    }
+    earliest
+}
+
 /// True if `s` contains an adverb or auxiliary that opens a predicate.
 ///
 /// The multi-character markers are unambiguous. A single-character one counts
@@ -4287,6 +4329,9 @@ fn scan_zy5_long_premodifier(
 /// function words (就開始, 就變成, 就徹底, 卻依然, 才慢慢), so any closed set
 /// misses most of them and the false positive this guard exists to stop comes
 /// straight back. For a linter the quiet miss is the right failure.
+/// The direct form of the question, kept as the definition
+/// `first_predicate_close` is checked against and used only by that check.
+#[cfg(test)]
 fn opens_a_predicate(s: &str) -> bool {
     // Every listed word is two characters with the marker as its head or its
     // tail, so the mask is two lookups: the pair starting at the marker, and
@@ -4327,7 +4372,7 @@ const MARKER_WORDS: &[&str] = &[
     "也許",
 ];
 
-/// Adverbs and auxiliaries that open a predicate.  See `opens_a_predicate`.
+/// Adverbs and auxiliaries that open a predicate.  See `first_predicate_close`.
 /// 要 and 能 are excluded because they would match inside 需要 and 才能, which
 /// appear in genuine pre-modifier chains.
 const PREDICATE_MARKERS: &[&str] = &[
@@ -4354,8 +4399,56 @@ fn emit_zy5_span_if_qualifies(
         return;
     }
     let span = &sent_text[span_start..span_end];
-    let mut best_candidate: Option<(usize, usize, usize)> = None;
+
+    // Every candidate is a prefix of the span, so the tests that look at a
+    // prefix are answered once here rather than recomputed per 的. Rescanning
+    // them made the walk quadratic in the number of 的, which the early exit
+    // below only bounds when the noun run happens to reach the end of the
+    // span: one Latin character or digit stops the run short and the walk
+    // goes back to rescanning everything.
+    if span
+        .chars()
+        .next()
+        .is_some_and(|ch| matches!(ch, '我' | '你' | '他' | '她' | '它' | '咱' | '您'))
+    {
+        // Candidates all start at the span, so this rejects every one of them.
+        return;
+    }
+
     let de_len = '的'.len_utf8();
+
+    // The 的 that count toward a candidate are those before its end, so their
+    // positions are collected once and each candidate takes a slice of them.
+    // They cannot be accumulated as the walk goes: a noun run is CJK and 的 is
+    // CJK, so a candidate swallows 的 the walk has not reached yet.
+    //
+    // Collected on first use rather than up front. Most comma-free spans in
+    // ordinary prose hold a 的 or two and fail an earlier gate, so building
+    // this for every span allocates for spans that never read it.
+    let mut de_positions: Option<Vec<usize>> = None;
+
+    // The verbs are all two CJK characters, so a verb straddling the boundary
+    // between one scan and the next spans at most this many bytes.
+    const MAX_VERB_BYTES: usize = 6;
+    debug_assert!(PREDICATE_VERBS.iter().all(|v| v.len() <= MAX_VERB_BYTES));
+
+    let mut best_candidate: Option<(usize, usize, usize)> = None;
+    // The prefix before the 的 only grows, so it is scanned for a predicate
+    // verb once in total: each pass covers what the last one had not reached,
+    // plus enough overlap for a verb lying across the seam.
+    let mut verb_scanned_to = 0usize;
+    let mut verb_seen = false;
+    // Computed on the first candidate that needs it, since the region it
+    // covers is the same for all of them.
+    let mut predicate_close: Option<Option<usize>> = None;
+    // Only read by the debug assertion below, which guards the reasoning the
+    // predicate break depends on.
+    #[cfg(debug_assertions)]
+    let mut furthest_candidate_end = 0usize;
+    // Characters in span[..counted_to], carried across iterations so the whole
+    // span is walked once in total rather than once per 的.
+    let mut chars_before = 0usize;
+    let mut counted_to = 0usize;
     let mut from = 0usize;
     while let Some(p) = span[from..].find('的') {
         let rel_de = from + p;
@@ -4365,58 +4458,79 @@ fn emit_zy5_span_if_qualifies(
             continue;
         }
 
+        chars_before += span[counted_to..rel_de].chars().count();
+        counted_to = rel_de;
+
         let noun_tail = &span[rel_de + de_len..];
-        let noun_len = noun_tail
-            .chars()
-            .take_while(|&ch| is_cjk_ideograph(ch))
-            .map(char::len_utf8)
-            .sum::<usize>();
+        let mut noun_len = 0usize;
+        let mut noun_chars = 0usize;
+        for ch in noun_tail.chars().take_while(|&ch| is_cjk_ideograph(ch)) {
+            noun_len += ch.len_utf8();
+            noun_chars += 1;
+        }
         if noun_len == 0 {
             continue;
         }
 
         let candidate_end = rel_de + de_len + noun_len;
-        let candidate = &span[..candidate_end];
-        let char_count = candidate.chars().count();
+        // The 的 itself, plus everything before it and the noun run after it.
+        let char_count = chars_before + 1 + noun_chars;
         if char_count < min_chars {
             continue;
         }
-        let prefix_before_first_de = &candidate[..rel_de];
-        if PREDICATE_VERBS
-            .iter()
-            .any(|verb| prefix_before_first_de.contains(verb))
-        {
-            continue;
+        if !verb_seen && rel_de > verb_scanned_to {
+            let mut window_start = verb_scanned_to.saturating_sub(MAX_VERB_BYTES - 1);
+            while !span.is_char_boundary(window_start) {
+                window_start -= 1;
+            }
+            let window = &span[window_start..rel_de];
+            verb_seen = PREDICATE_VERBS.iter().any(|verb| window.contains(verb));
+            verb_scanned_to = rel_de;
         }
-        if candidate
-            .chars()
-            .next()
-            .is_some_and(|ch| matches!(ch, '我' | '你' | '他' | '她' | '它' | '咱' | '您'))
-        {
-            continue;
+        if verb_seen {
+            // The prefix only grows, so no later candidate can lose the verb.
+            break;
         }
 
-        let mut de_count = 0usize;
-        let mut candidate_from = 0usize;
-        let mut de_bounds: Option<(usize, usize)> = None;
-        while let Some(inner_p) = candidate[candidate_from..].find('的') {
-            let rel_inner = candidate_from + inner_p;
-            let abs_inner = sent_offset + span_start + rel_inner;
-            candidate_from = rel_inner + de_len;
-            if is_excluded(abs_inner, abs_inner + de_len, excluded) {
-                continue;
-            }
-            let bounds = de_bounds.get_or_insert((rel_inner, rel_inner));
-            bounds.1 = rel_inner;
-            de_count += 1;
+        let de_positions = de_positions.get_or_insert_with(|| {
+            span.match_indices('的')
+                .map(|(at, _)| at)
+                .filter(|&at| {
+                    let abs = sent_offset + span_start + at;
+                    !is_excluded(abs, abs + de_len, excluded)
+                })
+                .collect()
+        });
+        // Both the check and the state it needs are debug-only, so release
+        // builds carry neither.
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(
+                candidate_end >= furthest_candidate_end,
+                "candidate ends must not go backwards, or the predicate break below is wrong"
+            );
+            furthest_candidate_end = candidate_end;
         }
+        let de_count = de_positions.partition_point(|&at| at < candidate_end);
         if de_count < min_de {
             continue;
         }
         // A predicate between the first and last 的 means separate phrases.
-        let between = de_bounds.and_then(|(first, last)| candidate.get(first + de_len..last));
-        if between.is_some_and(opens_a_predicate) {
-            continue;
+        // The region starts at the first 的, which never moves, so the answer
+        // for every candidate comes from one pass built on first use.
+        let region_start = de_positions[0] + de_len;
+        let region_end = de_positions[de_count - 1];
+        if region_end > region_start {
+            let close =
+                *predicate_close.get_or_insert_with(|| first_predicate_close(span, region_start));
+            if close.is_some_and(|close| close <= region_end) {
+                // `close` is fixed for the span and `region_end` only grows,
+                // so every later candidate lands here too. Walking on costs a
+                // noun run and a character count per remaining 的 to reach the
+                // same answer, which on a span with thousands of them is the
+                // whole rest of the walk.
+                break;
+            }
         }
 
         let abs_start = sent_offset + span_start;
@@ -4430,6 +4544,11 @@ fn emit_zy5_span_if_qualifies(
             .is_none_or(|(best_end, _, _)| candidate_end > *best_end);
         if should_replace {
             best_candidate = Some((candidate_end, char_count, de_count));
+        }
+        // Only a longer candidate can replace this one, and none reaches past
+        // the end of the span.
+        if candidate_end == span.len() {
+            break;
         }
     }
 
@@ -7611,6 +7730,60 @@ mod tests {
             crate::engine::translationese_score::TranslationeseDomain::General,
         );
         assert!(fires(&issues, "ZY5"), "expected ZY5: {issues:?}");
+    }
+
+    #[test]
+    fn predicate_scan_agrees_with_the_direct_form() {
+        let cases = [
+            "他就走了的東西的樣子",
+            "這個可以用的方法的問題",
+            "就地取材的方式的結果", // 就 heads a word that is not masked
+            "他的成就的意義的說明", // 就 as the tail of 成就: masked by the head
+            "剛才的說法的意思",     // 才 as the tail of 剛才
+            "方便的方式的結果",     // 便 as the tail of 方便
+            "忘卻的往事的痕跡",     // 卻 as the tail of 忘卻
+            "已經完成的工作的內容",
+            "東西的樣子的問題就", // marker flush against the right edge
+            "正在進行的計畫的目標",
+            "沒有任何標記的一般文字",
+            "才對的說法的意思",
+        ];
+        // Only right edges that fall on a 的 are checked, because those are
+        // the only ones ZY5 asks about, and they are what makes reading the
+        // windows from the span rather than the region equivalent.
+        for case in cases {
+            for lo in (0..case.len()).filter(|&i| case.is_char_boundary(i)) {
+                let close = first_predicate_close(case, lo);
+                for (hi, _) in case.match_indices('的').filter(|&(at, _)| at >= lo) {
+                    assert_eq!(
+                        close.is_some_and(|close| close <= hi),
+                        opens_a_predicate(&case[lo..hi]),
+                        "case {case:?} region {lo}..{hi} = {:?}",
+                        &case[lo..hi]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zy5_reports_a_span_reaching_the_last_noun() {
+        // Pins what the early exit depends on: the reported span runs to the
+        // end of the comma-free segment, so stopping at the first candidate to
+        // reach that end loses nothing. It reaches the end because the noun
+        // run after 的 is taken over CJK characters and 的 is one of them, so
+        // the run swallows the following phrases.
+        let text = "那個在車站外面的雨裡等了三個小時的男人的外套";
+        let issues = scan_general(text);
+        let zy5 = issues
+            .iter()
+            .find(|i| i.context.as_deref().is_some_and(|c| c.contains("ZY5")))
+            .unwrap_or_else(|| panic!("expected ZY5: {issues:?}"));
+        assert_eq!(
+            zy5.offset + zy5.length,
+            text.len(),
+            "the reported span must reach the last noun: {zy5:?}"
+        );
     }
 
     fn scan_general(text: &str) -> Vec<Issue> {
