@@ -839,6 +839,7 @@ fn new_rules_skip_their_boundary_collisions() {
     assert_clean("工人用帆布遮掩碼頭的貨櫃，網路攝影機拍不到", "掩碼");
     // 被丟包 is the colloquial "stood up", a homograph rather than a boundary.
     assert_clean("網路上流傳很多被丟包的影片，真的很誇張", "丟包");
+    assert_clean("官方文件提供了完整的 C++ 範例程式碼供開發者參考。", "例程");
 }
 
 #[test]
