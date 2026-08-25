@@ -891,7 +891,7 @@ fn run_server(
         }
     };
 
-    let mut server = zhtw_mcp::mcp::tools::Server::new(
+    let server = zhtw_mcp::mcp::tools::Server::new(
         store,
         suppression_store,
         pack_store,
@@ -901,9 +901,58 @@ fn run_server(
 
     tracing::info!("zhtw-mcp server starting on stdio");
 
-    zhtw_mcp::mcp::transport::run_stdio(&mut server)?;
+    // One stdio connection, one server behind one lock: a worker pool per core
+    // would be idle threads. The lint pipeline runs on the blocking pool so it
+    // never stalls the protocol loop.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let outcome = runtime.block_on(async {
+        use rmcp::ServiceExt;
+        let service = zhtw_mcp::mcp::sdk::SdkServer::new(server);
+        let transport = zhtw_mcp::mcp::transport::stdio(service.lifecycle());
+        let running = match service.serve(transport).await {
+            Ok(running) => running,
+            // A client that closed the pipe before the handshake is a client
+            // that went away, not a failure to report: the hand-rolled
+            // transport returned cleanly on EOF and supervisors still probe
+            // this binary by spawning it and closing stdin.
+            Err(rmcp::service::ServerInitializeError::ConnectionClosed(reason)) => {
+                tracing::info!("client disconnected before initialize: {reason}");
+                return Ok(());
+            }
+            // A pre-handshake request the SDK answered and then declined to
+            // continue from, which in practice is a `server/discover` missing
+            // the per-request metadata its revision requires. The client has
+            // its error; ending quietly is the whole of the outcome.
+            Err(rmcp::service::ServerInitializeError::ExpectedInitializeRequest(message)) => {
+                tracing::warn!("client ended the session before initialize: {message:?}");
+                return Ok(());
+            }
+            // The client asked for a protocol revision this server does not
+            // serve and was told so, with the list it can choose from. The
+            // handshake failing ends the session, but a negotiation that
+            // reached a definite answer is not a crash to report as one.
+            Err(rmcp::service::ServerInitializeError::InitializeFailed(error)) => {
+                tracing::warn!("handshake refused: {error:?}");
+                return Ok(());
+            }
+            Err(e) => return Err(anyhow::Error::from(e)),
+        };
+        running.waiting().await?;
+        Ok::<(), anyhow::Error>(())
+    });
 
-    Ok(())
+    // End of input is bounded on purpose: the transport waits a fixed while
+    // for responses still owed and then reports EOF regardless. Dropping the
+    // runtime here would undo that, because a runtime waits for its blocking
+    // tasks with no deadline and the lint runs on that pool. A scan wedged
+    // past the drain would hold the process open indefinitely, having already
+    // been given up on. Shutting down with a deadline keeps the exit bounded;
+    // whatever the scan still held is lost either way, and the judgment cache
+    // is flushed on the `exit` path rather than here.
+    runtime.shutdown_timeout(zhtw_mcp::mcp::transport::BLOCKING_SHUTDOWN_GRACE);
+    outcome
 }
 
 // Lint subcommand
@@ -1613,6 +1662,20 @@ impl LintTotals {
     }
 }
 
+/// How to parse a file: what `--content-type` says, or what its name implies.
+///
+/// An unrecognized `--content-type` falls back to the name rather than being
+/// rejected, which is the behavior the flag has always had.
+fn content_type_for(
+    override_name: Option<&str>,
+    file_arg: &str,
+) -> zhtw_mcp::engine::scan::ContentType {
+    use zhtw_mcp::engine::scan::ContentType;
+    override_name
+        .and_then(ContentType::from_name)
+        .unwrap_or_else(|| ContentType::from_file_name(file_arg))
+}
+
 fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     let c = if use_color() { &COLORS_ON } else { &COLORS_OFF };
 
@@ -1664,22 +1727,7 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     // making it Fn + Send + Sync.
     let fix_mode_str = format!("{:?}", params.fix_mode);
     let scan_file = |file_arg: &str| -> ScanResult {
-        let content_type = match params.content_type_override {
-            Some("markdown") => zhtw_mcp::engine::scan::ContentType::Markdown,
-            Some("markdown-scan-code") => zhtw_mcp::engine::scan::ContentType::MarkdownScanCode,
-            Some("yaml") => zhtw_mcp::engine::scan::ContentType::Yaml,
-            Some("plain") => zhtw_mcp::engine::scan::ContentType::Plain,
-            Some(_) | None => {
-                let lower = file_arg.to_ascii_lowercase();
-                if lower.ends_with(".md") || lower.ends_with(".markdown") {
-                    zhtw_mcp::engine::scan::ContentType::Markdown
-                } else if lower.ends_with(".yml") || lower.ends_with(".yaml") {
-                    zhtw_mcp::engine::scan::ContentType::Yaml
-                } else {
-                    zhtw_mcp::engine::scan::ContentType::Plain
-                }
-            }
-        };
+        let content_type = content_type_for(params.content_type_override, file_arg);
 
         let cache_params = zhtw_mcp::cache::ScanParams {
             ruleset_hash: ruleset_hash.clone(),
@@ -2438,7 +2486,7 @@ fn run_convert(
     overrides_path: PathBuf,
     #[cfg(feature = "translate")] verify: bool,
 ) -> Result<()> {
-    use zhtw_mcp::engine::scan::{ContentType, Scanner};
+    use zhtw_mcp::engine::scan::Scanner;
     use zhtw_mcp::fixer::{apply_fixes_with_context, FixMode};
     use zhtw_mcp::rules::loader::load_embedded_ruleset;
     use zhtw_mcp::rules::store::OverrideStore;
@@ -2475,24 +2523,16 @@ fn run_convert(
     let scanner = Scanner::new(spelling_rules, case_rules);
 
     // Determine content type.
-    let content_type = match content_type_str {
-        Some("markdown" | "md") => ContentType::Markdown,
-        Some("markdown-scan-code") => ContentType::MarkdownScanCode,
-        Some("yaml" | "yml") => ContentType::Yaml,
-        Some("plain") => ContentType::Plain,
-        _ => {
-            // Auto-detect from first file extension.
-            let first_file = file_args.iter().find(|a| *a != "--");
-            match first_file
-                .and_then(|f| Path::new(f).extension())
-                .and_then(|e| e.to_str())
-            {
-                Some("md") => ContentType::Markdown,
-                Some("yml" | "yaml") => ContentType::Yaml,
-                _ => ContentType::Plain,
-            }
-        }
-    };
+    // Same rule as the lint path. Keeping a second copy here had convert
+    // reading `.markdown` and `README.MD` as plain text, so it rewrote what a
+    // code fence was there to protect.
+    let content_type = content_type_for(
+        content_type_str,
+        file_args
+            .iter()
+            .find(|a| *a != "--")
+            .map_or("", |f| f.as_str()),
+    );
 
     // Step 3: Iterative fix loop — scan + fix until convergence or max rounds.
     let mut text = s2t_output;
@@ -2937,6 +2977,36 @@ fn is_excluded(path: &str, patterns: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn content_type_comes_from_the_flag_then_the_file_name() {
+        use zhtw_mcp::engine::scan::ContentType;
+
+        // The flag wins, whatever the name says.
+        assert_eq!(
+            content_type_for(Some("yaml"), "notes.md"),
+            ContentType::Yaml
+        );
+        assert_eq!(
+            content_type_for(Some("markdown-scan-code"), "notes.txt"),
+            ContentType::MarkdownScanCode
+        );
+
+        // Without one, the name decides, case-insensitively.
+        assert_eq!(content_type_for(None, "README.MD"), ContentType::Markdown);
+        assert_eq!(content_type_for(None, "a.markdown"), ContentType::Markdown);
+        assert_eq!(content_type_for(None, "conf.yml"), ContentType::Yaml);
+        assert_eq!(content_type_for(None, "conf.YAML"), ContentType::Yaml);
+        assert_eq!(content_type_for(None, "plain.txt"), ContentType::Plain);
+        assert_eq!(content_type_for(None, "--"), ContentType::Plain);
+
+        // An unrecognized flag value falls back to the name rather than
+        // failing, which is what the flag has always done.
+        assert_eq!(
+            content_type_for(Some("nonsense"), "a.md"),
+            ContentType::Markdown
+        );
+    }
     use super::*;
 
     /// Parse a command line written without the program name.

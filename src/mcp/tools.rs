@@ -11,15 +11,15 @@ use serde_json::{json, Value};
 
 use super::prompts;
 use super::resources;
+use rmcp::model::{
+    CacheScope, CallToolResult, ContentBlock, GetPromptResult, JsonObject, ListPromptsResult,
+    ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, ReadResourceResult, Tool,
+    ToolAnnotations,
+};
+use rmcp::ErrorData;
+
 use super::sampling::{refine_issues_with_sampling, SamplingBridge, SamplingStats};
 use super::telemetry::{TelemetryMetrics, TokenTelemetry};
-use super::types::{
-    CallToolParams, CallToolResult, ClientCapabilities, InitializeParams, InitializeResult,
-    JsonRpcRequest, JsonRpcResponse, PromptCapability, PromptGetParams, ResourceCapability,
-    ResourceReadParams, ServerCapabilities, ServerInfo, ToolAnnotations, ToolCapability, ToolDef,
-    ToolsListResult, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, MCP_PROTOCOL_VERSION,
-    METHOD_NOT_FOUND, SERVER_NOT_INITIALIZED,
-};
 use crate::audit::Trace;
 use crate::engine::disambig::{disambiguate_batch, DisambigConfig, DisambigStats};
 use crate::engine::s2t::S2TConverter;
@@ -36,10 +36,23 @@ use crate::rules::ruleset::Ruleset;
 use crate::rules::ruleset::{Issue, IssueType, PoliticalStance, Profile, ResolutionTier, Severity};
 use crate::rules::store::{OverrideStore, PackStore, SuppressionStore, TranslationMemoryStore};
 
-/// The MCP tool server. Holds the compiled scanner, override/pack stores,
-/// ruleset metadata, and client capability information.
-pub struct Server {
+/// What the server reads and never changes: the compiled scanner and the
+/// ruleset metadata derived from it.
+///
+/// Split out of `Server` so the handlers that only read it need no lock: a
+/// lint holds the server mutex for its whole run, and `resources/read` has no
+/// reason to queue behind one.
+pub struct Catalog {
     scanner: Scanner,
+    ruleset_hash: String,
+    /// Rendered `zh-tw://dictionary/ambiguous` payload, built on first read.
+    ambiguous_dict: std::sync::OnceLock<String>,
+}
+
+/// The MCP tool server. Holds the read-only [`Catalog`], the override and
+/// suppression stores, and the state the handshake and the scan mutate.
+pub struct Server {
+    catalog: Arc<Catalog>,
     /// SC→TC converter for auto-converting Simplified Chinese input.
     /// Built lazily on first Simplified input: its automaton costs ~200ms to
     /// construct, which would otherwise sit on the startup/handshake path, and
@@ -48,16 +61,9 @@ pub struct Server {
     suppression_store: SuppressionStore,
     /// Translation memory: persistent correction tracking.
     tm_store: Option<TranslationMemoryStore>,
-    ruleset_hash: String,
     /// Span-level judgment cache for persistent LLM disambiguation results
     /// (51.4).
     judgment_cache: crate::rules::judgment_cache::JudgmentCache,
-    /// Parsed client capabilities from the initialize handshake.
-    client_capabilities: ClientCapabilities,
-    /// Whether the client has completed the initialize handshake.
-    initialized: bool,
-    /// Whether the client has sent a shutdown request.
-    shutdown_requested: bool,
     /// Client name from initialize handshake, used for auto-compact detection.
     client_name: Option<String>,
 }
@@ -79,17 +85,22 @@ impl Server {
         let judgment_cache = crate::rules::judgment_cache::JudgmentCache::open_default();
 
         Ok(Self {
-            scanner,
+            catalog: Arc::new(Catalog {
+                scanner,
+                ruleset_hash,
+                ambiguous_dict: std::sync::OnceLock::new(),
+            }),
             s2t: OnceCell::new(),
             suppression_store,
             tm_store,
-            ruleset_hash,
             judgment_cache,
-            client_capabilities: ClientCapabilities::default(),
-            initialized: false,
-            shutdown_requested: false,
             client_name: None,
         })
+    }
+
+    /// The immutable half, for handlers that need it without the lock.
+    pub(crate) fn catalog(&self) -> Arc<Catalog> {
+        self.catalog.clone()
     }
 
     /// Build a scanner from the base ruleset, overrides, and active packs.
@@ -113,245 +124,34 @@ impl Server {
         (scanner, ruleset_hash)
     }
 
-    /// Whether the client declared sampling support during initialization.
-    pub(crate) fn supports_sampling(&self) -> bool {
-        self.client_capabilities.sampling
-    }
-
-    pub(crate) fn supports_logging(&self) -> bool {
-        self.client_capabilities.logging
-    }
-
-    /// Handle pre-initialization routing shared between sync and async
-    /// transports.
+    /// Run the `zhtw` tool.
     ///
-    /// Returns `Some(response)` if the method was handled (initialize, ping,
-    /// notifications, or rejection before init). Returns `None` if the caller
-    /// should proceed with post-init method dispatch.
-    pub(crate) fn dispatch_preinit(
+    /// An unknown tool name is a tool-level error rather than a protocol one,
+    /// which is what lets a client show it to the user instead of failing the
+    /// call.
+    pub(crate) fn call_tool(
         &mut self,
-        req: &mut JsonRpcRequest,
-    ) -> Option<Option<JsonRpcResponse>> {
-        // exit is always honored regardless of lifecycle state.
-        if req.method == "exit" {
-            tracing::info!("exit notification, terminating");
-            // Flush judgment cache before exit (process::exit skips Drop).
-            self.judgment_cache.flush();
-
-            // MCP spec: unconditional process exit. Exit code 0 if shutdown was
-            // requested first, 1 otherwise.
-            let code = if self.shutdown_requested { 0 } else { 1 };
-            std::process::exit(code);
-        }
-
-        // After shutdown, reject everything except exit (handled above).
-        if self.shutdown_requested {
-            tracing::warn!("rejecting {} after shutdown", req.method);
-            return Some(if req.id.is_some() {
-                Some(JsonRpcResponse::error(
-                    req.id.clone(),
-                    INVALID_REQUEST,
-                    "server is shutting down".into(),
-                ))
-            } else {
-                None
-            });
-        }
-
-        match req.method.as_str() {
-            "initialize" => {
-                if req.id.is_none() {
-                    tracing::warn!("initialize sent as notification, ignoring");
-                    return Some(None);
-                }
-                if self.initialized {
-                    tracing::warn!("duplicate initialize request, rejecting");
-                    return Some(Some(JsonRpcResponse::error(
-                        req.id.clone(),
-                        INVALID_REQUEST,
-                        "already initialized".into(),
-                    )));
-                }
-                Some(Some(self.handle_initialize(req)))
-            }
-            "notifications/cancelled" => {
-                tracing::info!("{}", req.method);
-                if req.id.is_some() {
-                    Some(Some(JsonRpcResponse::error(
-                        req.id.clone(),
-                        INVALID_REQUEST,
-                        "notifications/cancelled must be sent as a notification (no id)".into(),
-                    )))
-                } else {
-                    Some(None)
-                }
-            }
-            "notifications/initialized" => {
-                tracing::info!("{}", req.method);
-                if req.id.is_some() {
-                    Some(Some(JsonRpcResponse::error(
-                        req.id.clone(),
-                        INVALID_REQUEST,
-                        "notifications/initialized must be sent as a notification (no id)".into(),
-                    )))
-                } else {
-                    Some(None)
-                }
-            }
-            "shutdown" => {
-                tracing::info!("shutdown requested");
-                self.shutdown_requested = true;
-                if req.id.is_some() {
-                    Some(Some(JsonRpcResponse::success(
-                        req.id.clone(),
-                        serde_json::json!({}),
-                    )))
-                } else {
-                    // shutdown as notification: set flag, no response
-                    Some(None)
-                }
-            }
-            "ping" => {
-                if req.id.is_some() {
-                    Some(Some(JsonRpcResponse::success(
-                        req.id.clone(),
-                        serde_json::json!({}),
-                    )))
-                } else {
-                    tracing::debug!("ping sent as notification, ignoring");
-                    Some(None)
-                }
-            }
-            _ if !self.initialized => {
-                tracing::warn!("rejecting {} before initialization", req.method);
-                Some(if req.id.is_some() {
-                    Some(JsonRpcResponse::error(
-                        req.id.clone(),
-                        SERVER_NOT_INITIALIZED,
-                        "server not initialized".into(),
-                    ))
-                } else {
-                    None
-                })
-            }
-            _ => None, // proceed to post-init dispatch
-        }
-    }
-
-    /// Route a post-init method call (no sampling bridge).
-    ///
-    /// Shared between both transports for tools/list, resources, prompts, etc.
-    /// tools/call is handled separately in the sync transport (needs bridge).
-    pub(crate) fn dispatch_method(&mut self, req: &mut JsonRpcRequest) -> Option<JsonRpcResponse> {
-        match req.method.as_str() {
-            "tools/list" => Some(self.handle_tools_list(req)),
-            "resources/list" => Some(self.handle_resources_list(req)),
-            "resources/read" => Some(self.handle_resources_read(req)),
-            "prompts/list" => Some(self.handle_prompts_list(req)),
-            "prompts/get" => Some(self.handle_prompts_get(req)),
-            _ => {
-                tracing::debug!("unhandled method: {}", req.method);
-                if req.id.is_some() {
-                    Some(JsonRpcResponse::error(
-                        req.id.clone(),
-                        METHOD_NOT_FOUND,
-                        format!("unknown method: {}", req.method),
-                    ))
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    // MCP method handlers
-
-    pub fn handle_initialize(&mut self, req: &mut JsonRpcRequest) -> JsonRpcResponse {
-        let params: InitializeParams = match parse_params(req, "initialize") {
-            Ok(p) => p,
-            Err(resp) => return *resp,
-        };
-        let _span = tracing::info_span!("mcp_request", method = "initialize").entered();
-
-        // Note: This warning is deliberately emitted to stderr only (and not
-        // forwarded to the client).
-        if params.protocol_version != MCP_PROTOCOL_VERSION {
-            tracing::warn!(
-                client_version = %params.protocol_version,
-                server_version = %MCP_PROTOCOL_VERSION,
-                "MCP protocol version mismatch"
-            );
-        }
-
-        // Store parsed client capabilities for later use (e.g. sampling).
-        self.client_capabilities = ClientCapabilities::from(&params.capabilities);
-        self.client_name = params.client_info.map(|ci| ci.name);
-        self.initialized = true;
-
-        let result = InitializeResult {
-            protocol_version: MCP_PROTOCOL_VERSION,
-            capabilities: ServerCapabilities {
-                tools: ToolCapability {
-                    list_changed: false,
-                },
-                resources: ResourceCapability {
-                    list_changed: false,
-                },
-                prompts: PromptCapability {
-                    list_changed: false,
-                },
-            },
-            server_info: ServerInfo {
-                name: "zhtw-mcp".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-            },
-        };
-
-        json_response(req.id.clone(), result)
-    }
-
-    pub fn handle_tools_list(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
-        let tools = ToolsListResult {
-            tools: tool_definitions(),
-        };
-        json_response(req.id.clone(), tools)
-    }
-
-    pub(crate) fn handle_tools_call(
-        &mut self,
-        req: &mut JsonRpcRequest,
+        name: &str,
+        arguments: &Value,
         bridge: Option<&mut SamplingBridge<'_>>,
-    ) -> JsonRpcResponse {
+    ) -> ParamResult<CallToolResult> {
         let _span = tracing::info_span!("mcp_request", method = "tools/call").entered();
-        let params: CallToolParams = match parse_params(req, "tools/call") {
-            Ok(p) => p,
-            Err(resp) => return *resp,
-        };
-
-        if params.name == "zhtw" {
-            if !params.arguments.is_object() {
-                let actual = json_type_name(&params.arguments);
-                return JsonRpcResponse::error_with_data(
-                    req.id.clone(),
-                    INVALID_PARAMS,
-                    format!("arguments must be an object, got {actual}"),
-                    json!({ "field": "arguments", "expected_type": "object", "actual_type": actual }),
-                );
-            }
-            if let Some(resp) = reject_unknown_params(&params.arguments, req.id.clone()) {
-                return resp;
-            }
+        if name != "zhtw" {
+            return Ok(tool_error(format!("unknown tool: {name}")));
         }
-
-        let result = match params.name.as_str() {
-            "zhtw" => match self.tool_check(&params.arguments, bridge, req.id.clone()) {
-                Ok(r) => r,
-                Err(resp) => return *resp,
-            },
-            _ => CallToolResult::error(format!("unknown tool: {}", params.name)),
-        };
-
-        json_response(req.id.clone(), result)
+        if !arguments.is_object() {
+            let actual = json_type_name(arguments);
+            return Err(ErrorData::invalid_params(
+                format!("arguments must be an object, got {actual}"),
+                Some(
+                    json!({ "field": "arguments", "expected_type": "object", "actual_type": actual }),
+                ),
+            ));
+        }
+        if let Some(error) = reject_unknown_params(arguments) {
+            return Err(error);
+        }
+        self.tool_check(arguments, bridge)
     }
 
     // Tool implementation
@@ -386,9 +186,12 @@ impl Server {
             content_type,
             &cfg,
         );
-        let mut scan =
-            self.scanner
-                .scan_with_prebuilt_excluded_config(text, &excluded, cfg, content_type);
+        let mut scan = self.catalog.scanner.scan_with_prebuilt_excluded_config(
+            text,
+            &excluded,
+            cfg,
+            content_type,
+        );
 
         let detected_script = if s2t_converted {
             "simplified"
@@ -421,7 +224,7 @@ impl Server {
         let sampling_stats = if let Some(b) = bridge.as_mut() {
             let mut cache_ctx = super::sampling::SamplingCacheCtx {
                 cache: &mut self.judgment_cache,
-                ruleset_hash: &self.ruleset_hash,
+                ruleset_hash: &self.catalog.ruleset_hash,
                 profile: profile.name(),
                 content_type: content_type.name(),
             };
@@ -449,18 +252,16 @@ impl Server {
         &mut self,
         args: &Value,
         mut bridge: Option<&mut SamplingBridge<'_>>,
-        id: Option<super::types::RequestId>,
     ) -> ParamResult<CallToolResult> {
         let started = std::time::Instant::now();
         // Snapshot cache counters at start for per-request telemetry.
         let cache_hits_before = self.judgment_cache.hits;
         let cache_misses_before = self.judgment_cache.misses;
 
-        let text = require_str_validated(args, "text", &id)?;
+        let text = require_str_validated(args, "text")?;
 
         if text.len() > Self::MAX_TEXT_BYTES {
             return Err(param_error(
-                &id,
                 "text",
                 &format!("{} bytes", text.len()),
                 &[&format!("<= {} bytes (256 KiB)", Self::MAX_TEXT_BYTES)],
@@ -476,34 +277,29 @@ impl Server {
         };
         let text = s2t_converted.as_deref().unwrap_or(text);
 
-        // One call, then straight back into the same locals. The body below is
-        // long enough that ninety lines of flat argument parsing in front of it
-        // buried what the function actually does.
+        let params = CheckParams::parse(args, default_output_mode(self.client_name.as_deref()))?;
+        // Copy fields bind by value, the two owned ones by reference, so the
+        // struct itself stays put for `CheckRequest` to borrow below.
         let CheckParams {
             fix_mode,
             profile,
             content_type,
             stance,
-            max_errors,
-            max_warnings,
-            ignore_terms,
-            explain,
             output_mode,
-            fix_output,
-            #[cfg(feature = "translate")]
-            verify,
+            detect_style,
             detect_ai_opt,
             detect_translationese_opt,
-            detect_style,
-            translationese_domain_opt,
             ai_threshold,
             relaxed,
             exempt_blockquotes,
-            glossary,
-            consistency_requested,
             include_telemetry,
             include_stats,
-        } = CheckParams::parse(args, &id, default_output_mode(self.client_name.as_deref()))?;
+            #[cfg(feature = "translate")]
+            verify,
+            ref ignore_terms,
+            ref translationese_domain_opt,
+            ..
+        } = params;
 
         let ignore_set: std::collections::HashSet<&str> =
             ignore_terms.iter().map(String::as_str).collect();
@@ -529,11 +325,16 @@ impl Server {
         .find(|&(_, requested)| requested)
         .filter(|_| output_mode == OutputMode::Tabular);
         if let Some((name, _)) = tabular_conflict {
-            return Err(param_error(
-                &id,
-                name,
-                "true",
-                &["false", "or use output=full|compact|summary"],
+            // The constraint is about `output`, so the machine-readable list
+            // is the output modes that allow this flag, derived rather than
+            // copied; the prose belongs in the message.
+            let allowed: Vec<&str> = accepted_values("output")
+                .into_iter()
+                .filter(|mode| *mode != "tabular")
+                .collect();
+            return Err(ErrorData::invalid_params(
+                format!("'{name}' cannot be used with output=tabular"),
+                Some(json!({ "field": name, "value": true, "accepted": allowed })),
             ));
         }
 
@@ -549,18 +350,7 @@ impl Server {
                 translationese_domain: translationese_domain_opt.as_deref(),
                 ai_threshold,
             },
-            &id,
         )?;
-
-        let apply_glossary_to_issues = |work_text: &str, issues: Vec<Issue>| -> Vec<Issue> {
-            crate::rules::glossary::apply_glossary_with_coordinates(
-                work_text,
-                content_type,
-                &cfg,
-                issues,
-                &glossary,
-            )
-        };
 
         let stage_args = ScanStageArgs {
             text,
@@ -573,320 +363,21 @@ impl Server {
             verify,
         };
 
+        let request = CheckRequest {
+            text,
+            s2t_applied: s2t_converted.is_some(),
+            params: &params,
+            ignore_set: &ignore_set,
+            stance_name,
+            stage: stage_args,
+            cache_hits_before,
+            cache_misses_before,
+        };
+
         let result = match fix_mode {
-            FixMode::None => {
-                // Lint-only path: the shared stage is the whole pipeline.
-                let stage = self.run_scan_stage(&stage_args, &mut bridge);
-                let ScanStage {
-                    scan,
-                    mut issues,
-                    detected_script,
-                    scanner_hit_count,
-                    disambig_stats,
-                    sampling_stats,
-                    #[cfg(feature = "translate")]
-                    calibrate_result,
-                    ..
-                } = stage;
-                let coverage = scan.coverage.as_ref();
-                let oral_density = scan.oral_density;
-                let quality_flags = &scan.quality_flags;
-                let ai_signature = scan.ai_signature;
-                let translationese_signature = scan.translationese_signature;
-
-                // TM applies here because nothing rewrites the text on this
-                // path; the fix path defers it until after the rescan.
-                let tm_suppressed = self.apply_tm(&mut issues);
-                apply_ignore_set(&mut issues, &ignore_set);
-
-                // 35.9 — Apply project glossary precedence (banned > TM):
-                // proper_nouns suppress, banned inject synthetic Errors.
-                issues = apply_glossary_to_issues(text, issues);
-
-                // 35.1 — Document-wide consistency report.
-                let consistency_report = consistency_requested
-                    .then(|| {
-                        crate::engine::consistency::compute_consistency_report(
-                            text, &issues, &glossary,
-                        )
-                    })
-                    .filter(|r| !r.is_empty());
-
-                // Build telemetry if requested.
-                let telemetry = if include_telemetry {
-                    Some(build_telemetry(
-                        text,
-                        scanner_hit_count,
-                        &disambig_stats,
-                        &sampling_stats,
-                        bridge.as_ref(),
-                        0,
-                        (
-                            self.judgment_cache.hits.saturating_sub(cache_hits_before),
-                            self.judgment_cache
-                                .misses
-                                .saturating_sub(cache_misses_before),
-                        ),
-                    ))
-                } else {
-                    None
-                };
-
-                let trace =
-                    Trace::new("zhtw", &self.ruleset_hash, text).with_issue_count(issues.len());
-
-                // Pre-build the composite scorecard so its lifetime spans the
-                // build_check_output call (the params struct only borrows it).
-                let style_scorecard = style_scorecard_for(
-                    detect_style,
-                    ai_signature.as_ref(),
-                    translationese_signature.as_ref(),
-                    &issues,
-                    text,
-                );
-
-                build_check_output(&CheckOutputParams {
-                    result_text: text,
-                    issues: &issues,
-                    applied_fixes: 0,
-                    max_errors,
-                    max_warnings,
-                    profile,
-                    stance_name,
-                    detected_script,
-                    s2t_applied: s2t_converted.is_some(),
-                    trace: &trace,
-                    explain,
-                    output_mode,
-                    has_fixes: s2t_converted.is_some(),
-                    fix_output,
-                    original_text: text,
-                    fix_records: &[],
-                    #[cfg(feature = "translate")]
-                    calibrate_result,
-                    coverage,
-                    oral_density,
-                    quality_flags,
-                    ai_signature: ai_signature.as_ref(),
-                    translationese_signature: translationese_signature.as_ref(),
-                    style_scorecard: style_scorecard.as_ref(),
-                    tm_suppressed,
-                    sampling_stats,
-                    disambig_stats,
-                    telemetry,
-                    include_stats,
-                    consistency: consistency_report.as_ref(),
-                })
-            }
-
+            FixMode::None => self.check_lint_only(&request, &mut bridge),
             mode @ (FixMode::Orthographic | FixMode::LexicalSafe | FixMode::LexicalContextual) => {
-                // Fix path: shared stage, then apply fixes and re-scan for
-                // residual issues.
-                let stage = self.run_scan_stage(&stage_args, &mut bridge);
-                let ScanStage {
-                    excluded,
-                    mut issues,
-                    detected_script,
-                    scanner_hit_count,
-                    disambig_stats,
-                    sampling_stats,
-                    #[cfg(feature = "translate")]
-                    calibrate_result,
-                    ..
-                } = stage;
-
-                // TM is NOT applied here: the fixer filter (should_suppress)
-                // prevents fixing TM-rejected terms, and the post-fix apply_tm
-                // handles severity downgrade + counting on the final residual.
-                apply_ignore_set(&mut issues, &ignore_set);
-                issues = apply_glossary_to_issues(text, issues);
-
-                // Snapshot AFTER suppressions so restored severity reflects
-                // final state.
-                struct PreservedState {
-                    term: String,
-                    orig_offset: usize,
-                    length: usize,
-                    english: Option<Arc<str>>,
-                    severity: Severity,
-                    anchor_match: Option<bool>,
-                    context: Option<Arc<str>>,
-                    suggestions: Vec<String>,
-                }
-
-                let preserved_states: Vec<PreservedState> = issues
-                    .iter()
-                    .map(|i| PreservedState {
-                        term: i.found.clone(),
-                        orig_offset: i.offset,
-                        length: i.length,
-                        english: i.english.clone(),
-                        severity: i.severity,
-                        anchor_match: i.anchor_match,
-                        context: i.context.clone(),
-                        suggestions: i.suggestions.to_vec(),
-                    })
-                    .collect();
-
-                // Filter out TM-suppressed issues before fixing: a term the
-                // user deliberately rejected must not be auto-corrected.
-                let fix_issues: Vec<Issue> = match &self.tm_store {
-                    Some(tm) => issues
-                        .iter()
-                        .filter(|i| !tm.should_suppress(&i.found))
-                        .cloned()
-                        .collect(),
-                    None => issues.clone(),
-                };
-
-                let fix_result = apply_fixes_with_context(
-                    text,
-                    &fix_issues,
-                    mode,
-                    &excluded,
-                    Some(self.scanner.segmenter()),
-                );
-
-                // Re-scan after fixes — use post-fix ai_signature, not pre-fix.
-                // Remap exclusion zones to post-fix coordinates instead of
-                // rebuilding from scratch (avoids re-parsing markdown/URLs on
-                // the entire document for every fix cycle).
-                let remapped_excl =
-                    crate::fixer::remap_exclusions(&excluded, &fix_result.applied_fixes);
-                let rescan_out = self.scanner.scan_with_prebuilt_excluded_config(
-                    &fix_result.text,
-                    &remapped_excl,
-                    cfg,
-                    content_type,
-                );
-                let coverage = rescan_out.coverage.as_ref();
-                let oral_density = rescan_out.oral_density;
-                let quality_flags = &rescan_out.quality_flags;
-                let ai_signature = rescan_out.ai_signature;
-                let translationese_signature = rescan_out.translationese_signature;
-                let mut remaining_issues = rescan_out.issues;
-                if let Some(st) = stance {
-                    filter_by_stance(&mut remaining_issues, st);
-                }
-                self.apply_suppressions(&mut remaining_issues);
-                apply_ignore_set(&mut remaining_issues, &ignore_set);
-
-                // Precompute remapped offsets once (O(M*F)) and index by
-                // post-fix offset for O(1) lookup per remaining issue.
-                use rustc_hash::FxHashMap;
-                let mut state_by_offset: FxHashMap<usize, Vec<usize>> =
-                    FxHashMap::with_capacity_and_hasher(preserved_states.len(), Default::default());
-                for (idx, state) in preserved_states.iter().enumerate() {
-                    let remapped = remap_to_post_fix(state.orig_offset, &fix_result.applied_fixes);
-                    state_by_offset.entry(remapped).or_default().push(idx);
-                }
-
-                // Re-apply preserved states using identity-safe matching: term
-                // + remapped offset + length + english must all match.
-                for issue in &mut remaining_issues {
-                    if let Some(candidates) = state_by_offset.get(&issue.offset) {
-                        if let Some(&idx) = candidates.iter().find(|&&idx| {
-                            let s = &preserved_states[idx];
-                            s.term == issue.found
-                                && s.length == issue.length
-                                && s.english == issue.english
-                        }) {
-                            let state = &preserved_states[idx];
-                            issue.severity = state.severity;
-                            issue.anchor_match = state.anchor_match;
-                            issue.context = state.context.clone();
-                            issue.suggestions = state.suggestions.clone().into();
-                            issue.refresh_suggested_rewrite();
-                        }
-                    }
-                }
-
-                // Suppress convergent-chain noise: remove re-scan issues whose
-                // offset falls within a byte range written by the fixer.
-                suppress_convergent_issues(&mut remaining_issues, &fix_result.applied_fixes);
-
-                remaining_issues = apply_glossary_to_issues(&fix_result.text, remaining_issues);
-
-                // Apply TM after preserved state restoration so the count
-                // reflects the true final state, not a pre-fix snapshot.
-                let tm_suppressed = self.apply_tm(&mut remaining_issues);
-
-                let consistency_report = consistency_requested
-                    .then(|| {
-                        crate::engine::consistency::compute_consistency_report(
-                            &fix_result.text,
-                            &remaining_issues,
-                            &glossary,
-                        )
-                    })
-                    .filter(|r| !r.is_empty());
-
-                // Build telemetry if requested.
-                let telemetry = if include_telemetry {
-                    Some(build_telemetry(
-                        text,
-                        scanner_hit_count,
-                        &disambig_stats,
-                        &sampling_stats,
-                        bridge.as_ref(),
-                        fix_result.applied,
-                        (
-                            self.judgment_cache.hits.saturating_sub(cache_hits_before),
-                            self.judgment_cache
-                                .misses
-                                .saturating_sub(cache_misses_before),
-                        ),
-                    ))
-                } else {
-                    None
-                };
-
-                let trace = Trace::new("zhtw", &self.ruleset_hash, text)
-                    .with_issue_count(remaining_issues.len())
-                    .with_output(&fix_result.text);
-
-                // Composite scorecard against the post-fix text and remaining
-                // issues, so the scorecard reflects the user-visible state.
-                let style_scorecard = style_scorecard_for(
-                    detect_style,
-                    ai_signature.as_ref(),
-                    translationese_signature.as_ref(),
-                    &remaining_issues,
-                    &fix_result.text,
-                );
-
-                build_check_output(&CheckOutputParams {
-                    result_text: &fix_result.text,
-                    issues: &remaining_issues,
-                    applied_fixes: fix_result.applied,
-                    max_errors,
-                    max_warnings,
-                    profile,
-                    stance_name,
-                    detected_script,
-                    s2t_applied: s2t_converted.is_some(),
-                    trace: &trace,
-                    explain,
-                    output_mode,
-                    has_fixes: fix_result.applied > 0 || s2t_converted.is_some(),
-                    fix_output,
-                    original_text: text,
-                    fix_records: &fix_result.applied_fixes,
-                    #[cfg(feature = "translate")]
-                    calibrate_result,
-                    coverage,
-                    oral_density,
-                    quality_flags,
-                    ai_signature: ai_signature.as_ref(),
-                    translationese_signature: translationese_signature.as_ref(),
-                    style_scorecard: style_scorecard.as_ref(),
-                    tm_suppressed,
-                    sampling_stats,
-                    disambig_stats,
-                    telemetry,
-                    include_stats,
-                    consistency: consistency_report.as_ref(),
-                })
+                self.check_with_fixes(mode, &request, &mut bridge)
             }
         };
         tracing::info!(
@@ -894,6 +385,383 @@ impl Server {
             "tool_check completed"
         );
         Ok(result)
+    }
+
+    /// Per-request token telemetry, with the judgment-cache counters reduced
+    /// to this request's share of the process totals.
+    #[allow(clippy::too_many_arguments)]
+    fn request_telemetry(
+        &self,
+        text: &str,
+        scanner_hit_count: usize,
+        disambig_stats: &DisambigStats,
+        sampling_stats: &SamplingStats,
+        bridge: Option<&&mut SamplingBridge<'_>>,
+        applied_fixes: usize,
+        cache_before: (u64, u64),
+    ) -> TelemetryMetrics {
+        build_telemetry(
+            text,
+            scanner_hit_count,
+            disambig_stats,
+            sampling_stats,
+            bridge,
+            applied_fixes,
+            (
+                self.judgment_cache.hits.saturating_sub(cache_before.0),
+                self.judgment_cache.misses.saturating_sub(cache_before.1),
+            ),
+        )
+    }
+
+    /// Lint only: the shared scan stage is the whole pipeline.
+    fn check_lint_only(
+        &mut self,
+        request: &CheckRequest<'_>,
+        bridge: &mut Option<&mut SamplingBridge<'_>>,
+    ) -> CallToolResult {
+        let &CheckRequest {
+            text,
+            s2t_applied,
+            params,
+            ignore_set,
+            stance_name,
+            stage: ref stage_args,
+            cache_hits_before,
+            cache_misses_before,
+        } = request;
+        let &CheckParams {
+            profile,
+            content_type,
+            max_errors,
+            max_warnings,
+            explain,
+            output_mode,
+            fix_output,
+            detect_style,
+            consistency_requested,
+            include_telemetry,
+            include_stats,
+            ref glossary,
+            ..
+        } = params;
+        let cfg = stage_args.cfg;
+
+        // Lint-only path: the shared stage is the whole pipeline.
+        let stage = self.run_scan_stage(stage_args, bridge);
+        let ScanStage {
+            scan,
+            mut issues,
+            detected_script,
+            scanner_hit_count,
+            disambig_stats,
+            sampling_stats,
+            #[cfg(feature = "translate")]
+            calibrate_result,
+            ..
+        } = stage;
+        let coverage = scan.coverage.as_ref();
+        let oral_density = scan.oral_density;
+        let quality_flags = &scan.quality_flags;
+        let ai_signature = scan.ai_signature;
+        let translationese_signature = scan.translationese_signature;
+
+        // TM applies here because nothing rewrites the text on this
+        // path; the fix path defers it until after the rescan.
+        let tm_suppressed = self.apply_tm(&mut issues);
+        apply_ignore_set(&mut issues, ignore_set);
+
+        // 35.9 — Apply project glossary precedence (banned > TM):
+        // proper_nouns suppress, banned inject synthetic Errors.
+        issues = crate::rules::glossary::apply_glossary_with_coordinates(
+            text,
+            content_type,
+            &cfg,
+            issues,
+            glossary,
+        );
+
+        // 35.1 — Document-wide consistency report.
+        let consistency_report = consistency_requested
+            .then(|| {
+                crate::engine::consistency::compute_consistency_report(text, &issues, glossary)
+            })
+            .filter(|r| !r.is_empty());
+
+        // Build telemetry if requested.
+        let telemetry = include_telemetry.then(|| {
+            self.request_telemetry(
+                text,
+                scanner_hit_count,
+                &disambig_stats,
+                &sampling_stats,
+                bridge.as_ref(),
+                0,
+                (cache_hits_before, cache_misses_before),
+            )
+        });
+
+        let trace =
+            Trace::new("zhtw", &self.catalog.ruleset_hash, text).with_issue_count(issues.len());
+
+        // Pre-build the composite scorecard so its lifetime spans the
+        // build_check_output call (the params struct only borrows it).
+        let style_scorecard = style_scorecard_for(
+            detect_style,
+            ai_signature.as_ref(),
+            translationese_signature.as_ref(),
+            &issues,
+            text,
+        );
+
+        build_check_output(&CheckOutputParams {
+            result_text: text,
+            issues: &issues,
+            applied_fixes: 0,
+            max_errors,
+            max_warnings,
+            profile,
+            stance_name,
+            detected_script,
+            s2t_applied,
+            trace: &trace,
+            explain,
+            output_mode,
+            has_fixes: s2t_applied,
+            fix_output,
+            original_text: text,
+            fix_records: &[],
+            #[cfg(feature = "translate")]
+            calibrate_result,
+            coverage,
+            oral_density,
+            quality_flags,
+            ai_signature: ai_signature.as_ref(),
+            translationese_signature: translationese_signature.as_ref(),
+            style_scorecard: style_scorecard.as_ref(),
+            tm_suppressed,
+            sampling_stats,
+            disambig_stats,
+            telemetry,
+            include_stats,
+            consistency: consistency_report.as_ref(),
+        })
+    }
+
+    /// Fix: the shared scan stage, then apply the fixes and re-scan the result
+    /// for what is left.
+    fn check_with_fixes(
+        &mut self,
+        mode: FixMode,
+        request: &CheckRequest<'_>,
+        bridge: &mut Option<&mut SamplingBridge<'_>>,
+    ) -> CallToolResult {
+        let &CheckRequest {
+            text,
+            s2t_applied,
+            params,
+            ignore_set,
+            stance_name,
+            stage: ref stage_args,
+            cache_hits_before,
+            cache_misses_before,
+        } = request;
+        let &CheckParams {
+            profile,
+            content_type,
+            stance,
+            max_errors,
+            max_warnings,
+            explain,
+            output_mode,
+            fix_output,
+            detect_style,
+            consistency_requested,
+            include_telemetry,
+            include_stats,
+            ref glossary,
+            ..
+        } = params;
+        let cfg = stage_args.cfg;
+
+        // Fix path: shared stage, then apply fixes and re-scan for
+        // residual issues.
+        let stage = self.run_scan_stage(stage_args, bridge);
+        let ScanStage {
+            excluded,
+            mut issues,
+            detected_script,
+            scanner_hit_count,
+            disambig_stats,
+            sampling_stats,
+            #[cfg(feature = "translate")]
+            calibrate_result,
+            ..
+        } = stage;
+
+        // TM is NOT applied here: the fixer filter (should_suppress)
+        // prevents fixing TM-rejected terms, and the post-fix apply_tm
+        // handles severity downgrade + counting on the final residual.
+        apply_ignore_set(&mut issues, ignore_set);
+        issues = crate::rules::glossary::apply_glossary_with_coordinates(
+            text,
+            content_type,
+            &cfg,
+            issues,
+            glossary,
+        );
+
+        // Snapshot AFTER suppressions so restored severity reflects
+        // final state.
+        let preserved_states = snapshot_states(&issues);
+
+        // Filter out TM-suppressed issues before fixing: a term the
+        // user deliberately rejected must not be auto-corrected.
+        let fix_issues: Vec<Issue> = match &self.tm_store {
+            Some(tm) => issues
+                .iter()
+                .filter(|i| !tm.should_suppress(&i.found))
+                .cloned()
+                .collect(),
+            None => issues.clone(),
+        };
+
+        let fix_result = apply_fixes_with_context(
+            text,
+            &fix_issues,
+            mode,
+            &excluded,
+            Some(self.catalog.scanner.segmenter()),
+        );
+
+        // Re-scan after fixes — use post-fix ai_signature, not pre-fix.
+        // Remap exclusion zones to post-fix coordinates instead of
+        // rebuilding from scratch (avoids re-parsing markdown/URLs on
+        // the entire document for every fix cycle).
+        let remapped_excl = crate::fixer::remap_exclusions(&excluded, &fix_result.applied_fixes);
+        let rescan_out = self.catalog.scanner.scan_with_prebuilt_excluded_config(
+            &fix_result.text,
+            &remapped_excl,
+            cfg,
+            content_type,
+        );
+        let coverage = rescan_out.coverage.as_ref();
+        let oral_density = rescan_out.oral_density;
+        let quality_flags = &rescan_out.quality_flags;
+        let ai_signature = rescan_out.ai_signature;
+        let translationese_signature = rescan_out.translationese_signature;
+        let mut remaining_issues = rescan_out.issues;
+        if let Some(st) = stance {
+            filter_by_stance(&mut remaining_issues, st);
+        }
+        self.apply_suppressions(&mut remaining_issues);
+        apply_ignore_set(&mut remaining_issues, ignore_set);
+
+        restore_preserved_states(
+            &mut remaining_issues,
+            &preserved_states,
+            &fix_result.applied_fixes,
+        );
+
+        // Suppress convergent-chain noise: remove re-scan issues whose
+        // offset falls within a byte range written by the fixer.
+        suppress_convergent_issues(&mut remaining_issues, &fix_result.applied_fixes);
+
+        remaining_issues = crate::rules::glossary::apply_glossary_with_coordinates(
+            &fix_result.text,
+            content_type,
+            &cfg,
+            remaining_issues,
+            glossary,
+        );
+
+        // Apply TM after preserved state restoration so the count
+        // reflects the true final state, not a pre-fix snapshot.
+        let tm_suppressed = self.apply_tm(&mut remaining_issues);
+
+        let consistency_report = consistency_requested
+            .then(|| {
+                crate::engine::consistency::compute_consistency_report(
+                    &fix_result.text,
+                    &remaining_issues,
+                    glossary,
+                )
+            })
+            .filter(|r| !r.is_empty());
+
+        // Build telemetry if requested.
+        let telemetry = include_telemetry.then(|| {
+            self.request_telemetry(
+                text,
+                scanner_hit_count,
+                &disambig_stats,
+                &sampling_stats,
+                bridge.as_ref(),
+                fix_result.applied,
+                (cache_hits_before, cache_misses_before),
+            )
+        });
+
+        let trace = Trace::new("zhtw", &self.catalog.ruleset_hash, text)
+            .with_issue_count(remaining_issues.len())
+            .with_output(&fix_result.text);
+
+        // Composite scorecard against the post-fix text and remaining
+        // issues, so the scorecard reflects the user-visible state.
+        let style_scorecard = style_scorecard_for(
+            detect_style,
+            ai_signature.as_ref(),
+            translationese_signature.as_ref(),
+            &remaining_issues,
+            &fix_result.text,
+        );
+
+        build_check_output(&CheckOutputParams {
+            result_text: &fix_result.text,
+            issues: &remaining_issues,
+            applied_fixes: fix_result.applied,
+            max_errors,
+            max_warnings,
+            profile,
+            stance_name,
+            detected_script,
+            s2t_applied,
+            trace: &trace,
+            explain,
+            output_mode,
+            has_fixes: fix_result.applied > 0 || s2t_applied,
+            fix_output,
+            original_text: text,
+            fix_records: &fix_result.applied_fixes,
+            #[cfg(feature = "translate")]
+            calibrate_result,
+            coverage,
+            oral_density,
+            quality_flags,
+            ai_signature: ai_signature.as_ref(),
+            translationese_signature: translationese_signature.as_ref(),
+            style_scorecard: style_scorecard.as_ref(),
+            tm_suppressed,
+            sampling_stats,
+            disambig_stats,
+            telemetry,
+            include_stats,
+            consistency: consistency_report.as_ref(),
+        })
+    }
+
+    /// Record the client identity from the handshake.
+    ///
+    /// The SDK owns `initialize` itself, so this is how the negotiated state
+    /// still reaches the pipeline: `client_name` selects the default output
+    /// mode. Per-request capabilities are handled by the SDK adapter.
+    pub(crate) fn set_client(&mut self, name: String) {
+        self.client_name = Some(name);
+    }
+
+    /// Persist the judgment cache. `process::exit` skips `Drop`.
+    pub(crate) fn flush_judgment_cache(&mut self) {
+        self.judgment_cache.flush();
     }
 
     /// Downgrade suppressed issues to Info severity.
@@ -913,254 +781,108 @@ impl Server {
             .as_ref()
             .map_or(0, |tm| tm.suppress_issues(issues))
     }
-
-    // -- Resource and prompt handlers -----------------------------------------
-
-    pub fn handle_resources_list(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
-        json_response(req.id.clone(), resources::list_resources())
-    }
-
-    pub fn handle_resources_read(&self, req: &mut JsonRpcRequest) -> JsonRpcResponse {
-        let params: ResourceReadParams = match parse_params(req, "resources/read") {
-            Ok(p) => p,
-            Err(resp) => return *resp,
-        };
-
-        match resources::read_resource(&params.uri, self.scanner.spelling_rules()) {
-            Some(result) => json_response(req.id.clone(), result),
-            None => JsonRpcResponse::error(
-                req.id.clone(),
-                INVALID_PARAMS,
-                format!("unknown resource URI: {}", params.uri),
-            ),
-        }
-    }
-
-    pub fn handle_prompts_list(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
-        let result = prompts::list_prompts();
-        json_response(req.id.clone(), json!({ "prompts": result }))
-    }
-
-    pub fn handle_prompts_get(&self, req: &mut JsonRpcRequest) -> JsonRpcResponse {
-        let params: PromptGetParams = match parse_params(req, "prompts/get") {
-            Ok(p) => p,
-            Err(resp) => return *resp,
-        };
-
-        let prompt_args: std::collections::HashMap<String, String> = params
-            .arguments
-            .as_object()
-            .map(|obj| {
-                obj.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        match prompts::get_prompt(&params.name, &prompt_args) {
-            Some(result) => json_response(req.id.clone(), result),
-            None => JsonRpcResponse::error(
-                req.id.clone(),
-                INVALID_PARAMS,
-                format!("unknown prompt: {}", params.name),
-            ),
-        }
-    }
 }
 
-/// Serialize result to JSON and wrap in a success response, or return an
-/// internal error response on serialization failure.
-fn json_response(
-    id: Option<super::types::RequestId>,
-    result: impl serde::Serialize,
-) -> JsonRpcResponse {
-    match serde_json::to_value(result) {
-        Ok(v) => JsonRpcResponse::success(id, v),
-        Err(e) => {
-            tracing::error!("failed to serialize response: {e}");
-            JsonRpcResponse::error(id, INTERNAL_ERROR, "internal server error".into())
-        }
-    }
-}
-
-/// Result of parsing a request or tool argument: the error side carries a
-/// ready-to-send JSON-RPC response.
+/// Result of parsing a request or tool argument.
 ///
-/// The error is boxed because `JsonRpcResponse` is large, and an unboxed
-/// `Result` is sized for its largest variant, so every successful parse paid
-/// for an error that almost never happens. Boxing moves that cost to the
-/// failure branch and removes the `clippy::result_large_err` suppressions
-/// that used to sit on each of these helpers.
-type ParamResult<T> = Result<T, Box<JsonRpcResponse>>;
-
-/// Parse and take MCP request params, returning a typed struct or an error
-/// response.
-fn parse_params<T: serde::de::DeserializeOwned>(
-    req: &mut JsonRpcRequest,
-    method: &str,
-) -> ParamResult<T> {
-    serde_json::from_value(std::mem::take(&mut req.params)).map_err(|e| {
-        tracing::warn!("bad {method} params: {e}");
-        Box::new(JsonRpcResponse::error(
-            req.id.clone(),
-            INVALID_PARAMS,
-            format!("invalid {method} parameters"),
-        ))
-    })
-}
-
-/// Known parameter names for the `zhtw` tool, kept in sync with
-/// `tool_definitions()` schema properties. Any key in `arguments` not in this
-/// set triggers INVALID_PARAMS (-32602) with structured `data.unexpected`.
-fn zhtw_known_params() -> &'static [&'static str] {
-    #[cfg(feature = "translate")]
-    {
-        &[
-            "text",
-            "fix_mode",
-            "max_errors",
-            "max_warnings",
-            "profile",
-            "relaxed",
-            "exempt_blockquotes",
-            "content_type",
-            "political_stance",
-            "ignore_terms",
-            "glossary",
-            "consistency",
-            "explain",
-            "fix_output",
-            "verify",
-            "output",
-            "detect_ai",
-            "detect_translationese",
-            "detect_style",
-            "translationese_domain",
-            "ai_threshold",
-            "include_telemetry",
-            "include_stats",
-        ]
-    }
-    #[cfg(not(feature = "translate"))]
-    {
-        &[
-            "text",
-            "fix_mode",
-            "max_errors",
-            "max_warnings",
-            "profile",
-            "relaxed",
-            "exempt_blockquotes",
-            "content_type",
-            "political_stance",
-            "ignore_terms",
-            "glossary",
-            "consistency",
-            "explain",
-            "fix_output",
-            "output",
-            "detect_ai",
-            "detect_translationese",
-            "detect_style",
-            "translationese_domain",
-            "ai_threshold",
-            "include_telemetry",
-            "include_stats",
-        ]
-    }
-}
+/// The error side is RMCP's own, because that is what the adapter hands back
+/// and nothing between here and the wire adds to it. It carries the JSON-RPC
+/// code, the message, and the structured data clients render diagnostics from.
+/// Which request id the error correlates to is RMCP's business, not this
+/// layer's, which is why none of these helpers take one.
+pub(crate) type ParamResult<T> = Result<T, ErrorData>;
 
 /// Return an INVALID_PARAMS JSON-RPC error if `args` contains keys not in
 /// the known parameter set. Returns `None` when all keys are recognized.
-fn reject_unknown_params(
-    args: &Value,
-    id: Option<super::types::RequestId>,
-) -> Option<JsonRpcResponse> {
+fn reject_unknown_params(args: &Value) -> Option<ErrorData> {
     let obj = args.as_object()?;
-    let known = zhtw_known_params();
+    let known = input_schema_properties();
     let unexpected: Vec<&str> = obj
         .keys()
-        .filter(|k| !known.contains(&k.as_str()))
+        .filter(|k| !known.contains_key(k.as_str()))
         .map(String::as_str)
         .collect();
     if unexpected.is_empty() {
         return None;
     }
-    Some(JsonRpcResponse::error_with_data(
-        id,
-        INVALID_PARAMS,
+    Some(ErrorData::invalid_params(
         format!(
             "unknown parameter{}: {}",
             if unexpected.len() > 1 { "s" } else { "" },
             unexpected.join(", "),
         ),
-        json!({ "unexpected": unexpected }),
+        Some(json!({ "unexpected": unexpected })),
     ))
+}
+
+/// The values the schema declares for an enum-valued parameter.
+///
+/// Empty for a parameter the schema does not constrain to a list, which is
+/// what `param_error` is for.
+fn accepted_values(field: &str) -> Vec<&'static str> {
+    input_schema_properties()
+        .get(field)
+        .and_then(|prop| prop.get("enum"))
+        .and_then(|values| values.as_array())
+        .map(|values| values.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
+}
+
+/// Reject a value the schema does not allow, naming what it does.
+///
+/// The list comes from the schema rather than from the call site: stating it
+/// twice is how a value gets added to what the tool advertises and still
+/// rejected by what parses it.
+fn enum_param_error(field: &str, value: &str) -> ErrorData {
+    param_error(field, value, &accepted_values(field))
 }
 
 /// Build a structured INVALID_PARAMS JSON-RPC error for a bad tool parameter.
 /// The `data` field carries `{"field", "value", "accepted"}` so clients can
 /// render actionable diagnostics without parsing the message string.
-fn param_error(
-    id: &Option<super::types::RequestId>,
-    field: &str,
-    value: &str,
-    accepted: &[&str],
-) -> Box<JsonRpcResponse> {
-    Box::new(JsonRpcResponse::error_with_data(
-        id.clone(),
-        INVALID_PARAMS,
+fn param_error(field: &str, value: &str, accepted: &[&str]) -> ErrorData {
+    ErrorData::invalid_params(
         format!("invalid '{field}': '{value}'"),
-        json!({ "field": field, "value": value, "accepted": accepted }),
-    ))
+        Some(json!({ "field": field, "value": value, "accepted": accepted })),
+    )
 }
 
 /// Extract a required string field from a JSON object, returning a
 /// structured INVALID_PARAMS error on failure. Distinguishes missing
 /// field from present-but-wrong-type so clients get actionable diagnostics.
-fn require_str_validated<'a>(
-    args: &'a Value,
-    field: &str,
-    id: &Option<super::types::RequestId>,
-) -> ParamResult<&'a str> {
+fn require_str_validated<'a>(args: &'a Value, field: &str) -> ParamResult<&'a str> {
     match args.get(field) {
-        None => Err(Box::new(JsonRpcResponse::error_with_data(
-            id.clone(),
-            INVALID_PARAMS,
+        None => Err(ErrorData::invalid_params(
             format!("missing required parameter '{field}'"),
-            json!({ "field": field }),
-        ))),
+            Some(json!({ "field": field })),
+        )),
         Some(v) => v.as_str().ok_or_else(|| {
             let type_name = json_type_name(v);
-            Box::new(JsonRpcResponse::error_with_data(
-                id.clone(),
-                INVALID_PARAMS,
+            ErrorData::invalid_params(
                 format!("'{field}' must be a string, got {type_name}"),
-                json!({ "field": field, "expected_type": "string", "actual_type": type_name }),
-            ))
+                Some(
+                    json!({ "field": field, "expected_type": "string", "actual_type": type_name }),
+                ),
+            )
         }),
     }
 }
 
 /// Extract an optional string field, returning INVALID_PARAMS if the
 /// value is present but not a string. Returns `Ok(None)` when absent.
-fn optional_str_validated<'a>(
-    args: &'a Value,
-    field: &str,
-    id: &Option<super::types::RequestId>,
-) -> ParamResult<Option<&'a str>> {
+fn optional_str_validated<'a>(args: &'a Value, field: &str) -> ParamResult<Option<&'a str>> {
     match args.get(field) {
         None => Ok(None),
         Some(v) => match v.as_str() {
             Some(s) => Ok(Some(s)),
             None => {
                 let type_name = json_type_name(v);
-                Err(Box::new(JsonRpcResponse::error_with_data(
-                    id.clone(),
-                    INVALID_PARAMS,
+                Err(ErrorData::invalid_params(
                     format!("'{field}' must be a string, got {type_name}"),
-                    json!({ "field": field, "expected_type": "string", "actual_type": type_name }),
-                )))
+                    Some(
+                        json!({ "field": field, "expected_type": "string", "actual_type": type_name }),
+                    ),
+                ))
             }
         },
     }
@@ -1216,22 +938,18 @@ struct CheckParams<'a> {
 }
 
 impl<'a> CheckParams<'a> {
-    fn parse(
-        args: &'a Value,
-        id: &Option<super::types::RequestId>,
-        default_output: OutputMode,
-    ) -> ParamResult<Self> {
+    fn parse(args: &'a Value, default_output: OutputMode) -> ParamResult<Self> {
         Ok(Self {
-            fix_mode: parse_fix_mode(args, id)?,
-            profile: parse_profile(args, id)?,
-            content_type: parse_content_type(args, id)?,
-            stance: parse_political_stance(args, id)?,
+            fix_mode: parse_fix_mode(args)?,
+            profile: parse_profile(args)?,
+            content_type: parse_content_type(args)?,
+            stance: parse_political_stance(args)?,
             max_errors: args.get("max_errors").and_then(|v| v.as_u64()),
             max_warnings: args.get("max_warnings").and_then(|v| v.as_u64()),
             ignore_terms: parse_ignore_terms(args),
             explain: parse_explain(args),
-            output_mode: parse_output_mode(args, default_output, id)?,
-            fix_output: parse_fix_output(args, id)?,
+            output_mode: parse_output_mode(args, default_output)?,
+            fix_output: parse_fix_output(args)?,
             #[cfg(feature = "translate")]
             verify: parse_verify(args),
             detect_ai_opt: parse_flag_opt(args, "detect_ai"),
@@ -1241,7 +959,7 @@ impl<'a> CheckParams<'a> {
                 .get("translationese_domain")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
-            ai_threshold: optional_str_validated(args, "ai_threshold", id)?,
+            ai_threshold: optional_str_validated(args, "ai_threshold")?,
             relaxed: parse_flag(args, "relaxed"),
             exempt_blockquotes: parse_flag(args, "exempt_blockquotes"),
             glossary: parse_glossary(args),
@@ -1264,69 +982,47 @@ fn parse_flag(args: &Value, field: &str) -> bool {
 
 /// Parse the optional "fix_mode" field from tool arguments.
 /// Returns an INVALID_PARAMS error for unrecognized values.
-fn parse_fix_mode(args: &Value, id: &Option<super::types::RequestId>) -> ParamResult<FixMode> {
-    match optional_str_validated(args, "fix_mode", id)? {
+fn parse_fix_mode(args: &Value) -> ParamResult<FixMode> {
+    match optional_str_validated(args, "fix_mode")? {
         Some("orthographic") => Ok(FixMode::Orthographic),
         Some("lexical_safe") => Ok(FixMode::LexicalSafe),
         Some("lexical_contextual") => Ok(FixMode::LexicalContextual),
         None | Some("none") => Ok(FixMode::None),
-        Some(other) => Err(param_error(
-            id,
-            "fix_mode",
-            other,
-            &["none", "orthographic", "lexical_safe", "lexical_contextual"],
-        )),
+        Some(other) => Err(enum_param_error("fix_mode", other)),
     }
 }
 
 /// Parse the optional "content_type" field from tool arguments.
 /// Returns an INVALID_PARAMS error for unrecognized values.
-fn parse_content_type(
-    args: &Value,
-    id: &Option<super::types::RequestId>,
-) -> ParamResult<ContentType> {
-    match optional_str_validated(args, "content_type", id)? {
-        Some("markdown") => Ok(ContentType::Markdown),
-        Some("markdown-scan-code") => Ok(ContentType::MarkdownScanCode),
-        Some("yaml") => Ok(ContentType::Yaml),
-        Some("plain") | None => Ok(ContentType::Plain),
-        Some(other) => Err(param_error(
-            id,
-            "content_type",
-            other,
-            &["plain", "markdown", "markdown-scan-code", "yaml"],
-        )),
+fn parse_content_type(args: &Value) -> ParamResult<ContentType> {
+    match optional_str_validated(args, "content_type")? {
+        // Plain, not the file-name guess the CLI makes: a tool call carries
+        // text and no name to guess from, and reading unmarked text as
+        // Markdown would skip whatever looks like a fence inside it.
+        None => Ok(ContentType::Plain),
+        Some(other) => {
+            ContentType::from_name(other).ok_or_else(|| enum_param_error("content_type", other))
+        }
     }
 }
 
 /// Parse the optional "profile" field from tool arguments.
 /// Returns an INVALID_PARAMS error for unrecognized values.
-fn parse_profile(args: &Value, id: &Option<super::types::RequestId>) -> ParamResult<Profile> {
-    match optional_str_validated(args, "profile", id)? {
+fn parse_profile(args: &Value) -> ParamResult<Profile> {
+    match optional_str_validated(args, "profile")? {
         None => Ok(Profile::Base),
-        Some(s) => Profile::from_str_strict(s)
-            .ok_or_else(|| param_error(id, "profile", s, &["base", "strict"])),
+        Some(s) => Profile::from_str_strict(s).ok_or_else(|| enum_param_error("profile", s)),
     }
 }
 
 /// Parse the optional "political_stance" field from tool arguments.
 /// Returns an INVALID_PARAMS error for unrecognized values.
-fn parse_political_stance(
-    args: &Value,
-    id: &Option<super::types::RequestId>,
-) -> ParamResult<Option<PoliticalStance>> {
-    match optional_str_validated(args, "political_stance", id)? {
+fn parse_political_stance(args: &Value) -> ParamResult<Option<PoliticalStance>> {
+    match optional_str_validated(args, "political_stance")? {
         None => Ok(None),
         Some(s) => PoliticalStance::from_str_strict(s)
             .map(Some)
-            .ok_or_else(|| {
-                param_error(
-                    id,
-                    "political_stance",
-                    s,
-                    &["roc_centric", "international", "neutral"],
-                )
-            }),
+            .ok_or_else(|| enum_param_error("political_stance", s)),
     }
 }
 
@@ -1352,20 +1048,12 @@ impl FixOutputMode {
 }
 
 /// Parse the optional "fix_output" parameter from tool arguments.
-fn parse_fix_output(
-    args: &Value,
-    id: &Option<super::types::RequestId>,
-) -> ParamResult<FixOutputMode> {
-    match optional_str_validated(args, "fix_output", id)? {
+fn parse_fix_output(args: &Value) -> ParamResult<FixOutputMode> {
+    match optional_str_validated(args, "fix_output")? {
         Some("full") | None => Ok(FixOutputMode::Full),
         Some("search_replace") => Ok(FixOutputMode::SearchReplace),
         Some("patch") => Ok(FixOutputMode::Patch),
-        Some(other) => Err(param_error(
-            id,
-            "fix_output",
-            other,
-            &["full", "search_replace", "patch"],
-        )),
+        Some(other) => Err(enum_param_error("fix_output", other)),
     }
 }
 
@@ -1394,23 +1082,14 @@ enum OutputMode {
 /// Parse the optional "output" mode from tool arguments.
 /// When no explicit value is given, uses the provided default (which may
 /// be auto-detected from the client identity).
-fn parse_output_mode(
-    args: &Value,
-    default: OutputMode,
-    id: &Option<super::types::RequestId>,
-) -> ParamResult<OutputMode> {
-    match optional_str_validated(args, "output", id)? {
+fn parse_output_mode(args: &Value, default: OutputMode) -> ParamResult<OutputMode> {
+    match optional_str_validated(args, "output")? {
         Some("compact") => Ok(OutputMode::Compact),
         Some("full") => Ok(OutputMode::Full),
         Some("tabular") => Ok(OutputMode::Tabular),
         Some("summary") => Ok(OutputMode::Summary),
         None => Ok(default),
-        Some(other) => Err(param_error(
-            id,
-            "output",
-            other,
-            &["full", "compact", "tabular", "summary"],
-        )),
+        Some(other) => Err(enum_param_error("output", other)),
     }
 }
 
@@ -2191,6 +1870,23 @@ fn build_telemetry(
 /// allocations. Uses compact JSON by default; set `ZHTW_PRETTY=1` env var
 /// for indented output during debugging.
 /// Inputs to [Server::run_scan_stage], which both `fix_mode` paths share.
+/// Everything `tool_check`'s prologue settled, handed to whichever pipeline
+/// runs. Both pipelines need nearly all of it, so this is one binding instead
+/// of twenty parameters.
+struct CheckRequest<'a> {
+    /// Post-S2T text: what every stage below scans.
+    text: &'a str,
+    s2t_applied: bool,
+    params: &'a CheckParams<'a>,
+    ignore_set: &'a std::collections::HashSet<&'a str>,
+    stance_name: &'static str,
+    stage: ScanStageArgs<'a>,
+    /// Judgment-cache counters as of the start of the request, so telemetry
+    /// reports this request's share rather than the process total.
+    cache_hits_before: u64,
+    cache_misses_before: u64,
+}
+
 struct ScanStageArgs<'a> {
     text: &'a str,
     content_type: crate::engine::scan::ContentType,
@@ -2247,7 +1943,6 @@ struct CheckFlags<'a> {
 fn build_check_config(
     profile: Profile,
     flags: &CheckFlags<'_>,
-    id: &Option<super::types::RequestId>,
 ) -> ParamResult<crate::rules::ruleset::ProfileConfig> {
     let mut cfg = profile.config();
     if flags.relaxed {
@@ -2272,12 +1967,7 @@ fn build_check_config(
         {
             Some(d) => cfg.translationese_domain = d,
             None => {
-                return Err(param_error(
-                    id,
-                    "translationese_domain",
-                    domain_str,
-                    &["general", "technical", "literary", "news"],
-                ));
+                return Err(enum_param_error("translationese_domain", domain_str));
             }
         }
     }
@@ -2302,12 +1992,7 @@ fn build_check_config(
             Some("medium") | None => 1.0,
             Some("high") => 1.5,
             Some(other) => {
-                return Err(param_error(
-                    id,
-                    "ai_threshold",
-                    other,
-                    &["low", "medium", "high"],
-                ));
+                return Err(enum_param_error("ai_threshold", other));
             }
         };
     }
@@ -2497,14 +2182,14 @@ fn build_check_output(params: &CheckOutputParams<'_>) -> CallToolResult {
     match serialize_result {
         Ok(json_str) => {
             if accepted {
-                CallToolResult::text(json_str)
+                tool_text(json_str)
             } else {
-                CallToolResult::error(json_str)
+                tool_error(json_str)
             }
         }
         Err(e) => {
             tracing::error!("failed to serialize check output: {e}");
-            CallToolResult::error("internal server error".into())
+            tool_error("internal server error".into())
         }
     }
 }
@@ -2945,45 +2630,78 @@ struct CompactGroup {
 
 // Tool definitions (JSON Schema for zhtw)
 
-fn tool_definitions() -> Vec<ToolDef> {
-    vec![ToolDef {
-        name: "zhtw".into(),
-        description: "Lint/fix/gate zh-TW text. Auto-converts Simplified Chinese to Traditional before applying rules. Use verify=true to calibrate issues via Google Translate anchor matching.".into(),
-        input_schema: {
-            let mut props = serde_json::Map::new();
-            props.insert("text".into(), json!({ "type": "string" }));
-            props.insert("fix_mode".into(), json!({
+/// The properties of the `zhtw` tool's input schema.
+///
+/// Built once and shared, so what the tool advertises and what it accepts are
+/// the same list rather than two lists that have to be kept in step. They were
+/// two, and the accepted one was spelled out twice more, once per `translate`
+/// build, so adding a parameter meant editing three places and being told it
+/// was unknown if you missed one.
+fn input_schema() -> &'static std::sync::Arc<JsonObject> {
+    static SCHEMA: std::sync::OnceLock<std::sync::Arc<JsonObject>> = std::sync::OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        let mut schema = JsonObject::new();
+        schema.insert("type".into(), json!("object"));
+        schema.insert(
+            "properties".into(),
+            Value::Object(input_schema_properties().clone()),
+        );
+        schema.insert("required".into(), json!(["text"]));
+        std::sync::Arc::new(schema)
+    })
+}
+
+/// The parameter names the schema declares, which is what the tool accepts.
+fn input_schema_properties() -> &'static JsonObject {
+    static PROPS: std::sync::OnceLock<JsonObject> = std::sync::OnceLock::new();
+    PROPS.get_or_init(|| {
+        let mut props = serde_json::Map::new();
+        props.insert("text".into(), json!({ "type": "string" }));
+        props.insert(
+            "fix_mode".into(),
+            json!({
                 "type": "string",
                 "enum": ["none", "orthographic", "lexical_safe", "lexical_contextual"]
-            }));
-            props.insert("max_errors".into(), json!({ "type": "integer" }));
-            props.insert("max_warnings".into(), json!({ "type": "integer" }));
-            props.insert("profile".into(), json!({
+            }),
+        );
+        props.insert("max_errors".into(), json!({ "type": "integer" }));
+        props.insert("max_warnings".into(), json!({ "type": "integer" }));
+        props.insert("profile".into(), json!({
                 "type": "string",
                 "enum": ["base", "strict"],
                 "description": "Norm strictness: 'base' (default) or 'strict' (full MoE with character variants)"
             }));
-            props.insert("relaxed".into(), json!({
+        props.insert("relaxed".into(), json!({
                 "type": "boolean",
                 "description": "Capability flag for software UI strings: disables colon enforcement, dunhao detection, grammar checks; uses en-dash for ranges"
             }));
-            props.insert("exempt_blockquotes".into(), json!({
+        props.insert("exempt_blockquotes".into(), json!({
                 "type": "boolean",
                 "description": "Markdown only: exclude pulldown-cmark `Tag::BlockQuote` ranges from scanning.  Useful when a document quotes mainland-Chinese sources for illustrative purposes.  Off by default."
             }));
-            props.insert("content_type".into(), json!({
+        props.insert(
+            "content_type".into(),
+            json!({
                 "type": "string",
+                "default": "plain",
                 "enum": ["plain", "markdown", "markdown-scan-code", "yaml"]
-            }));
-            props.insert("political_stance".into(), json!({
+            }),
+        );
+        props.insert(
+            "political_stance".into(),
+            json!({
                 "type": "string",
                 "enum": ["roc_centric", "international", "neutral"]
-            }));
-            props.insert("ignore_terms".into(), json!({
+            }),
+        );
+        props.insert(
+            "ignore_terms".into(),
+            json!({
                 "type": "array",
                 "items": { "type": "string" }
-            }));
-            props.insert("glossary".into(), json!({
+            }),
+        );
+        props.insert("glossary".into(), json!({
                 "type": "object",
                 "description": "Project-level glossary.  `banned` terms always fire (project-wide truth, banned > TM); `proper_nouns` suppress matching issues; `preferred` chooses canonical TW form for the consistency report.",
                 "properties": {
@@ -2992,76 +2710,233 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "proper_nouns": { "type": "array", "items": { "type": "string" } },
                 }
             }));
-            props.insert("consistency".into(), json!({
+        props.insert("consistency".into(), json!({
                 "type": "boolean",
                 "description": "Emit a `consistency` block when both regional variants of one concept appear in the document (e.g. both 線程 and 執行緒).  Off by default."
             }));
-            props.insert("explain".into(), json!({ "type": "boolean" }));
-            props.insert("fix_output".into(), json!({
+        props.insert("explain".into(), json!({ "type": "boolean" }));
+        props.insert("fix_output".into(), json!({
                 "type": "string",
                 "enum": ["full", "search_replace", "patch"],
                 "description": "Fix output format: full text (default), search/replace blocks, or patch array with byte offsets"
             }));
-            #[cfg(feature = "translate")]
-            props.insert("verify".into(), json!({
+        #[cfg(feature = "translate")]
+        props.insert(
+            "verify".into(),
+            json!({
                 "type": "boolean",
                 "description": "Anchor-verify issues via Google Translate"
-            }));
-            props.insert("output".into(), json!({
+            }),
+        );
+        props.insert("output".into(), json!({
                 "type": "string",
                 "enum": ["full", "compact", "tabular", "summary"],
                 "description": "Output mode. 'summary' returns only issue counts + AI signature (no individual issues)"
             }));
-            props.insert("detect_ai".into(), json!({
+        props.insert("detect_ai".into(), json!({
                 "type": "boolean",
                 "description": "Enable AI writing artifact detection (density + grammar patterns). Default: on. Set false to suppress AI filler findings."
             }));
-            props.insert("detect_translationese".into(), json!({
+        props.insert("detect_translationese".into(), json!({
                 "type": "boolean",
                 "description": "Enable translationese (翻譯腔 / 歐化) detection — Europeanized syntax and calques from the dewesternise checklist. Default: on. Orthogonal to detect_ai; reported separately."
             }));
-            props.insert("detect_style".into(), json!({
+        props.insert("detect_style".into(), json!({
                 "type": "boolean",
                 "description": "Composite style scorecard: emit `style_scorecard` with three orthogonal axes (ai, translationese, consistency) plus top contributing issues. Default: false. Three scores never collapsed into a single number."
             }));
-            props.insert("translationese_domain".into(), json!({
+        props.insert("translationese_domain".into(), json!({
                 "type": "string",
                 "enum": ["general", "technical", "literary", "news"],
                 "description": "Per-domain calibration for translationese scoring thresholds. 'technical' tolerates more passive voice and weak-verb nominalization; 'literary' is the strictest; 'news' favors active voice. Default: 'general'."
             }));
-            props.insert("ai_threshold".into(), json!({
+        props.insert("ai_threshold".into(), json!({
                 "type": "string",
                 "enum": ["low", "medium", "high"],
                 "description": "AI detection sensitivity: 'low' (sensitive, catches more), 'medium' (balanced), 'high' (conservative). Only effective with detect_ai=true"
             }));
-            props.insert("include_telemetry".into(), json!({
+        props.insert("include_telemetry".into(), json!({
                 "type": "boolean",
                 "description": "Include per-request token telemetry metrics in the response (LLM cost accounting)"
             }));
-            props.insert("include_stats".into(), json!({
+        props.insert("include_stats".into(), json!({
                 "type": "boolean",
                 "description": "Include per-issue resolution tier and session-level summary_metrics (deterministic/heuristic/llm_judged/unresolved counts, confidence distribution)"
             }));
-            json!({
-                "type": "object",
-                "properties": Value::Object(props),
-                "required": ["text"]
+        props
+    })
+}
+
+fn tool_definitions() -> Vec<Tool> {
+    // Cloning the Arc, not the schema: the value is identical on every
+    // listing, and deep-copying a dozen nested property objects to produce it
+    // again is work with no result.
+    let input_schema = input_schema().clone();
+
+    vec![Tool::new(
+        "zhtw",
+        "Lint/fix/gate zh-TW text. Auto-converts Simplified Chinese to Traditional before applying rules. Use verify=true to calibrate issues via Google Translate anchor matching.",
+        input_schema,
+    )
+    .with_annotations(ToolAnnotations::new().read_only(true).idempotent(true))]
+}
+
+/// The tools this server exposes.
+///
+/// The lists below all say the same thing about caching, and say it because
+/// they have to: `ttlMs` and `cacheScope` are required of a cacheable result
+/// from 2026-07-28 on and the SDK leaves both unset. Zero and private is the
+/// honest answer here, since the ruleset is fixed for the process but a
+/// restart with different overrides or packs changes these lists and nothing
+/// would tell the client.
+pub(crate) fn list_tools() -> ListToolsResult {
+    ListToolsResult::with_all_items(tool_definitions())
+        .with_ttl_ms(0)
+        .with_cache_scope(CacheScope::Private)
+}
+
+pub(crate) fn list_resources() -> ListResourcesResult {
+    resources::list_resources()
+        .with_ttl_ms(0)
+        .with_cache_scope(CacheScope::Private)
+}
+
+/// No resource templates: this server exposes two fixed URIs and no patterns.
+pub(crate) fn list_resource_templates() -> ListResourceTemplatesResult {
+    ListResourceTemplatesResult::with_all_items(Vec::new())
+        .with_ttl_ms(0)
+        .with_cache_scope(CacheScope::Private)
+}
+
+pub(crate) fn list_prompts() -> ListPromptsResult {
+    ListPromptsResult::with_all_items(prompts::list_prompts())
+        .with_ttl_ms(0)
+        .with_cache_scope(CacheScope::Private)
+}
+
+pub(crate) fn get_prompt(
+    name: &str,
+    arguments: &std::collections::HashMap<String, String>,
+) -> ParamResult<GetPromptResult> {
+    prompts::get_prompt(name, arguments)
+        .ok_or_else(|| ErrorData::invalid_params(format!("unknown prompt: {name}"), None))
+}
+
+impl Catalog {
+    /// Read one resource. Needs the ruleset, so it takes the catalogue rather
+    /// than the server, and therefore takes no lock.
+    pub(crate) fn read_resource(&self, uri: &str) -> ParamResult<ReadResourceResult> {
+        resources::read_resource(uri, self.scanner.spelling_rules(), &self.ambiguous_dict)
+            .map(|result| {
+                // Not cacheable, for the reason given on `list_tools`.
+                result.with_ttl_ms(0).with_cache_scope(CacheScope::Private)
             })
-        },
-        annotations: Some(ToolAnnotations {
-            destructive: None,
-            idempotent: Some(true),
-            read_only: Some(true),
-            open_world: None,
-        }),
-    }]
+            // resource_not_found rather than invalid_params: the URI is
+            // well-formed, it just names nothing. The SDK maps this to
+            // -32002, and upgrades it to -32602 for a peer on 2026-07-28 or
+            // newer, per SEP-2164, so each revision gets the code it expects.
+            .ok_or_else(|| {
+                ErrorData::resource_not_found(format!("unknown resource URI: {uri}"), None)
+            })
+    }
+}
+
+/// What a scan concluded about an issue, kept across a fix so the re-scan
+/// does not have to conclude it again.
+///
+/// Tier 2 and Tier 3 reach these by calibration and by asking the client, and
+/// neither runs on the re-scan: without carrying them over, a fixed document
+/// reports its remaining issues stripped of everything that was learned.
+struct PreservedState {
+    term: String,
+    orig_offset: usize,
+    length: usize,
+    english: Option<Arc<str>>,
+    severity: Severity,
+    anchor_match: Option<bool>,
+    context: Option<Arc<str>>,
+    suggestions: Vec<String>,
+}
+
+fn snapshot_states(issues: &[Issue]) -> Vec<PreservedState> {
+    issues
+        .iter()
+        .map(|i| PreservedState {
+            term: i.found.clone(),
+            orig_offset: i.offset,
+            length: i.length,
+            english: i.english.clone(),
+            severity: i.severity,
+            anchor_match: i.anchor_match,
+            context: i.context.clone(),
+            suggestions: i.suggestions.to_vec(),
+        })
+        .collect()
+}
+
+/// Put each preserved judgment back on the issue it belongs to.
+///
+/// The fix moves text, so the offsets a snapshot was taken at no longer
+/// address the same place. Offsets are remapped once and indexed, rather than
+/// remapped per issue, and a match has to agree on term, length and anchor as
+/// well as offset: two issues can land on one offset after a fix, and giving
+/// one of them the other's judgment is worse than giving it none.
+fn restore_preserved_states(
+    issues: &mut [Issue],
+    preserved: &[PreservedState],
+    applied: &[crate::fixer::AppliedFix],
+) {
+    use rustc_hash::FxHashMap;
+    let mut by_offset: FxHashMap<usize, Vec<usize>> =
+        FxHashMap::with_capacity_and_hasher(preserved.len(), Default::default());
+    for (idx, state) in preserved.iter().enumerate() {
+        by_offset
+            .entry(remap_to_post_fix(state.orig_offset, applied))
+            .or_default()
+            .push(idx);
+    }
+
+    for issue in issues {
+        let Some(candidates) = by_offset.get(&issue.offset) else {
+            continue;
+        };
+        let matched = candidates.iter().find(|&&idx| {
+            let s = &preserved[idx];
+            s.term == issue.found && s.length == issue.length && s.english == issue.english
+        });
+        if let Some(&idx) = matched {
+            let state = &preserved[idx];
+            issue.severity = state.severity;
+            issue.anchor_match = state.anchor_match;
+            issue.context = state.context.clone();
+            issue.suggestions = state.suggestions.clone().into();
+            issue.refresh_suggested_rewrite();
+        }
+    }
+}
+
+/// A tool-level error: the call succeeded at the protocol layer and failed at
+/// the tool layer, which is what lets a client show it rather than fail.
+fn tool_error(message: String) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(message)])
+}
+
+/// One text block, which is the only shape this tool returns.
+///
+/// `isError` is cleared rather than sent as `false`: it was absent on success
+/// before the SDK landed, and a client testing for the key's presence rather
+/// than its value would read the explicit `false` as a failure.
+fn tool_text(text: String) -> CallToolResult {
+    let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+    result.is_error = None;
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::types::RequestId;
     use crate::rules::ruleset::Tier2Outcome;
+    use rmcp::model::ErrorCode;
 
     /// Tool annotations must serialize with the MCP-spec `*Hint` wire names;
     /// any other spelling is silently dropped by spec-compliant clients.
@@ -3519,9 +3394,11 @@ mod tests {
         assert_eq!(summary.tier2_gray_zone, 1);
     }
 
-    fn make_initialized_server_with_version(
-        version: &str,
-    ) -> (Server, tempfile::TempDir, JsonRpcResponse) {
+    /// A server past the handshake.
+    ///
+    /// The handshake itself belongs to the SDK adapter now, so this records
+    /// the negotiated client state the same way `SdkServer::initialize` does.
+    fn make_initialized_server() -> (Server, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let mut server = Server::new(
             OverrideStore::open(&dir.path().join("overrides.json")).unwrap(),
@@ -3531,58 +3408,28 @@ mod tests {
             None,
         )
         .unwrap();
-        let mut init_req = JsonRpcRequest {
-            jsonrpc: "2.0".into(),
-            id: Some(RequestId::Int(0)),
-            method: "initialize".into(),
-            params: serde_json::json!({
-                "protocolVersion": version,
-                "capabilities": {},
-                "clientInfo": { "name": "test", "version": "0.1" }
-            }),
-        };
-        let resp = server.dispatch_preinit(&mut init_req).unwrap().unwrap();
-
-        (server, dir, resp)
-    }
-
-    fn make_initialized_server() -> (Server, tempfile::TempDir) {
-        let (server, dir, resp) = make_initialized_server_with_version(MCP_PROTOCOL_VERSION);
-        assert!(resp.error.is_none());
+        server.set_client("test".into());
         (server, dir)
     }
 
-    fn call_zhtw(server: &mut Server, args: serde_json::Value) -> JsonRpcResponse {
-        let mut req = JsonRpcRequest {
-            jsonrpc: "2.0".into(),
-            id: Some(RequestId::Int(1)),
-            method: "tools/call".into(),
-            params: serde_json::json!({ "name": "zhtw", "arguments": args }),
-        };
-        server.handle_tools_call(&mut req, None)
+    /// Drive one `zhtw` call the way the adapter does.
+    fn call_zhtw(server: &mut Server, args: serde_json::Value) -> ParamResult<CallToolResult> {
+        server.call_tool("zhtw", &args, None)
     }
 
-    fn assert_tool_success(resp: &JsonRpcResponse) -> serde_json::Value {
-        let result = resp.result.as_ref().unwrap();
-        assert!(result.get("isError").is_none());
-        let content = result.get("content").and_then(|v| v.as_array()).unwrap();
-        assert!(!content.is_empty());
-        let text = content[0].get("text").and_then(|v| v.as_str()).unwrap();
-        serde_json::from_str(text).unwrap()
+    /// The tool's JSON payload, asserting it reported success on the way.
+    fn assert_tool_success(resp: &ParamResult<CallToolResult>) -> serde_json::Value {
+        let result = resp.as_ref().expect("tool call succeeded");
+        assert!(result.is_error.is_none());
+        let text = result.content[0]
+            .as_text()
+            .expect("the tool returns one text block");
+        serde_json::from_str(&text.text).unwrap()
     }
 
-    #[test]
-    fn initialize_protocol_version_mismatch() {
-        let (server, _dir, resp) = make_initialized_server_with_version("2025-06-18");
-        assert!(
-            resp.error.is_none(),
-            "initialize should succeed on version mismatch"
-        );
-        assert_eq!(
-            resp.result.as_ref().unwrap()["protocolVersion"],
-            MCP_PROTOCOL_VERSION
-        );
-        assert!(server.initialized);
+    /// The error of a call that was expected to fail.
+    fn assert_tool_error(resp: ParamResult<CallToolResult>) -> ErrorData {
+        resp.expect_err("tool call failed")
     }
 
     #[test]
@@ -3601,16 +3448,9 @@ mod tests {
     #[test]
     fn tools_call_arguments_not_object() {
         let (mut server, _dir) = make_initialized_server();
-        let mut req = JsonRpcRequest {
-            jsonrpc: "2.0".into(),
-            id: Some(RequestId::Int(1)),
-            method: "tools/call".into(),
-            params: serde_json::json!({ "name": "zhtw", "arguments": "not_an_object" }),
-        };
-        let resp = server.handle_tools_call(&mut req, None);
-        assert!(resp.error.is_some());
-        let err = resp.error.unwrap();
-        assert_eq!(err.code, INVALID_PARAMS);
+        let resp = server.call_tool("zhtw", &serde_json::json!("not_an_object"), None);
+        let err = resp.expect_err("a non-object arguments value is a parameter error");
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
     }
 
     #[test]
@@ -3618,9 +3458,8 @@ mod tests {
         let (mut server, _dir) = make_initialized_server();
         let big_text = "あ".repeat(Server::MAX_TEXT_BYTES + 1);
         let resp = call_zhtw(&mut server, serde_json::json!({ "text": big_text }));
-        assert!(resp.error.is_some());
-        let err = resp.error.unwrap();
-        assert_eq!(err.code, INVALID_PARAMS);
+        let err = assert_tool_error(resp);
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
     }
 
     #[test]
@@ -3634,9 +3473,8 @@ mod tests {
                 "detect_style": true
             }),
         );
-        assert!(resp.error.is_some());
-        let err = resp.error.unwrap();
-        assert_eq!(err.code, INVALID_PARAMS);
+        let err = assert_tool_error(resp);
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
         assert!(err.message.contains("detect_style"));
     }
 
@@ -3644,7 +3482,7 @@ mod tests {
     fn tools_call_empty_text_input() {
         let (mut server, _dir) = make_initialized_server();
         let resp = call_zhtw(&mut server, serde_json::json!({ "text": "" }));
-        assert!(resp.error.is_none());
+        assert!(resp.is_ok());
         let output = assert_tool_success(&resp);
         assert_eq!(output["accepted"], true);
         assert_eq!(output["gate"]["enabled"], false);
@@ -3652,11 +3490,104 @@ mod tests {
     }
 
     #[test]
-    fn known_params_list_includes_all_documented_params() {
-        // Round-4 validation regression: every parameter that the schema
-        // documents must also be in zhtw_known_params(), or the strict
-        // validator rejects valid clients with -32602.
-        let known: std::collections::HashSet<&str> = zhtw_known_params().iter().copied().collect();
+    fn a_declared_default_is_the_one_the_parser_applies() {
+        // Generic over the schema rather than naming the field, the same way
+        // the accepted-values check is: a `"default"` a client reads and a
+        // default the parser applies are two statements of one fact, and the
+        // drift between them is silent.
+        for (field, prop) in input_schema_properties() {
+            let Some(default) = prop.get("default").and_then(Value::as_str) else {
+                continue;
+            };
+            assert!(
+                accepted_values(field).contains(&default),
+                "{field} declares a default the schema does not accept: {default:?}"
+            );
+            assert_eq!(
+                parse_content_type(&json!({})).ok(),
+                ContentType::from_name(default),
+                "{field}: the parser's default and the schema's disagree"
+            );
+        }
+    }
+
+    #[test]
+    fn omitting_content_type_leaves_the_text_plain() {
+        // A tool call has no file name to infer from, and treating unmarked
+        // text as Markdown silently skips anything in it that looks like a
+        // fence. Nothing else pins this default.
+        assert_eq!(
+            parse_content_type(&json!({})).expect("no content_type is allowed"),
+            ContentType::Plain
+        );
+        assert_eq!(
+            parse_content_type(&json!({ "content_type": "markdown" })).unwrap(),
+            ContentType::Markdown
+        );
+    }
+
+    #[test]
+    fn every_value_the_schema_advertises_actually_parses() {
+        // The schema is what a client reads to learn what it may send, and
+        // these parsers are what decides. Stating the vocabulary in both
+        // places is how a value gets advertised and then refused as invalid,
+        // so the check is that each advertised value survives its parser.
+        /// A parameter name and the parser that decides its values.
+        type ParserFor = (&'static str, fn(&Value) -> bool);
+        let cases: &[ParserFor] = &[
+            ("fix_mode", |v| parse_fix_mode(v).is_ok()),
+            ("content_type", |v| parse_content_type(v).is_ok()),
+            ("profile", |v| parse_profile(v).is_ok()),
+            ("political_stance", |v| parse_political_stance(v).is_ok()),
+            ("fix_output", |v| parse_fix_output(v).is_ok()),
+            ("output", |v| parse_output_mode(v, OutputMode::Full).is_ok()),
+        ];
+
+        // Every field routed through `enum_param_error` needs a schema enum to
+        // quote, including the two parsed inline rather than by a named
+        // parser: without one the rejection reports an empty `accepted` list.
+        for field in [
+            "fix_mode",
+            "content_type",
+            "profile",
+            "political_stance",
+            "fix_output",
+            "output",
+            "translationese_domain",
+            "ai_threshold",
+        ] {
+            assert!(
+                !accepted_values(field).is_empty(),
+                "{field} is rejected against the schema, so the schema must declare its values"
+            );
+        }
+
+        for (field, parses) in cases {
+            let accepted = accepted_values(field);
+            for value in accepted {
+                let args = json!({ *field: value });
+                assert!(
+                    parses(&args),
+                    "the schema advertises {field}={value:?} but the parser rejects it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_rejected_value_is_told_what_the_schema_allows() {
+        let err = enum_param_error("profile", "nonsense");
+        let accepted = err.data.as_ref().and_then(|d| d.get("accepted")).cloned();
+        assert_eq!(accepted, Some(json!(["base", "strict"])));
+    }
+
+    #[test]
+    fn schema_documents_every_parameter_the_tool_takes() {
+        // The validator reads the accepted set straight off the schema, so a
+        // parameter documented but not accepted is no longer possible. What
+        // this pins is the other direction: that the schema still carries each
+        // of these, since dropping one now silently stops accepting it too.
+        let known = input_schema_properties();
         for p in [
             "text",
             "fix_mode",
@@ -3682,8 +3613,8 @@ mod tests {
             "include_stats",
         ] {
             assert!(
-                known.contains(p),
-                "documented parameter {p:?} missing from zhtw_known_params()",
+                known.contains_key(p),
+                "parameter {p:?} missing from the tool's input schema",
             );
         }
     }
@@ -3695,20 +3626,21 @@ mod tests {
             &mut server,
             serde_json::json!({ "text": "", "max_errors": 0 }),
         );
-        assert!(resp.error.is_none());
+        assert!(resp.is_ok());
         let output = assert_tool_success(&resp);
         assert_eq!(output["accepted"], true);
         assert_eq!(output["gate"]["enabled"], true);
         assert_eq!(output["gate"]["max_errors"], 0);
     }
 
-    fn assert_tool_rejected(resp: &JsonRpcResponse) -> serde_json::Value {
-        let result = resp.result.as_ref().unwrap();
-        assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
-        let content = result.get("content").and_then(|v| v.as_array()).unwrap();
-        assert!(!content.is_empty());
-        let text = content[0].get("text").and_then(|v| v.as_str()).unwrap();
-        serde_json::from_str(text).unwrap()
+    /// The tool's JSON payload for a call the response gate turned down.
+    fn assert_tool_rejected(resp: &ParamResult<CallToolResult>) -> serde_json::Value {
+        let result = resp.as_ref().expect("the gate reports through the result");
+        assert_eq!(result.is_error, Some(true));
+        let text = result.content[0]
+            .as_text()
+            .expect("the tool returns one text block");
+        serde_json::from_str(&text.text).unwrap()
     }
 
     #[test]
@@ -3743,7 +3675,7 @@ mod tests {
             &mut server,
             serde_json::json!({ "text": "", "max_warnings": 0 }),
         );
-        assert!(resp.error.is_none());
+        assert!(resp.is_ok());
         let output = assert_tool_success(&resp);
         assert_eq!(output["accepted"], true);
         assert_eq!(output["gate"]["enabled"], true);
@@ -3932,10 +3864,8 @@ mod tests {
             &mut server,
             serde_json::json!({ "text": "", "content_type": "invalid_type" }),
         );
-        assert!(resp.error.is_some());
-        assert!(resp.result.is_none());
-        let err = resp.error.unwrap();
-        assert_eq!(err.code, INVALID_PARAMS);
+        let err = assert_tool_error(resp);
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
         let data = err.data.unwrap();
         assert_eq!(data["field"], "content_type");
         assert_eq!(data["value"], "invalid_type");
@@ -3948,10 +3878,8 @@ mod tests {
             &mut server,
             serde_json::json!({ "text": "", "profile": "invalid_profile" }),
         );
-        assert!(resp.error.is_some());
-        assert!(resp.result.is_none());
-        let err = resp.error.unwrap();
-        assert_eq!(err.code, INVALID_PARAMS);
+        let err = assert_tool_error(resp);
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
         let data = err.data.unwrap();
         assert_eq!(data["field"], "profile");
         assert_eq!(data["value"], "invalid_profile");
@@ -3964,10 +3892,8 @@ mod tests {
             &mut server,
             serde_json::json!({ "text": "", "fix_mode": "invalid_fix_mode" }),
         );
-        assert!(resp.error.is_some());
-        assert!(resp.result.is_none());
-        let err = resp.error.unwrap();
-        assert_eq!(err.code, INVALID_PARAMS);
+        let err = assert_tool_error(resp);
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
         let data = err.data.unwrap();
         assert_eq!(data["field"], "fix_mode");
         assert_eq!(data["value"], "invalid_fix_mode");
@@ -3980,10 +3906,8 @@ mod tests {
             &mut server,
             serde_json::json!({ "text": "", "political_stance": "invalid_stance" }),
         );
-        assert!(resp.error.is_some());
-        assert!(resp.result.is_none());
-        let err = resp.error.unwrap();
-        assert_eq!(err.code, INVALID_PARAMS);
+        let err = assert_tool_error(resp);
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
         let data = err.data.unwrap();
         assert_eq!(data["field"], "political_stance");
         assert_eq!(data["value"], "invalid_stance");

@@ -430,6 +430,51 @@ pub fn compile_rule_predicates(
     preds
 }
 
+/// True when one of `forms` sits in the text so that it covers the match at
+/// `start`, each form being paired with the offsets at which the match may
+/// appear inside it.
+///
+/// Shared by the superstring and exception-phrase predicates, which differ
+/// only in what the covering form means: an already-correct longer word in one
+/// case, a phrase the rule does not apply to in the other.
+fn covered_by_form(text: &str, start: usize, forms: &[(String, Vec<usize>)]) -> bool {
+    forms.iter().any(|(form, offsets)| {
+        offsets.iter().any(|&offset| {
+            let Some(form_start) = start.checked_sub(offset) else {
+                return false;
+            };
+            let form_end = form_start.saturating_add(form.len()).min(text.len());
+            text.get(form_start..form_end) == Some(form.as_str())
+        })
+    })
+}
+
+/// Widen a deletion span over a trailing full-width comma or colon, unless
+/// that would reach into an excluded range.
+fn extended_deletion_span(ctx: &MatchContext<'_>, end: usize) -> usize {
+    if end > ctx.text.len() {
+        return end;
+    }
+    let Some(c) = ctx.text.get(end..).and_then(|s| s.chars().next()) else {
+        return end;
+    };
+    if !matches!(c, '\u{FF0C}' | '\u{FF1A}') {
+        return end;
+    }
+    let extended = end.saturating_add(c.len_utf8());
+    if extended > ctx.text.len() {
+        return end;
+    }
+    let excluded_overlap = *ctx.excl_cursor < ctx.excluded.len()
+        && ctx.excluded[*ctx.excl_cursor].start < extended
+        && end < ctx.excluded[*ctx.excl_cursor].end;
+    if excluded_overlap {
+        end
+    } else {
+        extended
+    }
+}
+
 // eval_predicates() -- generic path for CLASS_CLUED and CLASS_FULL
 
 /// Evaluate a compiled rule's predicate chain against a match context.
@@ -482,19 +527,8 @@ pub fn eval_predicates(
                 }
             }
             MatchPredicate::RejectIfSuperstring { forms } => {
-                let absorbed = forms.iter().any(|(correct, offsets)| {
-                    offsets.iter().any(|&wrong_pos| {
-                        if let Some(correct_start) = ctx.start.checked_sub(wrong_pos) {
-                            let correct_end = correct_start
-                                .saturating_add(correct.len())
-                                .min(ctx.text.len());
-                            ctx.text.get(correct_start..correct_end) == Some(correct.as_str())
-                        } else {
-                            false
-                        }
-                    })
-                });
-                if absorbed {
+                // The match sits inside an already-correct longer form.
+                if covered_by_form(ctx.text, ctx.start, forms) {
                     return None;
                 }
             }
@@ -510,17 +544,7 @@ pub fn eval_predicates(
                 }
             }
             MatchPredicate::RejectIfInExceptionPhrase { exceptions } => {
-                let in_exception = exceptions.iter().any(|(exc, offsets)| {
-                    offsets.iter().any(|&pos| {
-                        if let Some(exc_start) = ctx.start.checked_sub(pos) {
-                            let exc_end = exc_start.saturating_add(exc.len()).min(ctx.text.len());
-                            ctx.text.get(exc_start..exc_end) == Some(exc.as_str())
-                        } else {
-                            false
-                        }
-                    })
-                });
-                if in_exception {
+                if covered_by_form(ctx.text, ctx.start, exceptions) {
                     return None;
                 }
             }
@@ -564,21 +588,7 @@ pub fn eval_predicates(
                 }
             }
             MatchPredicate::MayExtendDeletionSpan => {
-                if end <= ctx.text.len() {
-                    if let Some(c) = ctx.text.get(end..).and_then(|s| s.chars().next()) {
-                        if matches!(c, '\u{FF0C}' | '\u{FF1A}') {
-                            let extended = end.saturating_add(c.len_utf8());
-                            if extended <= ctx.text.len() {
-                                let excluded_overlap = *ctx.excl_cursor < ctx.excluded.len()
-                                    && ctx.excluded[*ctx.excl_cursor].start < extended
-                                    && end < ctx.excluded[*ctx.excl_cursor].end;
-                                if !excluded_overlap {
-                                    end = extended;
-                                }
-                            }
-                        }
-                    }
-                }
+                end = extended_deletion_span(ctx, end);
             }
         }
     }

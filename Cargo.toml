@@ -30,10 +30,11 @@ native = [
     "dep:dirs",
     "dep:fs2",
     "dep:rayon",
+    "dep:rmcp",
     "dep:tempfile",
+    "dep:tokio",
     "dep:toml",
 ]
-async-transport = ["native"]
 browser-wasm = ["dep:console_error_panic_hook", "dep:wasm-bindgen"]
 translate = ["dep:ureq", "dep:urlencoding"]
 
@@ -68,6 +69,18 @@ fs2 = { version = "0.4", optional = true }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 console_error_panic_hook = { version = "0.1", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
+rmcp = { version = "3", default-features = false, features = [
+    "server",
+    "transport-io",
+], optional = true }
+tokio = { version = "1", features = [
+    "io-std",
+    "io-util",
+    "macros",
+    "rt",
+    "sync",
+    "time",
+], optional = true }
 
 [build-dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -76,6 +89,9 @@ postcard = { version = "1", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
+# Only for `start_paused`, which lets the 30s drain timeout be tested without
+# waiting 30s. Resolver v2 keeps a dev-only feature out of the release binary.
+tokio = { version = "1", features = ["test-util"] }
 
 [[bench]]
 name = "scanner"

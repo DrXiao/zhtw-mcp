@@ -19,12 +19,12 @@ The scanner detects Traditional vs. Simplified Chinese by counting exclusive cha
 
 ## Design decisions
 
-- No async runtime. Synchronous stdio uses a background thread + mpsc for timeout-bounded sampling. `--features async-transport` remains as a compatibility alias.
+- The MCP server runs on the official RMCP SDK over a single-threaded Tokio runtime, gated behind the `native` feature so the wasm and library builds pull in neither. RMCP owns method routing and server-to-client requests; `mcp/transport.rs` keeps the JSON-RPC framing contract in front of it (4 MiB line bound, -32700 for unparsable input, -32600 with the id echoed, pre-initialize rejection); the lint pipeline stays synchronous and runs on the blocking pool.
 - Pure Rust, no C/C++ dependencies. MMSEG segmenter builds its dictionary from ruleset vocabulary at construction time.
 - Byte-safe edits: positions from pulldown-cmark event ranges map back to original byte offsets.
 - JSON ruleset (`assets/ruleset.json`) embedded via `include_str!`. Runtime overrides in platform config directory.
-- SHA-256 trace IDs for reproducibility. No `uuid` crate dependency.
-- Small release binary (~3 MB on x86-64 Linux, LTO + strip).
+- SHA-256 trace IDs for reproducibility. The `uuid` crate arrives transitively through RMCP and is not used for trace IDs.
+- Release binary about 9 MB on aarch64-apple-darwin (LTO + strip), against the 20 MiB `make check-size` gate.
 - Sampling (step 10) only activates when running as an MCP server inside an AI assistant. The standalone CLI runs Tier 2 disambiguation but skips Tier 3 sampling, keeping gray-zone issues at their original severity.
 - Persistent judgment cache (`~/.config/zhtw-mcp/judgment_cache.json`) stores LLM disambiguation results keyed on a 9-field blake3-hashed composite (ruleset_hash, prompt/disambig versions, profile, content type, normalized context, term, candidate set hash, english anchor). 30-day TTL, 10000-entry cap, atomic writes (tempfile + rename), schema-versioned with backup-and-reset. Eliminates repeated LLM calls across sessions.
 - Incremental scan cache (BLAKE3-keyed, 24h TTL, 2000-entry cap) skips re-scanning unchanged files in lint-only CLI mode. Disabled for `--fix`, `--verify`, and stdin. MCP path does not use the cache (stateless by design).

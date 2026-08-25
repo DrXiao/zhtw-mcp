@@ -2,6 +2,45 @@
 
 The server exposes 1 tool, 2 resources, and 3 prompts over JSON-RPC 2.0 (stdio transport), plus MCP Sampling for server-initiated LLM disambiguation.
 
+## Protocol versions
+
+`2026-07-28`, `2025-11-25`, `2025-06-18`, `2025-03-26`, and `2024-11-05`.
+
+`2026-07-28` is the odd one: it has no `initialize` at all. `server/discover`
+is the entry point and the client declares its protocol version and
+capabilities in per-request `_meta`, which is the lifecycle this server
+implements. It also requires `ttlMs` and `cacheScope` on every list and read
+result, which this server sets to `0` and `private`. Sampling is deprecated in
+that revision but kept in the specification for at least twelve months, so the
+Tier 3 path stays valid under it. Of the ten client requests it defines, this
+server answers eight; `completion/complete` and `subscriptions/listen` are
+refused because the capabilities that gate them (`completions` and
+`resources.subscribe`) are not advertised.
+
+The older revisions negotiate through `initialize`, which the SDK handles, and
+share the same tool, resource, and prompt surface.
+
+`server/discover` answers before the handshake with that list and the server
+capabilities, so a client can pick a revision without committing to one first.
+Per the `2026-07-28` requirement, it needs the `_meta` keys
+`io.modelcontextprotocol/protocolVersion` and
+`io.modelcontextprotocol/clientCapabilities`.
+
+An `initialize` naming a revision outside the list is refused with `-32022`
+(`UNSUPPORTED_PROTOCOL_VERSION`) whose `data` carries `requested` and
+`supported`, rather than being answered with a different version than the one
+asked for. `2026-07-28` is refused there too, for the opposite reason: that
+revision defines no `initialize`, so a client naming it in one has the wrong
+entry point. Its refusal says so, and carries `entryPoint`:
+`server/discover`. In both cases `supported` lists only the revisions
+`initialize` can actually reach, so `2026-07-28` is absent from it; offering
+it would send the client back to the method that just failed. Every other
+listed revision is answered with itself.
+
+A refused handshake ends the session, and ends it cleanly: the client received
+a definite protocol answer, so the process exits zero rather than reporting a
+failure it did not have.
+
 ## Tool: `zhtw`
 
 Unified lint / fix / gate for zh-TW text.

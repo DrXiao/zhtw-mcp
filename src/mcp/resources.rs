@@ -4,7 +4,10 @@
 //   zh-tw://style-guide/moe   — MoE punctuation, variant, and vocabulary standards
 //   zh-tw://dictionary/ambiguous — terms needing LLM disambiguation
 
-use super::types::{ResourceContent, ResourceDef, ResourceReadResult, ResourcesListResult};
+use std::sync::OnceLock;
+
+use rmcp::model::{ListResourcesResult, ReadResourceResult, Resource, ResourceContents};
+
 use crate::rules::ruleset::SpellingRule;
 
 /// URI for the MoE style guide resource.
@@ -14,36 +17,40 @@ pub const STYLE_GUIDE_URI: &str = "zh-tw://style-guide/moe";
 pub const AMBIGUOUS_DICT_URI: &str = "zh-tw://dictionary/ambiguous";
 
 /// Return the list of available resources.
-pub fn list_resources() -> ResourcesListResult {
-    ResourcesListResult {
-        resources: vec![
-            ResourceDef {
-                uri: STYLE_GUIDE_URI.into(),
-                name: "MoE zh-TW Style Guide".into(),
-                description: "Ministry of Education punctuation, character variant, and vocabulary standards for Traditional Chinese (Taiwan)".into(),
-                mime_type: "text/markdown".into(),
-            },
-            ResourceDef {
-                uri: AMBIGUOUS_DICT_URI.into(),
-                name: "Ambiguous Terms Dictionary".into(),
-                description: "Cross-strait terms requiring disambiguation — each entry includes CN form, TW form, English anchor, and context".into(),
-                mime_type: "application/json".into(),
-            },
-        ],
-    }
+pub fn list_resources() -> ListResourcesResult {
+    let style_guide = Resource::new(STYLE_GUIDE_URI, "MoE zh-TW Style Guide")
+        .with_description("Ministry of Education punctuation, character variant, and vocabulary standards for Traditional Chinese (Taiwan)")
+        .with_mime_type("text/markdown");
+    let dictionary = Resource::new(AMBIGUOUS_DICT_URI, "Ambiguous Terms Dictionary")
+        .with_description("Cross-strait terms requiring disambiguation, each entry with CN form, TW form, English anchor, and context")
+        .with_mime_type("application/json");
+
+    ListResourcesResult::with_all_items(vec![style_guide, dictionary])
 }
 
 /// Read a specific resource by URI.
-pub fn read_resource(uri: &str, spelling_rules: &[SpellingRule]) -> Option<ResourceReadResult> {
+///
+/// The dictionary is a pure function of the ruleset, which is fixed once the
+/// scanner is built, so `dict_cache` (owned by the server, not a global, since
+/// one process can host servers with different rulesets) holds the rendered
+/// JSON after the first read. Rebuilding it per read cost 322 KB of
+/// pretty-printing while the server lock was held.
+pub fn read_resource(
+    uri: &str,
+    spelling_rules: &[SpellingRule],
+    dict_cache: &OnceLock<String>,
+) -> Option<ReadResourceResult> {
     match uri {
         STYLE_GUIDE_URI => Some(read_style_guide()),
-        AMBIGUOUS_DICT_URI => Some(read_ambiguous_dict(spelling_rules)),
+        AMBIGUOUS_DICT_URI => Some(read_ambiguous_dict(
+            dict_cache.get_or_init(|| build_ambiguous_dict(spelling_rules)),
+        )),
         _ => None,
     }
 }
 
 /// Generate the MoE style guide resource content.
-fn read_style_guide() -> ResourceReadResult {
+fn read_style_guide() -> ReadResourceResult {
     let content = r#"# 教育部國語文標準 — zh-TW Style Guide
 
 ## Punctuation (重訂標點符號手冊)
@@ -107,18 +114,24 @@ Use Taiwan-standard vocabulary rather than Mainland China equivalents:
 - `detect_ai`: AI writing review — filler phrases, semantic safety words, density patterns
 "#;
 
-    ResourceReadResult {
-        contents: vec![ResourceContent {
-            uri: STYLE_GUIDE_URI.into(),
-            mime_type: "text/markdown".into(),
-            text: content.into(),
-        }],
-    }
+    text_resource(STYLE_GUIDE_URI, "text/markdown", content.into())
 }
 
 /// Generate the ambiguous dictionary from spelling rules that have an english
 /// field.
-fn read_ambiguous_dict(spelling_rules: &[SpellingRule]) -> ResourceReadResult {
+fn read_ambiguous_dict(json: &str) -> ReadResourceResult {
+    text_resource(AMBIGUOUS_DICT_URI, "application/json", json.to_owned())
+}
+
+/// One text resource, which is the only shape either resource here takes.
+fn text_resource(uri: &str, mime_type: &str, text: String) -> ReadResourceResult {
+    ReadResourceResult::new(vec![
+        ResourceContents::text(text, uri).with_mime_type(mime_type)
+    ])
+}
+
+/// Render the ambiguous-terms dictionary. Called once per server.
+fn build_ambiguous_dict(spelling_rules: &[SpellingRule]) -> String {
     let entries: Vec<serde_json::Value> = spelling_rules
         .iter()
         .filter(|r| r.english.is_some() && !r.disabled)
@@ -133,20 +146,20 @@ fn read_ambiguous_dict(spelling_rules: &[SpellingRule]) -> ResourceReadResult {
         })
         .collect();
 
-    let json = serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".into());
-
-    ResourceReadResult {
-        contents: vec![ResourceContent {
-            uri: AMBIGUOUS_DICT_URI.into(),
-            mime_type: "application/json".into(),
-            text: json,
-        }],
-    }
+    serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The text of a single-content resource result.
+    fn resource_text(result: &ReadResourceResult) -> &str {
+        match &result.contents[0] {
+            ResourceContents::TextResourceContents { text, .. } => text,
+            other => panic!("expected text contents, got {other:?}"),
+        }
+    }
 
     #[test]
     fn list_returns_two_resources() {
@@ -158,11 +171,10 @@ mod tests {
 
     #[test]
     fn read_style_guide_returns_markdown() {
-        let result = read_resource(STYLE_GUIDE_URI, &[]).unwrap();
+        let result = read_resource(STYLE_GUIDE_URI, &[], &OnceLock::new()).unwrap();
         assert_eq!(result.contents.len(), 1);
-        assert_eq!(result.contents[0].mime_type, "text/markdown");
-        assert!(result.contents[0].text.contains("Punctuation"));
-        assert!(result.contents[0].text.contains("Character Variants"));
+        assert!(resource_text(&result).contains("Punctuation"));
+        assert!(resource_text(&result).contains("Character Variants"));
     }
 
     #[test]
@@ -179,8 +191,8 @@ mod tests {
             SpellingRule::new("軟件", vec!["軟體".into()], RuleType::CrossStrait),
         ];
 
-        let result = read_resource(AMBIGUOUS_DICT_URI, &rules).unwrap();
-        let text = &result.contents[0].text;
+        let result = read_resource(AMBIGUOUS_DICT_URI, &rules, &OnceLock::new()).unwrap();
+        let text = resource_text(&result);
         let entries: Vec<serde_json::Value> = serde_json::from_str(text).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["from"], "程序");
@@ -188,6 +200,26 @@ mod tests {
 
     #[test]
     fn read_unknown_uri_returns_none() {
-        assert!(read_resource("zh-tw://unknown", &[]).is_none());
+        assert!(read_resource("zh-tw://unknown", &[], &OnceLock::new()).is_none());
+    }
+
+    #[test]
+    fn ambiguous_dict_is_built_once_per_cache() {
+        use crate::rules::ruleset::RuleType;
+
+        let rules = vec![SpellingRule {
+            context: None,
+            english: Some("program".into()),
+            ..SpellingRule::new("程序", vec!["程式".into()], RuleType::CrossStrait)
+        }];
+        let cache = OnceLock::new();
+        let first = read_resource(AMBIGUOUS_DICT_URI, &rules, &cache).unwrap();
+
+        // A second read with an empty ruleset must still serve the cached
+        // payload: the ruleset cannot change under a live server, so the cache
+        // is what decides the content after the first read.
+        let second = read_resource(AMBIGUOUS_DICT_URI, &[], &cache).unwrap();
+        assert_eq!(resource_text(&first), resource_text(&second));
+        assert!(resource_text(&second).contains("程序"));
     }
 }

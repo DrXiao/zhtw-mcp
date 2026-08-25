@@ -180,6 +180,35 @@ impl ContentType {
         }
     }
 
+    /// The inverse of `name`, for the CLI flag and the MCP parameter.
+    ///
+    /// Beside `name` rather than at either caller, so the two directions
+    /// cannot disagree and the CLI and the tool answer the same way.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "plain" => Some(ContentType::Plain),
+            "markdown" => Some(ContentType::Markdown),
+            "markdown-scan-code" => Some(ContentType::MarkdownScanCode),
+            "yaml" => Some(ContentType::Yaml),
+            _ => None,
+        }
+    }
+
+    /// What a file name implies, when nothing was asked for explicitly.
+    ///
+    /// Case-insensitive: a `README.MD` is Markdown, and treating it as plain
+    /// text rewrites what a fence was protecting.
+    pub fn from_file_name(name: &str) -> Self {
+        let lower = name.to_ascii_lowercase();
+        if lower.ends_with(".md") || lower.ends_with(".markdown") {
+            ContentType::Markdown
+        } else if lower.ends_with(".yml") || lower.ends_with(".yaml") {
+            ContentType::Yaml
+        } else {
+            ContentType::Plain
+        }
+    }
+
     /// Whether `#` introduces a comment in this format, which decides
     /// where an inline suppression pragma may sit.
     ///

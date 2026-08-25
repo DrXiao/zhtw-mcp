@@ -244,7 +244,6 @@ def parse_ambiguous_chars() -> set[str]:
 # break the build.  Redundant and overridden entries are reported so they can be
 # retired, not treated as errors.
 EXTRA_PHRASES = {
-    "复盘": "復盤",
     "复联": "復聯",
 }
 

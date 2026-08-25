@@ -1,0 +1,721 @@
+//! RMCP SDK adapter.
+//!
+//! The `ServerHandler` RMCP dispatches to. Handlers here do three things and
+//! no more: run the matching `tools.rs` method on the blocking pool, carry its
+//! error across to RMCP's shape, and flush whatever it logged. Everything the
+//! wire sees is built in `tools.rs` as RMCP model types, so this module holds
+//! no wire format of its own.
+
+use std::sync::{Arc, Mutex, PoisonError};
+
+#[allow(deprecated)]
+use rmcp::model::{
+    CallToolRequestParams, CallToolResponse, CompleteRequestParams, CompleteResult,
+    CustomNotification, CustomRequest, CustomResult, ErrorCode, GetPromptRequestParams,
+    GetPromptResponse, Implementation, InitializeRequestParams, InitializeResult,
+    ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
+    LoggingMessageNotificationParam, PaginatedRequestParams, ProtocolVersion,
+    ReadResourceRequestParams, ReadResourceResponse, ServerCapabilities, ServerInfo,
+    SetLevelRequestParams,
+};
+use rmcp::service::{NotificationContext, Peer, RequestContext, RoleServer};
+use rmcp::{ErrorData, ServerHandler};
+use serde_json::Value;
+use tokio::sync::{mpsc, oneshot};
+
+use super::sampling::{
+    PeerSampler, SamplingBridge, DEFAULT_SAMPLING_BUDGET, DEFAULT_SAMPLING_TIMEOUT,
+};
+use super::tools::{ParamResult, Server};
+use super::transport::Lifecycle;
+
+/// Whether the judgment cache was written on the way out.
+#[derive(Debug, PartialEq, Eq)]
+enum Flushed {
+    Yes,
+    /// A scan is still running and holds the lock. Exit is unconditional, so
+    /// a contended lock costs the flush, not the exit.
+    SkippedForScanInFlight,
+}
+
+/// Flush the judgment cache before the process goes.
+///
+/// `process::exit` skips `Drop`, so this is the only chance to write it.
+///
+/// A poisoned lock is not a contended one. A handler that panicked left the
+/// flag set, and reading any lock error as "a scan is running" meant every
+/// later exit skipped the flush for a scan that was not there, losing the
+/// session's judgments. Poisoning is stepped over here the way it is at
+/// every other lock site in this module.
+fn flush_before_exit(inner: &Mutex<Server>) -> Flushed {
+    match inner.try_lock() {
+        Ok(mut server) => {
+            server.flush_judgment_cache();
+            Flushed::Yes
+        }
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+            poisoned.into_inner().flush_judgment_cache();
+            Flushed::Yes
+        }
+        Err(std::sync::TryLockError::WouldBlock) => {
+            tracing::warn!("exiting without flushing the judgment cache: scan in flight");
+            Flushed::SkippedForScanInFlight
+        }
+    }
+}
+
+/// One protocol revision this server serves, and how a client reaches it.
+///
+/// Whether a revision has a handshake is a fact about that revision, so it is
+/// recorded next to it. Deriving it from position instead ("every revision but
+/// the newest") holds only while exactly one revision lacks `initialize` and
+/// it happens to sort first: the next such revision added to the head would
+/// quietly make 2026-07-28 negotiable, which is the one thing the split exists
+/// to prevent.
+struct Revision {
+    version: ProtocolVersion,
+    /// Whether `initialize` can negotiate it. 2026-07-28 deleted the
+    /// handshake, so it is reached through `server/discover` instead.
+    handshake: bool,
+}
+
+/// The revisions this server serves, newest first.
+const REVISIONS: &[Revision] = &[
+    Revision {
+        version: ProtocolVersion::V_2026_07_28,
+        handshake: false,
+    },
+    Revision {
+        version: ProtocolVersion::V_2025_11_25,
+        handshake: true,
+    },
+    Revision {
+        version: ProtocolVersion::V_2025_06_18,
+        handshake: true,
+    },
+    Revision {
+        version: ProtocolVersion::V_2025_03_26,
+        handshake: true,
+    },
+    Revision {
+        version: ProtocolVersion::V_2024_11_05,
+        handshake: true,
+    },
+];
+
+/// Everything served: what `server/discover` advertises and RMCP negotiates
+/// within.
+fn supported_protocol_versions() -> &'static [ProtocolVersion] {
+    static ALL: std::sync::OnceLock<Vec<ProtocolVersion>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| REVISIONS.iter().map(|r| r.version.clone()).collect())
+}
+
+/// What `initialize` can reach, which is the only useful thing to offer a
+/// client whose `initialize` was refused.
+fn negotiable_protocol_versions() -> &'static [ProtocolVersion] {
+    static NEGOTIABLE: std::sync::OnceLock<Vec<ProtocolVersion>> = std::sync::OnceLock::new();
+    NEGOTIABLE.get_or_init(|| {
+        REVISIONS
+            .iter()
+            .filter(|r| r.handshake)
+            .map(|r| r.version.clone())
+            .collect()
+    })
+}
+
+/// The methods this server implements, for telling a request it cannot serve
+/// from one it can serve but whose parameters did not parse. Kept next to the
+/// handlers rather than derived from the SDK, which has no list of what a
+/// given server actually implements.
+///
+/// A method is here only if it is actually served. `completion/complete` is
+/// not: the `completions` capability is unadvertised and the handler refuses
+/// it, so listing it here would have made the same method answer
+/// method-not-found with good parameters and invalid-params with bad ones.
+const IMPLEMENTED_METHODS: &[&str] = &[
+    "tools/call",
+    "tools/list",
+    "resources/list",
+    "resources/read",
+    "resources/templates/list",
+    "prompts/list",
+    "prompts/get",
+    "logging/setLevel",
+    "initialize",
+    "server/discover",
+    "ping",
+];
+
+/// The -32603 returned when a request handler panics.
+///
+/// `spawn_blocking` catches the unwind, the lock guard is released on the way
+/// out, and the poison flag is ignored on the next lock, so one bad request
+/// costs a response rather than the server.
+fn handler_panicked() -> ErrorData {
+    tracing::error!("request handler panicked");
+    ErrorData::internal_error("internal error: request handler panicked", None)
+}
+
+pub struct SdkServer {
+    inner: Arc<Mutex<Server>>,
+    /// The immutable half of the server, so the handlers that only read it
+    /// answer while a lint holds the lock instead of queueing behind it.
+    catalog: Arc<super::tools::Catalog>,
+    lifecycle: Arc<Lifecycle>,
+}
+
+impl SdkServer {
+    pub fn new(inner: Server) -> Self {
+        Self {
+            catalog: inner.catalog(),
+            inner: Arc::new(Mutex::new(inner)),
+            lifecycle: Arc::new(Lifecycle::default()),
+        }
+    }
+
+    /// The state the transport shares with this handler.
+    pub fn lifecycle(&self) -> Arc<Lifecycle> {
+        self.lifecycle.clone()
+    }
+
+    /// Send pending tracing output as `notifications/message`, before the
+    /// response that produced it, which is the order clients read causality
+    /// from.
+    #[allow(deprecated)]
+    async fn flush_logs(&self, peer: &Peer<RoleServer>) {
+        for message in self.lifecycle.drain_logs() {
+            // Built directly rather than round-tripped through a Value, which
+            // rebuilt the whole data tree twice per line and dropped the
+            // message outright if it ever failed to fit. The level arrives
+            // already typed, so nothing has to decide what it means here.
+            let param = LoggingMessageNotificationParam::new(message.level, message.data)
+                .with_logger(message.logger);
+            let _ = peer.notify_logging_message(param).await;
+        }
+    }
+
+    /// Run one read-only handler, flushing whatever it logged first.
+    ///
+    /// This goes to the blocking pool for the same reason `call_tool` does,
+    /// and it is not an optimization: a lint holds the server lock across its
+    /// sampling round trip, so taking that lock on the runtime thread would
+    /// stall the very loop that has to answer the sampling request, and the
+    /// deadline with it. Parking a blocking-pool thread instead leaves the
+    /// runtime free.
+    async fn on_server<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Server) -> T + Send + 'static,
+    ) -> Result<T, ErrorData> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            f(&mut inner.lock().unwrap_or_else(PoisonError::into_inner))
+        })
+        .await
+        .map_err(|_| handler_panicked())
+    }
+
+    /// Record the handshake client's identity.
+    ///
+    /// Both entry points feed this: `initialize`, and `discover` for a client
+    /// that skips the handshake and declares itself in per-request `_meta`
+    /// instead. Capabilities are read from each request context so inline
+    /// sessions cannot leak them between requests.
+    ///
+    /// Off the runtime thread for the same reason every other handler is: a
+    /// re-declaration while a lint waits on sampling must not stall the loop
+    /// that has to answer it.
+    async fn record_client(&self, name: String) -> Result<(), ErrorData> {
+        self.on_server(move |server| server.set_client(name)).await
+    }
+
+    /// Answer from data that needs no lock, flushing whatever it logged.
+    async fn answer<T>(
+        &self,
+        ctx: &RequestContext<RoleServer>,
+        result: ParamResult<T>,
+    ) -> Result<T, ErrorData> {
+        self.flush_logs(&ctx.peer).await;
+        result
+    }
+}
+
+/// One `sampling/createMessage` in flight: the params to send, and where the
+/// reply text goes.
+type SamplingCall = (Value, oneshot::Sender<Option<String>>);
+
+/// Sampling as the blocking pipeline sees it: hand the params to the runtime
+/// and block until the peer answers.
+struct ChannelSampler {
+    tx: mpsc::Sender<SamplingCall>,
+}
+
+impl PeerSampler for ChannelSampler {
+    fn create_message(&mut self, params: Value) -> Option<String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx.blocking_send((params, reply_tx)).ok()?;
+        reply_rx.blocking_recv().ok().flatten()
+    }
+}
+
+/// Ask the client to sample, and pull the reply text out of the result.
+///
+/// SEP-2577 deprecates sampling in the SDK; the clients this server serves
+/// still use it, and dropping it would be a silent feature removal.
+#[allow(deprecated)]
+async fn create_message(peer: &Peer<RoleServer>, params: Value) -> Option<String> {
+    let params = serde_json::from_value(params)
+        .inspect_err(|e| tracing::warn!("sampling params rejected: {e}"))
+        .ok()?;
+    let result = tokio::time::timeout(DEFAULT_SAMPLING_TIMEOUT, peer.create_message(params))
+        .await
+        .map_err(|_| tracing::warn!("sampling request timed out"))
+        .ok()?
+        .inspect_err(|e| tracing::warn!("sampling request failed: {e}"))
+        .ok()?;
+    reply_text(result)
+}
+
+/// The usable text in a client's sampling reply.
+///
+/// A client may answer with one content block or several, and only text is
+/// useful here; a blank answer is no answer. `pub(crate)` so the sampling
+/// tests script replies through the same rule the server applies rather than
+/// a copy of it.
+#[allow(deprecated)]
+pub(crate) fn reply_text(result: rmcp::model::CreateMessageResult) -> Option<String> {
+    let text = result
+        .message
+        .content
+        .into_vec()
+        .iter()
+        .filter_map(|block| block.as_text())
+        .map(|text| text.text.trim())
+        .find(|text| !text.is_empty())?
+        .to_owned();
+    Some(text)
+}
+
+// SEP-2577 deprecates the logging and sampling APIs in the SDK. This server's
+// clients still use both, so they stay wired until the clients move.
+#[allow(deprecated)]
+impl ServerHandler for SdkServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .enable_prompts()
+                .enable_logging()
+                .build(),
+        )
+        .with_protocol_version(ProtocolVersion::V_2024_11_05)
+        .with_server_info(Implementation::new("zhtw-mcp", env!("CARGO_PKG_VERSION")))
+    }
+
+    /// The revisions this server serves, newest first.
+    ///
+    /// Listed rather than taken from the SDK's `KNOWN_VERSIONS` so that an
+    /// upgrade adding a revision is a decision rather than a silent claim.
+    ///
+    /// 2026-07-28 earns its place on the list rather than inheriting it. That
+    /// revision has no `initialize` at all: `server/discover` is the entry
+    /// point and the client declares itself in per-request `_meta`, which is
+    /// the lifecycle this server implements and drives in its tests. It
+    /// requires `ttlMs` and `cacheScope` on every list and read result, which
+    /// this server sets. It deprecates sampling but keeps it in the
+    /// specification for at least twelve months, so the Tier 3 path stays
+    /// valid under it. The extensions it adds beyond that (tasks,
+    /// `subscriptions/listen`) are capability-gated and unadvertised here.
+    ///
+    /// The older revisions negotiate through `initialize`, which RMCP handles,
+    /// and share the same tool, resource, and prompt surface.
+    fn supported_protocol_versions(&self) -> std::borrow::Cow<'static, [ProtocolVersion]> {
+        std::borrow::Cow::Borrowed(supported_protocol_versions())
+    }
+
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, ErrorData> {
+        // A revision served but without a handshake is not an unsupported
+        // version, it is the wrong entry point, and saying so beats the
+        // generic refusal: that one's list of alternatives cannot include the
+        // version actually wanted.
+        let served_without_handshake = REVISIONS
+            .iter()
+            .any(|r| !r.handshake && r.version == request.protocol_version);
+        if served_without_handshake {
+            tracing::warn!(
+                requested = %request.protocol_version,
+                "initialize named a revision that has no handshake"
+            );
+            return Err(ErrorData::new(
+                ErrorCode::UNSUPPORTED_PROTOCOL_VERSION,
+                format!(
+                    "Protocol version {} has no initialize; \
+                     it is served through server/discover",
+                    request.protocol_version
+                ),
+                Some(serde_json::json!({
+                    "requested": request.protocol_version,
+                    "supported": negotiable_protocol_versions(),
+                    "entryPoint": "server/discover",
+                })),
+            ));
+        }
+        // A revision this server does not serve is refused, not quietly
+        // downgraded: since 2026-07-28 the spec makes an unsupported version a
+        // server error rather than a client's judgment call, and answering a
+        // different version than the one asked for leaves the client guessing
+        // which of the two is in force. The reply names what was requested and
+        // what is on offer so the client can pick.
+        if !negotiable_protocol_versions().contains(&request.protocol_version) {
+            tracing::warn!(
+                requested = %request.protocol_version,
+                "rejecting unsupported protocol version"
+            );
+            return Err(ErrorData::unsupported_protocol_version(
+                request.protocol_version,
+                negotiable_protocol_versions(),
+            ));
+        }
+        self.record_client(request.client_info.name.to_string())
+            .await?;
+        let negotiated = request.protocol_version.clone();
+        context.peer.set_peer_info(request);
+        self.lifecycle.mark_initialized();
+        // Answered with the revision asked for, set here rather than left to
+        // the service: RMCP patches the negotiated version onto the result
+        // only when the session began with this handshake. A session that
+        // opened with `server/discover` and then sent `initialize` takes a
+        // different path, and the reply went out naming `get_info`'s default
+        // instead of the version requested. That is the same "which of the
+        // two is in force?" the refusal above exists to avoid. The version is
+        // already checked against the negotiable list, so there is nothing
+        // further to validate.
+        Ok(self.get_info().with_protocol_version(negotiated))
+    }
+
+    /// Discovery, which for a client that never sends `initialize` is also the
+    /// handshake: 2026-07-28 has no `initialize` at all, so the declaration
+    /// rides in per-request `_meta` and RMCP serves the session from here.
+    ///
+    /// Only the client's identity is recorded, because that is the part with
+    /// no per-request source. Capabilities stay request-scoped and are read
+    /// where they are used.
+    async fn discover(
+        &self,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::DiscoverResult, ErrorData> {
+        // Recorded only when the request actually declares one. Discovery can
+        // also arrive mid-session, after an `initialize` that already named the
+        // client, and a `_meta` without client info says nothing about who is
+        // calling: overwriting the name with nothing there would silently move
+        // the default output mode back to full for a client that had been
+        // getting compact.
+        if let Some(info) = context.meta.client_info() {
+            self.record_client(info.name.to_string()).await?;
+        }
+        self.lifecycle.mark_initialized();
+
+        Ok(rmcp::model::DiscoverResult::from_server_info(
+            self.supported_protocol_versions().into_owned(),
+            self.get_info(),
+        ))
+    }
+
+    async fn list_tools(
+        &self,
+        _: Option<PaginatedRequestParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        self.answer(&ctx, Ok(super::tools::list_tools())).await
+    }
+
+    async fn call_tool(
+        &self,
+        params: CallToolRequestParams,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let name = params.name.to_string();
+        let arguments = Value::Object(params.arguments.unwrap_or_default());
+        let sampling = ctx
+            .client_capabilities()
+            .is_some_and(|capabilities| capabilities.sampling.is_some());
+
+        // The lint pipeline is synchronous and CPU-bound, so it runs on the
+        // blocking pool: keeping it off the runtime thread is what lets pings,
+        // cancellations, and this call's own sampling round trips be serviced
+        // while a scan is in flight.
+        let inner = self.inner.clone();
+        let (sampling_tx, mut sampling_rx) = mpsc::channel::<SamplingCall>(1);
+        let scan = tokio::task::spawn_blocking(move || {
+            let mut server = inner.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut sampler = ChannelSampler { tx: sampling_tx };
+            let mut bridge =
+                sampling.then(|| SamplingBridge::new(&mut sampler, DEFAULT_SAMPLING_BUDGET));
+            server.call_tool(&name, &arguments, bridge.as_mut())
+        });
+
+        // The scan owns the sending half, so the channel closing is how this
+        // learns the scan is done, whether it returned or unwound.
+        while let Some((params, reply)) = sampling_rx.recv().await {
+            // A cancelled request is not owed an answer, and the client that
+            // cancelled it is not going to send one. Waiting out the sampling
+            // deadline anyway costs five seconds per question, up to the whole
+            // budget, with the server lock held the entire time. Answering the
+            // bridge with nothing lets the scan finish and let go of it.
+            let answer = tokio::select! {
+                biased;
+                () = ctx.ct.cancelled() => None,
+                answer = create_message(&ctx.peer, params) => answer,
+            };
+            let _ = reply.send(answer);
+        }
+        let response = scan.await;
+
+        self.flush_logs(&ctx.peer).await;
+        // A panic in the pipeline costs this request, not the connection.
+        let response = response.map_err(|_| handler_panicked())?;
+        response.map(Into::into)
+    }
+
+    /// `logging/setLevel` is the spec's way to ask for what this server's
+    /// clients have historically asked for with a `logging` capability.
+    async fn set_level(
+        &self,
+        params: SetLevelRequestParams,
+        _: RequestContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        self.lifecycle.enable_logs();
+        // The level is the point of the request. Turning forwarding on and
+        // ignoring which level was asked for sends a client that wants errors
+        // every info notification this server produces.
+        self.lifecycle.set_log_level(params.level);
+        Ok(())
+    }
+
+    async fn list_resources(
+        &self,
+        _: Option<PaginatedRequestParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        self.answer(&ctx, Ok(super::tools::list_resources())).await
+    }
+
+    async fn read_resource(
+        &self,
+        params: ReadResourceRequestParams,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        self.answer(&ctx, self.catalog.read_resource(&params.uri))
+            .await
+            .map(Into::into)
+    }
+
+    async fn list_prompts(
+        &self,
+        _: Option<PaginatedRequestParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, ErrorData> {
+        self.answer(&ctx, Ok(super::tools::list_prompts())).await
+    }
+
+    async fn get_prompt(
+        &self,
+        params: GetPromptRequestParams,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResponse, ErrorData> {
+        // Only string arguments reach the prompt templates; anything else the
+        // client sends is not something a template can substitute.
+        let arguments = params
+            .arguments
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(key, value)| value.as_str().map(|value| (key, value.to_owned())))
+            .collect();
+        self.answer(&ctx, super::tools::get_prompt(&params.name, &arguments))
+            .await
+            .map(Into::into)
+    }
+
+    /// No templates, which is not the same as no such method.
+    ///
+    /// `resources/templates/list` is a standard request under the `resources`
+    /// capability this server advertises, and 2026-07-28 lists it among the
+    /// ten a client may send. Answering METHOD_NOT_FOUND would deny a method
+    /// the advertised capability promises; the accurate answer is that the
+    /// list is empty. `completion/complete` is different and stays refused:
+    /// that one is gated on a `completions` capability this server does not
+    /// advertise.
+    async fn list_resource_templates(
+        &self,
+        _: Option<PaginatedRequestParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        self.answer(&ctx, Ok(super::tools::list_resource_templates()))
+            .await
+    }
+
+    /// Not implemented. An empty completion result reads as "supported, no
+    /// matches", which is worse than saying so.
+    async fn complete(
+        &self,
+        _: CompleteRequestParams,
+        _: RequestContext<RoleServer>,
+    ) -> Result<CompleteResult, ErrorData> {
+        Err(ErrorData::new(
+            ErrorCode::METHOD_NOT_FOUND,
+            "completion/complete",
+            None,
+        ))
+    }
+
+    /// No custom request reaches this server: `shutdown`, the only one its
+    /// clients send, is answered by the framing layer.
+    async fn on_custom_request(
+        &self,
+        request: CustomRequest,
+        _: RequestContext<RoleServer>,
+    ) -> Result<CustomResult, ErrorData> {
+        // `shutdown` never reaches here: the framing layer answers it, so the
+        // flag it sets is in place before the next envelope is read.
+        //
+        // Anything else landing here is either a method this server does not
+        // have, or one it does have whose params failed to deserialize:
+        // `ClientRequest` is untagged with `CustomRequest` last, so a
+        // `tools/call` whose params are the wrong shape falls through to here
+        // rather than being rejected as a typed request. Answering
+        // METHOD_NOT_FOUND for the second kind tells a client its tool does
+        // not exist when the tool exists and the arguments are wrong.
+        if IMPLEMENTED_METHODS.contains(&request.method.as_ref()) {
+            return Err(ErrorData::invalid_params(
+                format!("invalid parameters for {}", request.method),
+                None,
+            ));
+        }
+        Err(ErrorData::new(
+            ErrorCode::METHOD_NOT_FOUND,
+            request.method,
+            None,
+        ))
+    }
+
+    /// `exit` terminates the process unconditionally, per the lifecycle this
+    /// server has always implemented: exit code 0 when `shutdown` came first,
+    /// 1 otherwise.
+    async fn on_custom_notification(
+        &self,
+        notification: CustomNotification,
+        _: NotificationContext<RoleServer>,
+    ) {
+        if notification.method != "exit" {
+            tracing::debug!("unhandled notification: {}", notification.method);
+            return;
+        }
+        tracing::info!("exit notification, terminating");
+        // The cache is this path's own business; the log flush, the queue
+        // drain and the status are the same for both ways out and live at the
+        // one exit. It runs after the drain so a scan finishing during it
+        // still gets its judgments written.
+        let inner = self.inner.clone();
+        self.lifecycle
+            .terminate(move || {
+                flush_before_exit(&inner);
+            })
+            .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_server() -> (Mutex<Server>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let server = Server::new(
+            crate::rules::store::OverrideStore::open(&dir.path().join("overrides.json")).unwrap(),
+            crate::rules::store::SuppressionStore::open(&dir.path().join("suppressions.json"))
+                .unwrap(),
+            crate::rules::store::PackStore::new(dir.path().join("packs")),
+            vec![],
+            None,
+        )
+        .expect("build server");
+        (Mutex::new(server), dir)
+    }
+
+    /// Poison a lock the way a panicking handler does.
+    fn poison(inner: &Mutex<Server>) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = inner.lock().unwrap();
+            panic!("handler panicked");
+        }));
+        assert!(inner.is_poisoned(), "the lock should now be poisoned");
+    }
+
+    #[test]
+    fn a_panicked_handler_does_not_cost_the_judgment_cache() {
+        // `try_lock` reports a poisoned lock as an error even when nothing
+        // holds it, so reading every error as "a scan is in flight" threw the
+        // flush away for the rest of the process once any handler panicked.
+        let (inner, _dir) = test_server();
+        poison(&inner);
+        assert_eq!(flush_before_exit(&inner), Flushed::Yes);
+    }
+
+    #[test]
+    fn a_scan_in_flight_is_left_to_finish_without_the_flush() {
+        // The other half, and it is about contention alone: a lock genuinely
+        // held is what the warning is for. Poisoning it as well would pass
+        // only because `try_lock` reports contention ahead of poison.
+        let (inner, _dir) = test_server();
+        let _held = inner.lock().expect("a fresh lock is not poisoned");
+        assert_eq!(flush_before_exit(&inner), Flushed::SkippedForScanInFlight);
+    }
+
+    #[test]
+    fn a_revision_without_a_handshake_is_never_offered_by_one() {
+        // The refusal for an unsupported `initialize` names what the client
+        // could ask for instead, so a revision that has no `initialize` must
+        // not appear there: it would send the client back to the method that
+        // just failed. The table is what keeps the two lists in step.
+        //
+        // 2026-07-28 is named outright rather than left to the loop below,
+        // which passes for free if nothing is marked as lacking a handshake.
+        // That it deleted `initialize` is a fact about the revision, not a
+        // preference, so the table is wrong if it ever says otherwise.
+        let negotiable = negotiable_protocol_versions();
+        assert!(
+            supported_protocol_versions().contains(&ProtocolVersion::V_2026_07_28),
+            "2026-07-28 is served, through server/discover"
+        );
+        assert!(
+            !negotiable.contains(&ProtocolVersion::V_2026_07_28),
+            "2026-07-28 has no initialize, so it cannot be negotiated by one"
+        );
+        for revision in REVISIONS.iter().filter(|r| !r.handshake) {
+            assert!(
+                !negotiable.contains(&revision.version),
+                "{} has no handshake but is offered as one to negotiate",
+                revision.version
+            );
+        }
+        assert!(
+            !negotiable.is_empty(),
+            "some revision has to be reachable through initialize"
+        );
+    }
+
+    #[test]
+    fn every_served_revision_is_advertised() {
+        // `server/discover` is the only place a client can learn about a
+        // revision it cannot negotiate, so the advertised list is all of them.
+        let supported = supported_protocol_versions();
+        assert_eq!(supported.len(), REVISIONS.len());
+        for revision in REVISIONS {
+            assert!(supported.contains(&revision.version));
+        }
+    }
+}

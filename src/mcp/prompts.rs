@@ -5,7 +5,7 @@
 //   lint_natural       — translate free-form requests into zhtw calls
 //   editorial_review   — multi-turn editorial workflow persona
 
-use super::types::{PromptArgDef, PromptContent, PromptDef, PromptGetResult, PromptMessage};
+use rmcp::model::{GetPromptResult, Prompt, PromptArgument, PromptMessage, Role};
 
 /// The normalize_tone prompt name.
 pub const NORMALIZE_TONE: &str = "normalize_tone";
@@ -17,54 +17,51 @@ pub const LINT_NATURAL: &str = "lint_natural";
 pub const EDITORIAL_REVIEW: &str = "editorial_review";
 
 /// Return the list of available prompts.
-pub fn list_prompts() -> Vec<PromptDef> {
+pub fn list_prompts() -> Vec<Prompt> {
     vec![
-        PromptDef {
-            name: NORMALIZE_TONE.into(),
-            description: "Ground an LLM in MoE-standard zh-TW conventions".into(),
-            arguments: None,
-        },
-        PromptDef {
-            name: LINT_NATURAL.into(),
-            description: "Translate a free-form instruction into a zhtw call".into(),
-            arguments: Some(vec![
-                PromptArgDef {
-                    name: "instruction".into(),
-                    description: "Free-form instruction, e.g. 'check for mainland terms'".into(),
-                    required: true,
-                },
-                PromptArgDef {
-                    name: "text".into(),
-                    description: "The text to lint".into(),
-                    required: true,
-                },
+        Prompt::new(
+            NORMALIZE_TONE,
+            Some("Ground an LLM in MoE-standard zh-TW conventions"),
+            None,
+        ),
+        Prompt::new(
+            LINT_NATURAL,
+            Some("Translate a free-form instruction into a zhtw call"),
+            Some(vec![
+                argument(
+                    "instruction",
+                    "Free-form instruction, e.g. 'check for mainland terms'",
+                    true,
+                ),
+                argument("text", "The text to lint", true),
             ]),
-        },
-        PromptDef {
-            name: EDITORIAL_REVIEW.into(),
-            description:
-                "Multi-turn zh-TW editorial workflow: review, fix, re-check until accepted".into(),
-            arguments: Some(vec![
-                PromptArgDef {
-                    name: "text".into(),
-                    description: "Draft text to review and refine".into(),
-                    required: true,
-                },
-                PromptArgDef {
-                    name: "max_iterations".into(),
-                    description: "Maximum review-fix cycles (default: 3)".into(),
-                    required: false,
-                },
+        ),
+        Prompt::new(
+            EDITORIAL_REVIEW,
+            Some("Multi-turn zh-TW editorial workflow: review, fix, re-check until accepted"),
+            Some(vec![
+                argument("text", "Draft text to review and refine", true),
+                argument(
+                    "max_iterations",
+                    "Maximum review-fix cycles (default: 3)",
+                    false,
+                ),
             ]),
-        },
+        ),
     ]
+}
+
+fn argument(name: &str, description: &str, required: bool) -> PromptArgument {
+    PromptArgument::new(name)
+        .with_description(description)
+        .with_required(required)
 }
 
 /// Get a prompt by name, substituting arguments.
 pub fn get_prompt(
     name: &str,
     arguments: &std::collections::HashMap<String, String>,
-) -> Option<PromptGetResult> {
+) -> Option<GetPromptResult> {
     match name {
         NORMALIZE_TONE => Some(get_normalize_tone()),
         LINT_NATURAL => Some(get_lint_natural(arguments)),
@@ -73,7 +70,7 @@ pub fn get_prompt(
     }
 }
 
-fn get_normalize_tone() -> PromptGetResult {
+fn get_normalize_tone() -> GetPromptResult {
     let system_text = r#"You are writing in Traditional Chinese (Taiwan) following Ministry of Education (教育部) standards. Adhere to these conventions:
 
 ## Punctuation
@@ -104,16 +101,8 @@ fn get_normalize_tone() -> PromptGetResult {
 
 Reference: zh-tw://style-guide/moe for the complete style guide."#;
 
-    PromptGetResult {
-        description: "Grounds the LLM in MoE-standard zh-TW vocabulary, punctuation, and character forms for professional technical writing".into(),
-        messages: vec![PromptMessage {
-            role: "user".into(),
-            content: PromptContent {
-                content_type: "text".into(),
-                text: system_text.into(),
-            },
-        }],
-    }
+    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, system_text)])
+        .with_description("Grounds the LLM in MoE-standard zh-TW vocabulary, punctuation, and character forms for professional technical writing")
 }
 
 /// Extract a prompt argument as a &str, defaulting to "".
@@ -123,7 +112,7 @@ fn arg_str<'a>(args: &'a std::collections::HashMap<String, String>, key: &str) -
 
 /// Build the lint_natural prompt: instructs the host LLM to parse a free-form
 /// instruction and the provided text into a structured zhtw tool call.
-fn get_lint_natural(args: &std::collections::HashMap<String, String>) -> PromptGetResult {
+fn get_lint_natural(args: &std::collections::HashMap<String, String>) -> GetPromptResult {
     let instruction = arg_str(args, "instruction");
     let text = arg_str(args, "text");
 
@@ -156,21 +145,13 @@ From the instruction, extract:
 Now call `zhtw` with the extracted parameters. Return only the tool call, no commentary."#
     );
 
-    PromptGetResult {
-        description: "Translates a free-form lint instruction into a zhtw tool call".into(),
-        messages: vec![PromptMessage {
-            role: "user".into(),
-            content: PromptContent {
-                content_type: "text".into(),
-                text: system_text,
-            },
-        }],
-    }
+    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, system_text)])
+        .with_description("Translates a free-form lint instruction into a zhtw tool call")
 }
 
 /// Build the editorial_review prompt: multi-turn persona for iterative
 /// zh-TW text review and refinement.
-fn get_editorial_review(args: &std::collections::HashMap<String, String>) -> PromptGetResult {
+fn get_editorial_review(args: &std::collections::HashMap<String, String>) -> GetPromptResult {
     let text = arg_str(args, "text");
     let max_iterations: u32 = args
         .get("max_iterations")
@@ -205,21 +186,23 @@ For each iteration (up to {max_iterations} total):
 Begin your first review iteration now."#
     );
 
-    PromptGetResult {
-        description:
-            "Multi-turn zh-TW editorial review: iteratively fix and explain until accepted".into(),
-        messages: vec![PromptMessage {
-            role: "user".into(),
-            content: PromptContent {
-                content_type: "text".into(),
-                text: system_text,
-            },
-        }],
-    }
+    GetPromptResult::new(vec![PromptMessage::new_text(Role::User, system_text)]).with_description(
+        "Multi-turn zh-TW editorial review: iteratively fix and explain until accepted",
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    /// The text of a prompt's single message.
+    fn message_text(result: &GetPromptResult) -> &str {
+        result.messages[0]
+            .content
+            .as_text()
+            .expect("prompts return text content")
+            .text
+            .as_str()
+    }
+
     use super::*;
 
     fn empty_args() -> std::collections::HashMap<String, String> {
@@ -239,12 +222,9 @@ mod tests {
     fn get_normalize_tone_returns_content() {
         let result = get_prompt(NORMALIZE_TONE, &empty_args()).unwrap();
         assert_eq!(result.messages.len(), 1);
-        assert_eq!(result.messages[0].role, "user");
-        assert!(result.messages[0]
-            .content
-            .text
-            .contains("Traditional Chinese"));
-        assert!(result.messages[0].content.text.contains("軟體"));
+        assert_eq!(result.messages[0].role, Role::User);
+        assert!(message_text(&result).contains("Traditional Chinese"));
+        assert!(message_text(&result).contains("軟體"));
     }
 
     #[test]
@@ -254,12 +234,9 @@ mod tests {
         args.insert("text".into(), "這個軟件很好用".into());
         let result = get_prompt(LINT_NATURAL, &args).unwrap();
         assert_eq!(result.messages.len(), 1);
-        assert!(result.messages[0]
-            .content
-            .text
-            .contains("check for mainland terms"));
-        assert!(result.messages[0].content.text.contains("這個軟件很好用"));
-        assert!(result.messages[0].content.text.contains("zhtw"));
+        assert!(message_text(&result).contains("check for mainland terms"));
+        assert!(message_text(&result).contains("這個軟件很好用"));
+        assert!(message_text(&result).contains("zhtw"));
     }
 
     #[test]
@@ -269,8 +246,8 @@ mod tests {
         args.insert("max_iterations".into(), "5".into());
         let result = get_prompt(EDITORIAL_REVIEW, &args).unwrap();
         assert_eq!(result.messages.len(), 1);
-        assert!(result.messages[0].content.text.contains("使用默認設置"));
-        assert!(result.messages[0].content.text.contains("up to 5 total"));
+        assert!(message_text(&result).contains("使用默認設置"));
+        assert!(message_text(&result).contains("up to 5 total"));
     }
 
     #[test]
@@ -278,7 +255,7 @@ mod tests {
         let mut args = std::collections::HashMap::new();
         args.insert("text".into(), "測試文字".into());
         let result = get_prompt(EDITORIAL_REVIEW, &args).unwrap();
-        assert!(result.messages[0].content.text.contains("up to 3 total"));
+        assert!(message_text(&result).contains("up to 3 total"));
     }
 
     #[test]
