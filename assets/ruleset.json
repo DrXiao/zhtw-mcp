@@ -8206,6 +8206,13 @@
       "english": "bed (char variant)"
     },
     {
+      "from": "牆鐘",
+      "to": ["總耗時", "實際耗時", "真實時間"],
+      "type": "cross_strait",
+      "context": "@domain 程式設計。wall clock time；整體流程用「總耗時」，單一項目用「實際耗時」，概念本身用「真實時間」",
+      "english": "wall clock time"
+    },
+    {
       "from": "版本號",
       "to": ["版本號碼"],
       "type": "cross_strait",
