@@ -175,10 +175,13 @@ impl Lifecycle {
 
     /// Start forwarding tracing output to the client.
     ///
-    /// Called from two places: a `logging` key in the initialize capabilities,
-    /// which is what this server has always honored and which RMCP's typed
-    /// `ClientCapabilities` discards, and `logging/setLevel`, which is the
-    /// spec's way to ask for the same thing. Repeat calls are no-ops.
+    /// Called from three places, all of them a client asking for the same
+    /// thing in the place its revision has for it: a `logging` key in the
+    /// `initialize` capabilities, which is what this server has always honored
+    /// and which RMCP's typed `ClientCapabilities` discards; the same key in a
+    /// request's own `_meta`, which is where the handshake-free revision puts
+    /// it; and `logging/setLevel`, which is the spec's way to ask. Repeat calls
+    /// are no-ops.
     pub(crate) fn enable_logs(&self) {
         let mut slot = self.logs.lock().unwrap_or_else(PoisonError::into_inner);
         if slot.is_some() {
@@ -713,9 +716,20 @@ async fn drain_in_flight(lifecycle: &Lifecycle, deadline: &mut Option<tokio::tim
 }
 
 impl StdioTransport {
-    /// Emit any pending tracing output as `notifications/message`.
+    /// Emit any pending tracing output as `notifications/message`, or discard
+    /// it when nobody is owed it.
+    ///
+    /// Only a handshake buys delivery here. Before one, a line has no request
+    /// that asked for it, so it is dropped rather than held for whichever
+    /// later request happens to ask. Dropped only with nothing in flight,
+    /// because a request still running may yet be owed it.
     fn flush_logs(&self) {
-        self.lifecycle.queue_logs();
+        if self.lifecycle.initialized() {
+            self.lifecycle.queue_logs();
+        } else if self.lifecycle.outstanding() == 0 {
+            // Called for the drain, not the lines: this is the discard.
+            self.lifecycle.drain_logs();
+        }
     }
 
     /// Write a framing-level response directly, bypassing RMCP.
@@ -829,6 +843,12 @@ fn gate(lifecycle: &Lifecycle, request: &super::types::JsonRpcRequest) -> Gate {
     // framing layer's, so both questions are asked of `revisions`.
     if let Some(meta) = super::revisions::declaration(&request.params) {
         if super::revisions::is_self_declaring(meta) {
+            // Same extension the handshake path reads, in the place this
+            // revision has for it. Wired here rather than left to `initialize`,
+            // which a client on this path never sends.
+            if super::revisions::logging_opt_in(meta) {
+                lifecycle.enable_logs();
+            }
             return Gate::Forward;
         }
     }

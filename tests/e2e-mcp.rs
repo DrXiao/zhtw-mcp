@@ -69,6 +69,22 @@ fn spawn_server() -> (
     std::process::ChildStdin,
     BufReader<std::process::ChildStdout>,
 ) {
+    spawn_server_with(&[])
+}
+
+/// Same server, with extra arguments.
+///
+/// `--verbose` is the one that matters: at the default filter the server logs
+/// nothing above warn, so a test about log delivery has no lines to deliver
+/// and passes whatever the code does.
+fn spawn_server_with(
+    args: &[&str],
+) -> (
+    tempfile::TempDir,
+    std::process::Child,
+    std::process::ChildStdin,
+    BufReader<std::process::ChildStdout>,
+) {
     let bin = binary_path();
     assert!(
         bin.exists(),
@@ -76,6 +92,7 @@ fn spawn_server() -> (
     );
     let tmp = tempfile::tempdir().expect("create temp dir for the server session");
     let mut child = Command::new(&bin)
+        .args(args)
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path().join(".config"))
         .env("XDG_CACHE_HOME", tmp.path().join(".cache"))
@@ -1657,6 +1674,137 @@ fn e2e_a_declared_client_does_not_outlive_its_request() {
         body.get("text").is_some(),
         "this request named nobody, so the previous one's identity must not \
          still be choosing its output mode: {body}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_modern_logging_opt_in_is_delivered_not_wedged() {
+    // Log delivery on this path used to go through the RMCP peer, which on a
+    // connection that never saw an `initialize` accepts the notification and
+    // never resolves the future that says it reached the wire. The request
+    // parked forever: no reply, no exit, both threads idle. It needs an actual
+    // log to deliver, which is why the server runs at info here; at the default
+    // filter there is nothing queued and nothing to park on.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server_with(&["--verbose"]);
+
+    // The regression this guards against is a park, not a wrong answer, and a
+    // blocking read against a parked server hangs the suite instead of failing
+    // it. Killing the child turns that back into end of input, which the read
+    // below reports as a failure like any other.
+    //
+    // Disarmed by dropping the sender once the reply is in. Left to fire
+    // unconditionally, the kill outlives `child.wait()` and lands on whatever
+    // process inherited the pid by then, which in this binary is a server
+    // another test is still talking to.
+    let pid = child.id();
+    let (armed, disarmed) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        if disarmed.recv_timeout(std::time::Duration::from_secs(30))
+            == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        {
+            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+        }
+    });
+
+    let (notifications, call) = send_recv_skip_notifications(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": { "logging": {} }
+                },
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件的質量" }
+            }
+        }),
+    );
+    drop(armed);
+    assert!(
+        call["result"].is_object(),
+        "a self-declaring call that opted into logging must still be answered: {call}"
+    );
+    assert!(
+        notifications
+            .iter()
+            .any(|n| n["method"] == "notifications/message"),
+        "the opt-in rode in `_meta`, so the lines this call logged should have \
+         reached the client: {notifications:?}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_modern_logging_opt_in_does_not_leak() {
+    // The `logging` key in client capabilities is this server's own extension,
+    // and it was read only off `initialize` params. A 2026-07-28 client never
+    // sends `initialize`, so the opt-in had nowhere to arrive and the whole
+    // channel was unreachable on the path those clients take. It is read from
+    // the same `_meta` that carries everything else that revision declares.
+    //
+    // At the default filter this server logs nothing above warn, so neither
+    // request produced a line and the second could not have received one
+    // whatever the code did. Running at info is what makes a leak observable,
+    // which is why the first call now asserts it saw lines at all.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server_with(&["--verbose"]);
+
+    let (notifications, first) = send_recv_skip_notifications(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": { "logging": {} }
+                },
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件的質量" }
+            }
+        }),
+    );
+    assert!(first["result"].is_object(), "tools/call: {first}");
+    assert!(
+        notifications
+            .iter()
+            .any(|n| n["method"] == "notifications/message"),
+        "the opt-in has to deliver, or the leak below is unobservable: \
+         {notifications:?}"
+    );
+
+    // Read strictly: one line, and it has to be the reply. Anything arriving
+    // ahead of it is a log line this request never asked for.
+    let next = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                },
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件的質量" }
+            }
+        }),
+    );
+    assert!(
+        next["result"].is_object(),
+        "logging leaked into the next request: {next}"
     );
 
     drop(stdin);

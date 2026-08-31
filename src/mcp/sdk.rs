@@ -126,16 +126,50 @@ impl SdkServer {
     /// response that produced it, which is the order clients read causality
     /// from.
     #[allow(deprecated)]
-    async fn flush_logs(&self, peer: &Peer<RoleServer>) {
-        for message in self.lifecycle.drain_logs() {
-            // Built directly rather than round-tripped through a Value, which
-            // rebuilt the whole data tree twice per line and dropped the
-            // message outright if it ever failed to fit. The level arrives
-            // already typed, so nothing has to decide what it means here.
-            let param = LoggingMessageNotificationParam::new(message.level, message.data)
-                .with_logger(message.logger);
-            let _ = peer.notify_logging_message(param).await;
+    async fn flush_logs(&self, ctx: &RequestContext<RoleServer>) {
+        // A handshake declared the opt-in once for the connection, so the peer
+        // is a session RMCP knows about and can carry a notification.
+        if self.lifecycle.initialized() {
+            for message in self.lifecycle.drain_logs() {
+                // Built directly rather than round-tripped through a Value,
+                // which rebuilt the whole data tree twice per line and dropped
+                // the message outright if it ever failed to fit. The level
+                // arrives already typed, so nothing has to decide what it means
+                // here.
+                let param = LoggingMessageNotificationParam::new(message.level, message.data)
+                    .with_logger(message.logger);
+                let _ = ctx.peer.notify_logging_message(param).await;
+            }
+            return;
         }
+        if super::revisions::logging_opt_in(&ctx.meta) {
+            // Framed onto the transport's own queue rather than sent through
+            // the peer. RMCP never saw an `initialize` on this connection, and
+            // a notification handed to that peer waits on a session that will
+            // never open: the send is accepted and the future that resolves
+            // when it reaches the wire never does, which parks the request
+            // forever with no reply and no exit. The queue is the same wire
+            // without the handshake state machine in front of it.
+            self.lifecycle.queue_logs();
+            return;
+        }
+
+        // Declared nothing, so it is owed nothing. Drained either way, because
+        // the opt-in is request-scoped and lines held over would be delivered
+        // to whichever later request happened to ask.
+        //
+        // Capture is process-wide and carries no request identity, so this
+        // drops whatever a concurrent opted-in request logged and has not
+        // flushed yet. Holding the lines back instead only moves the damage:
+        // two overlapping requests that declared nothing would each see the
+        // other still running and neither would ever drain, and the pile would
+        // go out under the next request that did ask, as its own lines. Both
+        // ends of that trade need the one thing the channel does not carry,
+        // which is who logged each line. Tagging them means threading a request
+        // id through the blocking pool and rayon into the trace layer; the loss
+        // here is log lines on a connection that pipelines mixed opt-ins, and
+        // it has not been worth that.
+        self.lifecycle.drain_logs();
     }
 
     /// Run one read-only handler, flushing whatever it logged first.
@@ -178,7 +212,7 @@ impl SdkServer {
         ctx: &RequestContext<RoleServer>,
         result: ParamResult<T>,
     ) -> Result<T, ErrorData> {
-        self.flush_logs(&ctx.peer).await;
+        self.flush_logs(ctx).await;
         result
     }
 }
@@ -428,7 +462,7 @@ impl ServerHandler for SdkServer {
         }
         let response = scan.await;
 
-        self.flush_logs(&ctx.peer).await;
+        self.flush_logs(&ctx).await;
         // A panic in the pipeline costs this request, not the connection.
         let response = response.map_err(|_| handler_panicked())?;
         response.map(Into::into)

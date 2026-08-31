@@ -114,6 +114,17 @@ pub(crate) fn is_self_declaring(meta: &Map<String, Value>) -> bool {
             .is_some_and(Value::is_object)
 }
 
+/// Whether a request's own `_meta` opts into this server's `logging`
+/// extension.
+///
+/// The same key the handshake path reads off raw `initialize` params, in the
+/// place the handshake-free revision has for it.
+pub(crate) fn logging_opt_in(meta: &Map<String, Value>) -> bool {
+    meta.get(key::CLIENT_CAPABILITIES)
+        .and_then(Value::as_object)
+        .is_some_and(|capabilities| capabilities.contains_key("logging"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +181,18 @@ mod tests {
         assert!(!is_self_declaring(
             declaration(&no_capabilities).expect("params carry a `_meta`")
         ));
+    }
+
+    #[test]
+    fn the_logging_extension_is_read_off_the_capabilities() {
+        assert!(logging_opt_in(&meta(
+            "2026-07-28",
+            serde_json::json!({ "logging": {} })
+        )));
+        assert!(!logging_opt_in(&meta(
+            "2026-07-28",
+            serde_json::json!({ "roots": {} })
+        )));
     }
 
     #[test]
