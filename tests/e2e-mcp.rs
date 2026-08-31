@@ -1003,6 +1003,59 @@ fn e2e_a_first_message_call_from_a_handshake_revision_is_refused() {
 }
 
 #[test]
+fn e2e_a_first_message_call_is_served_and_knows_its_client() {
+    // 2026-07-28 deleted `initialize`, so a client is free to open a connection
+    // and send a call on it with no handshake at all: the declaration rides in
+    // every request's `_meta`. Claude Code does exactly that, running the
+    // discovery probe in one process and the calls that follow in another, so
+    // this is the shape the server actually meets in production and the one
+    // every other test here was missing. Two things have to hold on it. The
+    // call has to be answered rather than refused as pre-init, and the client
+    // named in `_meta` has to reach the pipeline: read only at the handshake,
+    // the name never arrives on this path and an agent client silently gets the
+    // full answer where it had been getting the compact one.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    let (_notifications, call) = send_recv_skip_notifications(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "claude-code",
+                        "version": "1"
+                    },
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                },
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件的質量" }
+            }
+        }),
+    );
+    assert!(
+        call["result"].is_object(),
+        "a self-declaring call needs no handshake: {call}"
+    );
+    let body: Value = serde_json::from_str(
+        call["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected tool output: {call}")),
+    )
+    .expect("tool output is JSON");
+    assert!(
+        body.get("text").is_none() && body.get("trace").is_none(),
+        "`_meta` named claude-code, so the answer should be compact: {body}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
 fn e2e_every_termination_path_reports_the_code_it_promises() {
     // The exit contract in one place, because its cells have been wrong
     // separately: a reply queued and then abandoned, a drain that never
@@ -1511,6 +1564,99 @@ fn e2e_discovery_answers_a_revision_it_does_not_serve() {
     assert!(
         supported.iter().any(|v| v == "2026-07-28"),
         "the client needs the list to fall back onto: {refused}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_a_declared_client_does_not_outlive_its_request() {
+    // The identity rides in `_meta` on this revision, which makes it scoped to
+    // the request that carried it, exactly like the logging opt-in beside it.
+    // Recorded on the connection instead, one call naming an agent client moved
+    // the default output mode for every later call that named nobody, and the
+    // answer silently lost the `text` and `trace` fields it was supposed to
+    // carry.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+
+    let declared = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "1" },
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                },
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件的質量" }
+            }
+        }),
+    );
+    let body: Value = serde_json::from_str(
+        declared["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected tool output: {declared}")),
+    )
+    .expect("tool output is JSON");
+    assert!(
+        body.get("text").is_none(),
+        "the request named claude-code, so its own answer is compact: {body}"
+    );
+
+    // The same must hold through `server/discover`, which is the other request
+    // whose `_meta` can name a client. A probe is not consent for a later
+    // request that named nobody to be answered as whoever probed.
+    let discover = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "server/discover",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "1" },
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        }),
+    );
+    assert!(discover["result"].is_object(), "discover: {discover}");
+
+    let anonymous = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                },
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件的質量" }
+            }
+        }),
+    );
+    let body: Value = serde_json::from_str(
+        anonymous["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected tool output: {anonymous}")),
+    )
+    .expect("tool output is JSON");
+    assert!(
+        body.get("text").is_some(),
+        "this request named nobody, so the previous one's identity must not \
+         still be choosing its output mode: {body}"
     );
 
     drop(stdin);

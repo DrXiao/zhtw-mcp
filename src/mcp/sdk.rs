@@ -348,23 +348,16 @@ impl ServerHandler for SdkServer {
     /// this revision it never will: the declaration arrives with each request
     /// instead.
     ///
-    /// Only the client's identity is recorded, because that is the part with
-    /// no per-request source. Capabilities stay request-scoped and are read
-    /// where they are used.
+    /// Nothing about the caller is recorded here either. Everything this
+    /// revision declares, identity included, is request-scoped and read where
+    /// it is used: `call_tool` takes the name off its own `_meta`, and a
+    /// discovery probe naming a client is not consent for a later request that
+    /// named nobody to be answered as that client. A handshake still records
+    /// one, because there the declaration really is per connection.
     async fn discover(
         &self,
-        context: RequestContext<RoleServer>,
+        _context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::DiscoverResult, ErrorData> {
-        // Recorded only when the request actually declares one. Discovery can
-        // also arrive mid-session, after an `initialize` that already named the
-        // client, and a `_meta` without client info says nothing about who is
-        // calling: overwriting the name with nothing there would silently move
-        // the default output mode back to full for a client that had been
-        // getting compact.
-        if let Some(info) = context.meta.client_info() {
-            self.record_client(info.name.to_string()).await?;
-        }
-
         Ok(rmcp::model::DiscoverResult::from_server_info(
             self.supported_protocol_versions().into_owned(),
             self.get_info(),
@@ -395,13 +388,27 @@ impl ServerHandler for SdkServer {
         // cancellations, and this call's own sampling round trips be serviced
         // while a scan is in flight.
         let inner = self.inner.clone();
+
+        // 2026-07-28 has no handshake to record the client at, so the identity
+        // rides in this request's `_meta` instead: it picks the default output
+        // mode, and a call that never learns who is asking answers an agent
+        // client in full where it had been answering compact. Handed to the
+        // call rather than stored on the server, because the declaration is
+        // scoped to this request and must not decide the mode for a later one
+        // that declared nothing.
+        let declared_client = ctx.meta.client_info().map(|info| info.name);
         let (sampling_tx, mut sampling_rx) = mpsc::channel::<SamplingCall>(1);
         let scan = tokio::task::spawn_blocking(move || {
             let mut server = inner.lock().unwrap_or_else(PoisonError::into_inner);
             let mut sampler = ChannelSampler { tx: sampling_tx };
             let mut bridge =
                 sampling.then(|| SamplingBridge::new(&mut sampler, DEFAULT_SAMPLING_BUDGET));
-            server.call_tool(&name, &arguments, bridge.as_mut())
+            server.call_tool(
+                &name,
+                &arguments,
+                bridge.as_mut(),
+                declared_client.as_deref(),
+            )
         });
 
         // The scan owns the sending half, so the channel closing is how this

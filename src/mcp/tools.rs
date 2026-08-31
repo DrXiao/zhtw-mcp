@@ -128,11 +128,18 @@ impl Server {
     /// An unknown tool name is a tool-level error rather than a protocol one,
     /// which is what lets a client show it to the user instead of failing the
     /// call.
+    ///
+    /// `declared_client` is whoever this request said it is, which on the
+    /// handshake-free revision is the only place the identity appears. It is
+    /// passed rather than stored because the declaration is request-scoped:
+    /// stored, one declared call would move the default output mode for every
+    /// later undeclared call on the same connection.
     pub(crate) fn call_tool(
         &mut self,
         name: &str,
         arguments: &Value,
         bridge: Option<&mut SamplingBridge<'_>>,
+        declared_client: Option<&str>,
     ) -> ParamResult<CallToolResult> {
         let _span = tracing::info_span!("mcp_request", method = "tools/call").entered();
         if name != "zhtw" {
@@ -150,7 +157,7 @@ impl Server {
         if let Some(error) = reject_unknown_params(arguments) {
             return Err(error);
         }
-        self.tool_check(arguments, bridge)
+        self.tool_check(arguments, bridge, declared_client)
     }
 
     // Tool implementation
@@ -251,6 +258,7 @@ impl Server {
         &mut self,
         args: &Value,
         mut bridge: Option<&mut SamplingBridge<'_>>,
+        declared_client: Option<&str>,
     ) -> ParamResult<CallToolResult> {
         let started = std::time::Instant::now();
         // Snapshot cache counters at start for per-request telemetry.
@@ -276,7 +284,11 @@ impl Server {
         };
         let text = s2t_converted.as_deref().unwrap_or(text);
 
-        let params = CheckParams::parse(args, default_output_mode(self.client_name.as_deref()))?;
+        // This request's own declaration first, the handshake's second. Both
+        // name the same client in practice; the order is what keeps a
+        // declaration from outliving the request that made it.
+        let client = declared_client.or(self.client_name.as_deref());
+        let params = CheckParams::parse(args, default_output_mode(client))?;
 
         // Copy fields bind by value, the two owned ones by reference, so the
         // struct itself stays put for `CheckRequest` to borrow below.
@@ -750,11 +762,14 @@ impl Server {
         })
     }
 
-    /// Record the client identity from the handshake.
+    /// Record the client identity a handshake established.
     ///
     /// The SDK owns `initialize` itself, so this is how the negotiated state
     /// still reaches the pipeline: `client_name` selects the default output
-    /// mode. Per-request capabilities are handled by the SDK adapter.
+    /// mode for calls that do not name a client themselves. A request that
+    /// does name one passes it to `call_tool` instead, because on the
+    /// handshake-free revision the declaration belongs to that request alone.
+    /// Per-request capabilities are handled by the SDK adapter.
     pub(crate) fn set_client(&mut self, name: String) {
         self.client_name = Some(name);
     }
@@ -3414,7 +3429,7 @@ mod tests {
 
     /// Drive one `zhtw` call the way the adapter does.
     fn call_zhtw(server: &mut Server, args: serde_json::Value) -> ParamResult<CallToolResult> {
-        server.call_tool("zhtw", &args, None)
+        server.call_tool("zhtw", &args, None, None)
     }
 
     /// The tool's JSON payload, asserting it reported success on the way.
@@ -3448,7 +3463,7 @@ mod tests {
     #[test]
     fn tools_call_arguments_not_object() {
         let (mut server, _dir) = make_initialized_server();
-        let resp = server.call_tool("zhtw", &serde_json::json!("not_an_object"), None);
+        let resp = server.call_tool("zhtw", &serde_json::json!("not_an_object"), None, None);
         let err = resp.expect_err("a non-object arguments value is a parameter error");
         assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
     }
