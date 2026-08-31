@@ -1,4 +1,4 @@
-// 35.9 — project glossary integration test.
+// Project glossary integration test.
 //
 // Verifies that `[glossary] banned`, `proper_nouns`, and `preferred` fields in
 // `.zhtw-mcp.toml` are honored by the `lint` subcommand.

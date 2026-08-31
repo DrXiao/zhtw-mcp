@@ -69,6 +69,22 @@ fn spawn_server() -> (
     std::process::ChildStdin,
     BufReader<std::process::ChildStdout>,
 ) {
+    spawn_server_with(&[])
+}
+
+/// Same server, with extra arguments.
+///
+/// `--verbose` is the one that matters: at the default filter the server logs
+/// nothing above warn, so a test about log delivery has no lines to deliver
+/// and passes whatever the code does.
+fn spawn_server_with(
+    args: &[&str],
+) -> (
+    tempfile::TempDir,
+    std::process::Child,
+    std::process::ChildStdin,
+    BufReader<std::process::ChildStdout>,
+) {
     let bin = binary_path();
     assert!(
         bin.exists(),
@@ -76,6 +92,7 @@ fn spawn_server() -> (
     );
     let tmp = tempfile::tempdir().expect("create temp dir for the server session");
     let mut child = Command::new(&bin)
+        .args(args)
         .env("HOME", tmp.path())
         .env("XDG_CONFIG_HOME", tmp.path().join(".config"))
         .env("XDG_CACHE_HOME", tmp.path().join(".cache"))
@@ -90,6 +107,89 @@ fn spawn_server() -> (
     // The caller holds the temp dir: dropping it early would pull the config
     // and cache directories out from under a live server.
     (tmp, child, stdin, stdout)
+}
+
+/// Drive a sampling-capable handshake and fire the tier-3 call, as id 2, that
+/// is known to ask the client questions.
+///
+/// Separate from [`handshake`] because that one offers no capabilities, and the
+/// server only builds a sampling bridge for a client that declared sampling.
+fn start_sampling_call(stdin: &mut impl Write, stdout: &mut impl BufRead) {
+    let init = send_recv(
+        stdin,
+        stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": { "sampling": {} },
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
+    );
+    assert!(init["result"].is_object(), "initialize: {init}");
+    send_notification(
+        stdin,
+        &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    );
+
+    let text = "這個項目的質量和性能都很好，軟件的並行處理和內存管理需要優化。".repeat(3);
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "zhtw",
+                "arguments": { "text": text, "profile": "strict", "output": "summary" }
+            }
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+}
+
+/// Answer every sampling question until the call with `id` answers back.
+///
+/// Returns how many questions were answered and the call's own reply, so a
+/// caller can assert on either.
+fn answer_sampling_until(
+    stdin: &mut impl Write,
+    stdout: &mut impl BufRead,
+    id: i64,
+) -> (usize, Value) {
+    let mut answered = 0usize;
+    loop {
+        let mut line = String::new();
+        stdout.read_line(&mut line).expect("server closed early");
+        let msg: Value = serde_json::from_str(line.trim())
+            .unwrap_or_else(|e| panic!("expected a message, got {line:?}: {e}"));
+
+        if msg["method"] == "sampling/createMessage" {
+            answered += 1;
+            writeln!(
+                stdin,
+                "{}",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": msg["id"],
+                    "result": {
+                        "role": "assistant",
+                        "model": "test",
+                        "content": { "type": "text", "text": "平行" }
+                    }
+                })
+            )
+            .unwrap();
+            stdin.flush().unwrap();
+        } else if msg["id"] == id {
+            return (answered, msg);
+        }
+    }
 }
 
 /// Drive the stock handshake and return the `initialize` result.
@@ -973,6 +1073,89 @@ fn e2e_discover_mid_session_keeps_the_client_it_was_told_about() {
 }
 
 #[test]
+fn e2e_a_first_message_call_is_served_and_knows_its_client() {
+    // 2026-07-28 deleted `initialize`, so a client is free to open a connection
+    // and send a call on it with no handshake at all: the declaration rides in
+    // every request's `_meta`. Claude Code does exactly that, running the
+    // discovery probe in one process and the calls that follow in another, so
+    // this is the shape the server actually meets in production and the one
+    // every other test here was missing. Two things have to hold on it. The
+    // call has to be answered rather than refused as pre-init, and the client
+    // named in `_meta` has to reach the pipeline: read only at the handshake,
+    // the name never arrives on this path and an agent client silently gets the
+    // full answer where it had been getting the compact one.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    let (_notifications, call) = send_recv_skip_notifications(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "claude-code",
+                        "version": "1"
+                    },
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                },
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件的質量" }
+            }
+        }),
+    );
+    assert!(
+        call["result"].is_object(),
+        "a self-declaring call needs no handshake: {call}"
+    );
+    let body: Value = serde_json::from_str(
+        call["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected tool output: {call}")),
+    )
+    .expect("tool output is JSON");
+    assert!(
+        body.get("text").is_none() && body.get("trace").is_none(),
+        "`_meta` named claude-code, so the answer should be compact: {body}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_a_first_message_call_from_a_handshake_revision_is_refused() {
+    // The exemption is the property of a revision that has no handshake, not of
+    // anything that puts a version in `_meta`. A client naming an older
+    // revision there is not a client of that revision, and still owes the
+    // `initialize` its own revision defines.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    let call = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2025-06-18" },
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件的質量" }
+            }
+        }),
+    );
+    assert_eq!(
+        call["error"]["code"], -32002,
+        "a handshake revision does not get to skip its handshake: {call}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
 fn e2e_every_termination_path_reports_the_code_it_promises() {
     // The exit contract in one place, because its cells have been wrong
     // separately: a reply queued and then abandoned, a drain that never
@@ -1365,73 +1548,10 @@ fn e2e_sampling_reply_reaches_the_server() {
     // is milliseconds of scanning either way. Anything under the timeout means
     // the answer was received.
     let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
-
-    let init = send_recv(
-        &mut stdin,
-        &mut stdout,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": { "sampling": {} },
-                "clientInfo": { "name": "test", "version": "0.1" }
-            }
-        }),
-    );
-    assert!(init["result"].is_object(), "initialize: {init}");
-    send_notification(
-        &mut stdin,
-        &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
-    );
-
-    let text = "這個項目的質量和性能都很好，軟件的並行處理和內存管理需要優化。".repeat(3);
-    writeln!(
-        stdin,
-        "{}",
-        json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {
-                "name": "zhtw",
-                "arguments": { "text": text, "profile": "strict", "output": "summary" }
-            }
-        })
-    )
-    .unwrap();
-    stdin.flush().unwrap();
+    start_sampling_call(&mut stdin, &mut stdout);
 
     let started = std::time::Instant::now();
-    let mut answered = 0usize;
-    let result = loop {
-        let mut line = String::new();
-        stdout.read_line(&mut line).expect("server closed early");
-        let msg: Value = serde_json::from_str(line.trim())
-            .unwrap_or_else(|e| panic!("expected a message, got {line:?}: {e}"));
-
-        if msg["method"] == "sampling/createMessage" {
-            answered += 1;
-            writeln!(
-                stdin,
-                "{}",
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": msg["id"],
-                    "result": {
-                        "role": "assistant",
-                        "model": "test",
-                        "content": { "type": "text", "text": "平行" }
-                    }
-                })
-            )
-            .unwrap();
-            stdin.flush().unwrap();
-        } else if msg["id"] == 2 {
-            break msg;
-        }
-    };
+    let (answered, result) = answer_sampling_until(&mut stdin, &mut stdout, 2);
     let elapsed = started.elapsed();
 
     assert!(answered > 0, "the server never asked the client to sample");
@@ -1443,6 +1563,298 @@ fn e2e_sampling_reply_reaches_the_server() {
         elapsed < std::time::Duration::from_secs(5),
         "{answered} sampling repl(ies) sent but the call took {elapsed:?}, \
          so the server waited out its timeout instead of reading them"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_a_judgment_survives_a_process_that_is_killed() {
+    // The judgment cache used to be written only by the exit flush and by
+    // `Drop`, and a stateless client runs neither: it opens a process per call
+    // and ends it with a signal. Every judgment a session paid the client to
+    // make was thrown away on the teardown path the clients actually use, so
+    // the next call asked the same question again. The write now happens at the
+    // end of the call that earned it, which is the last moment the process is
+    // guaranteed to still be alive.
+    let (tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    start_sampling_call(&mut stdin, &mut stdout);
+    let (answered, _) = answer_sampling_until(&mut stdin, &mut stdout, 2);
+    assert!(answered > 0, "the server never asked the client to sample");
+
+    // No `exit`, no end of input: the process is taken out from under itself,
+    // which is what a signal does to `Drop` and to the exit flush both.
+    child.kill().expect("kill the server");
+    let _ = child.wait();
+
+    // `spawn_server` sets XDG_CONFIG_HOME, and `rules::store::config_dir`
+    // honors it on every platform, so the cache has exactly one place to be.
+    let cache = tmp.path().join(".config/zhtw-mcp/judgment_cache.json");
+    assert!(
+        cache.exists(),
+        "the call answered {answered} sampling question(s), so its judgments \
+         should already be at {}",
+        cache.display()
+    );
+}
+
+#[test]
+fn e2e_modern_logging_opt_in_is_delivered_not_wedged() {
+    // Log delivery on this path used to go through the RMCP peer, which on a
+    // connection that never saw an `initialize` accepts the notification and
+    // never resolves the future that says it reached the wire. The request
+    // parked forever: no reply, no exit, both threads idle. It needs an actual
+    // log to deliver, which is why the server runs at info here; at the default
+    // filter there is nothing queued and nothing to park on.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server_with(&["--verbose"]);
+
+    // The regression this guards against is a park, not a wrong answer, and a
+    // blocking read against a parked server hangs the suite instead of failing
+    // it. Killing the child turns that back into end of input, which the read
+    // below reports as a failure like any other.
+    //
+    // Disarmed by dropping the sender once the reply is in. Left to fire
+    // unconditionally, the kill outlives `child.wait()` and lands on whatever
+    // process inherited the pid by then, which in this binary is a server
+    // another test is still talking to.
+    let pid = child.id();
+    let (armed, disarmed) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        if disarmed.recv_timeout(std::time::Duration::from_secs(30))
+            == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        {
+            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+        }
+    });
+
+    let (notifications, call) = send_recv_skip_notifications(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": { "logging": {} }
+                },
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件的質量" }
+            }
+        }),
+    );
+    drop(armed);
+    assert!(
+        call["result"].is_object(),
+        "a self-declaring call that opted into logging must still be answered: {call}"
+    );
+    assert!(
+        notifications
+            .iter()
+            .any(|n| n["method"] == "notifications/message"),
+        "the opt-in rode in `_meta`, so the lines this call logged should have \
+         reached the client: {notifications:?}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_discovery_answers_a_revision_it_does_not_serve() {
+    // The one question a client on an unknown revision can still ask. Refusing
+    // it at the gate answered "server not initialized", which is untrue and
+    // leaves the client with nothing to fall back to: the version list is the
+    // entire point of the request, and the gate does not have it.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    let refused = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "server/discover",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2027-05-01",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        }),
+    );
+    assert_eq!(
+        refused["error"]["code"], -32022,
+        "an unknown revision is an unsupported version, not a missing handshake: {refused}"
+    );
+    let supported = refused["error"]["data"]["supported"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the refusal must name what is on offer: {refused}"));
+    assert!(
+        supported.iter().any(|v| v == "2026-07-28"),
+        "the client needs the list to fall back onto: {refused}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_a_declared_client_does_not_outlive_its_request() {
+    // The identity rides in `_meta` on this revision, which makes it scoped to
+    // the request that carried it, exactly like the logging opt-in beside it.
+    // Recorded on the connection instead, one call naming an agent client moved
+    // the default output mode for every later call that named nobody, and the
+    // answer silently lost the `text` and `trace` fields it was supposed to
+    // carry.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+
+    let declared = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "1" },
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                },
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件的質量" }
+            }
+        }),
+    );
+    let body: Value = serde_json::from_str(
+        declared["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected tool output: {declared}")),
+    )
+    .expect("tool output is JSON");
+    assert!(
+        body.get("text").is_none(),
+        "the request named claude-code, so its own answer is compact: {body}"
+    );
+
+    // The same must hold through `server/discover`, which is the other request
+    // whose `_meta` can name a client. A probe is not consent for a later
+    // request that named nobody to be answered as whoever probed.
+    let discover = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "server/discover",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "1" },
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        }),
+    );
+    assert!(discover["result"].is_object(), "discover: {discover}");
+
+    let anonymous = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                },
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件的質量" }
+            }
+        }),
+    );
+    let body: Value = serde_json::from_str(
+        anonymous["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected tool output: {anonymous}")),
+    )
+    .expect("tool output is JSON");
+    assert!(
+        body.get("text").is_some(),
+        "this request named nobody, so the previous one's identity must not \
+         still be choosing its output mode: {body}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_modern_logging_opt_in_does_not_leak() {
+    // The `logging` key in client capabilities is this server's own extension,
+    // and it was read only off `initialize` params. A 2026-07-28 client never
+    // sends `initialize`, so the opt-in had nowhere to arrive and the whole
+    // channel was unreachable on the path those clients take. It is read from
+    // the same `_meta` that carries everything else that revision declares.
+    //
+    // At the default filter this server logs nothing above warn, so neither
+    // request produced a line and the second could not have received one
+    // whatever the code did. Running at info is what makes a leak observable,
+    // which is why the first call now asserts it saw lines at all.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server_with(&["--verbose"]);
+
+    let (notifications, first) = send_recv_skip_notifications(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": { "logging": {} }
+                },
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件的質量" }
+            }
+        }),
+    );
+    assert!(first["result"].is_object(), "tools/call: {first}");
+    assert!(
+        notifications
+            .iter()
+            .any(|n| n["method"] == "notifications/message"),
+        "the opt-in has to deliver, or the leak below is unobservable: \
+         {notifications:?}"
+    );
+
+    // Read strictly: one line, and it has to be the reply. Anything arriving
+    // ahead of it is a log line this request never asked for.
+    let next = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                },
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件的質量" }
+            }
+        }),
+    );
+    assert!(
+        next["result"].is_object(),
+        "logging leaked into the next request: {next}"
     );
 
     drop(stdin);

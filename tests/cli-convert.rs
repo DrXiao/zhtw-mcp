@@ -147,3 +147,72 @@ fn convert_reads_markdown_file_names_the_way_lint_does() {
         "the extension is not case-sensitive"
     );
 }
+
+/// Install a single-rule pack and return its directory, for `--packs-dir`.
+fn write_pack(dir: &std::path::Path, name: &str, rule: serde_json::Value) -> String {
+    let packs = dir.join("packs");
+    std::fs::create_dir_all(&packs).unwrap();
+    let pack = serde_json::json!({
+        "schema_version": 3,
+        "metadata": { "name": name },
+        "spelling": [rule],
+        "case": [],
+    });
+    std::fs::write(
+        packs.join(format!("{name}.json")),
+        serde_json::to_string(&pack).unwrap(),
+    )
+    .unwrap();
+    packs.to_str().unwrap().to_string()
+}
+
+/// A pack rule has to reach the conversion.
+///
+/// `run_convert` merged with an empty pack selection, so `--pack` parsed, the
+/// command succeeded, and the rules the caller asked for were absent from the
+/// scanner that drives the fix loop. Nothing errored; the output was just
+/// computed against the wrong ruleset. The term here is synthetic so that
+/// re-classifying a shipped term cannot make this pass for the wrong reason.
+#[test]
+fn convert_pack_rules_reach_the_conversion() {
+    let dir = tempfile::tempdir().unwrap();
+    let packs = write_pack(
+        dir.path(),
+        "convpack",
+        serde_json::json!({
+            "from": "測試詞",
+            "to": ["替換詞"],
+            "type": "cross_strait",
+            "english": "test term",
+        }),
+    );
+    let file = dir.path().join("input.txt");
+    std::fs::write(&file, "這個測試詞").unwrap();
+
+    let without = Command::new(binary_path())
+        .arg("convert")
+        .arg(&file)
+        .output()
+        .expect("run convert");
+    let without = String::from_utf8_lossy(&without.stdout).into_owned();
+    assert!(
+        without.contains("測試詞"),
+        "no pack selected, so the term stays; got {without:?}"
+    );
+
+    let with = Command::new(binary_path())
+        .args(["--packs-dir", &packs, "--pack", "convpack", "convert"])
+        .arg(&file)
+        .output()
+        .expect("run convert");
+    assert!(
+        with.status.success(),
+        "convert with a pack should exit 0; stderr={:?}",
+        String::from_utf8_lossy(&with.stderr)
+    );
+    let with = String::from_utf8_lossy(&with.stdout).into_owned();
+    assert!(
+        with.contains("替換詞"),
+        "the pack rule should have been applied; got {with:?}"
+    );
+}

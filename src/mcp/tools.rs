@@ -128,11 +128,18 @@ impl Server {
     /// An unknown tool name is a tool-level error rather than a protocol one,
     /// which is what lets a client show it to the user instead of failing the
     /// call.
+    ///
+    /// `declared_client` is whoever this request said it is, which on the
+    /// handshake-free revision is the only place the identity appears. It is
+    /// passed rather than stored because the declaration is request-scoped:
+    /// stored, one declared call would move the default output mode for every
+    /// later undeclared call on the same connection.
     pub(crate) fn call_tool(
         &mut self,
         name: &str,
         arguments: &Value,
         bridge: Option<&mut SamplingBridge<'_>>,
+        declared_client: Option<&str>,
     ) -> ParamResult<CallToolResult> {
         let _span = tracing::info_span!("mcp_request", method = "tools/call").entered();
         if name != "zhtw" {
@@ -150,7 +157,17 @@ impl Server {
         if let Some(error) = reject_unknown_params(arguments) {
             return Err(error);
         }
-        self.tool_check(arguments, bridge)
+        let result = self.tool_check(arguments, bridge, declared_client);
+
+        // Whatever this call judged is written now rather than at exit. A
+        // stateless client opens a process per call and ends it with a signal,
+        // which runs neither `Drop` nor the exit flush, so a session's
+        // judgments were being thrown away on the teardown path the clients
+        // actually use. A call that judged nothing writes nothing: eviction
+        // alone does not earn a rewrite of the whole store, because the next
+        // open redoes it anyway.
+        self.judgment_cache.flush_if_judged();
+        result
     }
 
     // Tool implementation
@@ -251,6 +268,7 @@ impl Server {
         &mut self,
         args: &Value,
         mut bridge: Option<&mut SamplingBridge<'_>>,
+        declared_client: Option<&str>,
     ) -> ParamResult<CallToolResult> {
         let started = std::time::Instant::now();
         // Snapshot cache counters at start for per-request telemetry.
@@ -276,7 +294,12 @@ impl Server {
         };
         let text = s2t_converted.as_deref().unwrap_or(text);
 
-        let params = CheckParams::parse(args, default_output_mode(self.client_name.as_deref()))?;
+        // This request's own declaration first, the handshake's second. Both
+        // name the same client in practice; the order is what keeps a
+        // declaration from outliving the request that made it.
+        let client = declared_client.or(self.client_name.as_deref());
+        let params = CheckParams::parse(args, default_output_mode(client))?;
+
         // Copy fields bind by value, the two owned ones by reference, so the
         // struct itself stays put for `CheckRequest` to borrow below.
         let CheckParams {
@@ -324,8 +347,8 @@ impl Server {
         .find(|&(_, requested)| requested)
         .filter(|_| output_mode == OutputMode::Tabular);
         if let Some((name, _)) = tabular_conflict {
-            // The constraint is about `output`, so the machine-readable list
-            // is the output modes that allow this flag, derived rather than
+            // The constraint is about `output`, so the machine-readable list is
+            // the output modes that allow this flag, derived rather than
             // copied; the prose belongs in the message.
             let allowed: Vec<&str> = accepted_values("output")
                 .into_iter()
@@ -465,13 +488,13 @@ impl Server {
         let ai_signature = scan.ai_signature;
         let translationese_signature = scan.translationese_signature;
 
-        // TM applies here because nothing rewrites the text on this
-        // path; the fix path defers it until after the rescan.
+        // TM applies here because nothing rewrites the text on this path; the
+        // fix path defers it until after the rescan.
         let tm_suppressed = self.apply_tm(&mut issues);
         apply_ignore_set(&mut issues, ignore_set);
 
-        // 35.9 — Apply project glossary precedence (banned > TM):
-        // proper_nouns suppress, banned inject synthetic Errors.
+        // Apply project glossary precedence (banned > TM): proper_nouns
+        // suppress, banned inject synthetic Errors.
         issues = crate::rules::glossary::apply_glossary_with_coordinates(
             text,
             content_type,
@@ -480,7 +503,7 @@ impl Server {
             glossary,
         );
 
-        // 35.1 — Document-wide consistency report.
+        // Document-wide consistency report.
         let consistency_report = consistency_requested
             .then(|| {
                 crate::engine::consistency::compute_consistency_report(text, &issues, glossary)
@@ -583,8 +606,8 @@ impl Server {
         } = params;
         let cfg = stage_args.cfg;
 
-        // Fix path: shared stage, then apply fixes and re-scan for
-        // residual issues.
+        // Fix path: shared stage, then apply fixes and re-scan for residual
+        // issues.
         let stage = self.run_scan_stage(stage_args, bridge);
         let ScanStage {
             excluded,
@@ -598,9 +621,9 @@ impl Server {
             ..
         } = stage;
 
-        // TM is NOT applied here: the fixer filter (should_suppress)
-        // prevents fixing TM-rejected terms, and the post-fix apply_tm
-        // handles severity downgrade + counting on the final residual.
+        // TM is NOT applied here: the fixer filter (should_suppress) prevents
+        // fixing TM-rejected terms, and the post-fix apply_tm handles severity
+        // downgrade + counting on the final residual.
         apply_ignore_set(&mut issues, ignore_set);
         issues = crate::rules::glossary::apply_glossary_with_coordinates(
             text,
@@ -610,12 +633,12 @@ impl Server {
             glossary,
         );
 
-        // Snapshot AFTER suppressions so restored severity reflects
-        // final state.
+        // Snapshot AFTER suppressions so restored severity reflects final
+        // state.
         let preserved_states = snapshot_states(&issues);
 
-        // Filter out TM-suppressed issues before fixing: a term the
-        // user deliberately rejected must not be auto-corrected.
+        // Filter out TM-suppressed issues before fixing: a term the user
+        // deliberately rejected must not be auto-corrected.
         let fix_issues: Vec<Issue> = match &self.tm_store {
             Some(tm) => issues
                 .iter()
@@ -633,10 +656,10 @@ impl Server {
             Some(self.catalog.scanner.segmenter()),
         );
 
-        // Re-scan after fixes — use post-fix ai_signature, not pre-fix.
-        // Remap exclusion zones to post-fix coordinates instead of
-        // rebuilding from scratch (avoids re-parsing markdown/URLs on
-        // the entire document for every fix cycle).
+        // Re-scan after fixes — use post-fix ai_signature, not pre-fix. Remap
+        // exclusion zones to post-fix coordinates instead of rebuilding from
+        // scratch (avoids re-parsing markdown/URLs on the entire document for
+        // every fix cycle).
         let remapped_excl = crate::fixer::remap_exclusions(&excluded, &fix_result.applied_fixes);
         let rescan_out = self.catalog.scanner.scan_with_prebuilt_excluded_config(
             &fix_result.text,
@@ -662,8 +685,8 @@ impl Server {
             &fix_result.applied_fixes,
         );
 
-        // Suppress convergent-chain noise: remove re-scan issues whose
-        // offset falls within a byte range written by the fixer.
+        // Suppress convergent-chain noise: remove re-scan issues whose offset
+        // falls within a byte range written by the fixer.
         suppress_convergent_issues(&mut remaining_issues, &fix_result.applied_fixes);
 
         remaining_issues = crate::rules::glossary::apply_glossary_with_coordinates(
@@ -674,8 +697,8 @@ impl Server {
             glossary,
         );
 
-        // Apply TM after preserved state restoration so the count
-        // reflects the true final state, not a pre-fix snapshot.
+        // Apply TM after preserved state restoration so the count reflects the
+        // true final state, not a pre-fix snapshot.
         let tm_suppressed = self.apply_tm(&mut remaining_issues);
 
         let consistency_report = consistency_requested
@@ -705,8 +728,8 @@ impl Server {
             .with_issue_count(remaining_issues.len())
             .with_output(&fix_result.text);
 
-        // Composite scorecard against the post-fix text and remaining
-        // issues, so the scorecard reflects the user-visible state.
+        // Composite scorecard against the post-fix text and remaining issues,
+        // so the scorecard reflects the user-visible state.
         let style_scorecard = style_scorecard_for(
             detect_style,
             ai_signature.as_ref(),
@@ -749,11 +772,14 @@ impl Server {
         })
     }
 
-    /// Record the client identity from the handshake.
+    /// Record the client identity a handshake established.
     ///
     /// The SDK owns `initialize` itself, so this is how the negotiated state
     /// still reaches the pipeline: `client_name` selects the default output
-    /// mode. Per-request capabilities are handled by the SDK adapter.
+    /// mode for calls that do not name a client themselves. A request that
+    /// does name one passes it to `call_tool` instead, because on the
+    /// handshake-free revision the declaration belongs to that request alone.
+    /// Per-request capabilities are handled by the SDK adapter.
     pub(crate) fn set_client(&mut self, name: String) {
         self.client_name = Some(name);
     }
@@ -996,8 +1022,8 @@ fn parse_fix_mode(args: &Value) -> ParamResult<FixMode> {
 fn parse_content_type(args: &Value) -> ParamResult<ContentType> {
     match optional_str_validated(args, "content_type")? {
         // Plain, not the file-name guess the CLI makes: a tool call carries
-        // text and no name to guess from, and reading unmarked text as
-        // Markdown would skip whatever looks like a fence inside it.
+        // text and no name to guess from, and reading unmarked text as Markdown
+        // would skip whatever looks like a fence inside it.
         None => Ok(ContentType::Plain),
         Some(other) => {
             ContentType::from_name(other).ok_or_else(|| enum_param_error("content_type", other))
@@ -2767,9 +2793,9 @@ fn input_schema_properties() -> &'static JsonObject {
 }
 
 fn tool_definitions() -> Vec<Tool> {
-    // Cloning the Arc, not the schema: the value is identical on every
-    // listing, and deep-copying a dozen nested property objects to produce it
-    // again is work with no result.
+    // Cloning the Arc, not the schema: the value is identical on every listing,
+    // and deep-copying a dozen nested property objects to produce it again is
+    // work with no result.
     let input_schema = input_schema().clone();
 
     vec![Tool::new(
@@ -2831,9 +2857,9 @@ impl Catalog {
                 result.with_ttl_ms(0).with_cache_scope(CacheScope::Private)
             })
             // resource_not_found rather than invalid_params: the URI is
-            // well-formed, it just names nothing. The SDK maps this to
-            // -32002, and upgrades it to -32602 for a peer on 2026-07-28 or
-            // newer, per SEP-2164, so each revision gets the code it expects.
+            // well-formed, it just names nothing. The SDK maps this to -32002,
+            // and upgrades it to -32602 for a peer on 2026-07-28 or newer, per
+            // SEP-2164, so each revision gets the code it expects.
             .ok_or_else(|| {
                 ErrorData::resource_not_found(format!("unknown resource URI: {uri}"), None)
             })
@@ -2951,7 +2977,7 @@ mod tests {
         assert!(ann.get("destructive").is_none());
     }
 
-    /// 35.2 — high confidence: cross_strait without context_clues, single
+    /// High confidence: cross_strait without context_clues, single
     /// suggestion.  Auto-fix safety still gated on rule_type being one of
     /// the unambiguous classes (Punctuation/Case/Variant/Typo); a plain
     /// CrossStrait keeps `auto_fix_safe=false` because the choice between
@@ -2976,7 +3002,7 @@ mod tests {
         assert!(!meta.needs_review);
     }
 
-    /// 35.2 — rule-tagged low confidence (e.g. `優化`, `算法`, `場景`
+    /// Rule-tagged low confidence (e.g. `優化`, `算法`, `場景`
     /// in `assets/ruleset.json`) surfaces as `low` so reviewers know
     /// they are editorial preference, not binary error.  Invariant:
     /// low ⇒ auto_fix_safe=false AND needs_review=true.
@@ -3012,7 +3038,7 @@ mod tests {
         }
     }
 
-    /// 35.2 — `@domain X` extraction populates the `domain` field.
+    /// `@domain X` extraction populates the `domain` field.
     #[test]
     fn explain_meta_extracts_domain_from_context() {
         let mut issue = Issue::new(
@@ -3028,7 +3054,7 @@ mod tests {
         assert_eq!(meta.domain, Some("IT"));
     }
 
-    /// 35.2 — Translationese / AiStyle / Grammar always demand review.
+    /// Translationese / AiStyle / Grammar always demand review.
     #[test]
     fn explain_meta_translationese_marks_low_confidence() {
         let issue = Issue::new(
@@ -3048,7 +3074,7 @@ mod tests {
         assert!(meta.needs_review);
     }
 
-    /// 35.9 — `parse_glossary` extracts banned/preferred/proper_nouns
+    /// `parse_glossary` extracts banned/preferred/proper_nouns
     /// from the tool args object.
     #[test]
     fn parse_glossary_extracts_three_lists() {
@@ -3081,7 +3107,7 @@ mod tests {
         assert!(g.proper_nouns.is_empty());
     }
 
-    /// 35.2 — Punctuation with single suggestion is auto-fix safe.
+    /// Punctuation with single suggestion is auto-fix safe.
     #[test]
     fn explain_meta_punctuation_is_auto_fix_safe() {
         let issue = Issue::new(
@@ -3413,7 +3439,7 @@ mod tests {
 
     /// Drive one `zhtw` call the way the adapter does.
     fn call_zhtw(server: &mut Server, args: serde_json::Value) -> ParamResult<CallToolResult> {
-        server.call_tool("zhtw", &args, None)
+        server.call_tool("zhtw", &args, None, None)
     }
 
     /// The tool's JSON payload, asserting it reported success on the way.
@@ -3447,7 +3473,7 @@ mod tests {
     #[test]
     fn tools_call_arguments_not_object() {
         let (mut server, _dir) = make_initialized_server();
-        let resp = server.call_tool("zhtw", &serde_json::json!("not_an_object"), None);
+        let resp = server.call_tool("zhtw", &serde_json::json!("not_an_object"), None, None);
         let err = resp.expect_err("a non-object arguments value is a parameter error");
         assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
     }
@@ -3528,9 +3554,9 @@ mod tests {
     #[test]
     fn every_value_the_schema_advertises_actually_parses() {
         // The schema is what a client reads to learn what it may send, and
-        // these parsers are what decides. Stating the vocabulary in both
-        // places is how a value gets advertised and then refused as invalid,
-        // so the check is that each advertised value survives its parser.
+        // these parsers are what decides. Stating the vocabulary in both places
+        // is how a value gets advertised and then refused as invalid, so the
+        // check is that each advertised value survives its parser.
         /// A parameter name and the parser that decides its values.
         type ParserFor = (&'static str, fn(&Value) -> bool);
         let cases: &[ParserFor] = &[
@@ -3543,8 +3569,8 @@ mod tests {
         ];
 
         // Every field routed through `enum_param_error` needs a schema enum to
-        // quote, including the two parsed inline rather than by a named
-        // parser: without one the rejection reports an empty `accepted` list.
+        // quote, including the two parsed inline rather than by a named parser:
+        // without one the rejection reports an empty `accepted` list.
         for field in [
             "fix_mode",
             "content_type",

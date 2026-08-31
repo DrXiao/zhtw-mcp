@@ -2,7 +2,9 @@
 //
 // Uses pulldown-cmark to parse Markdown and identify regions that should be
 // excluded from linting: code blocks, inline code, HTML blocks, and YAML
-// frontmatter. Returns byte ranges to exclude before scanning.
+// frontmatter.
+//
+// Returns byte ranges to exclude before scanning.
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
@@ -64,18 +66,17 @@ pub fn build_markdown_excluded_ranges_no_code(text: &str) -> Vec<ByteRange> {
 }
 
 /// Build Markdown exclusion ranges with explicit options.  Backbone for the
-/// two named wrappers above, plus opt-in features like 35.7's
-/// `exempt_blockquotes`.
+/// two named wrappers above, plus opt-in features like `exempt_blockquotes`.
 pub fn build_markdown_excluded_ranges_with_options(
     text: &str,
     opts: MdScanOptions,
 ) -> Vec<ByteRange> {
     let mut ranges = Vec::new();
 
-    // Pre-pass: detect YAML frontmatter (leading --- fence).  Exclude only
-    // the structural tokens (--- fences, key+colon spans, ASCII quote
-    // delimiters), leaving value prose scannable so that linting catches
-    // issues in title/description.
+    // Pre-pass: detect YAML frontmatter (leading --- fence). Exclude only the
+    // structural tokens (--- fences, key+colon spans, ASCII quote delimiters),
+    // leaving value prose scannable so that linting catches issues in
+    // title/description.
     if let Some(fm_end) = detect_frontmatter(text) {
         collect_frontmatter_structural_ranges(text, fm_end, &mut ranges);
     }
@@ -91,8 +92,8 @@ pub fn build_markdown_excluded_ranges_with_options(
 
     for (event, range) in parser.into_offset_iter() {
         match event {
-            // Fenced or indented code blocks: exclude entire block (default)
-            // or scan their prose (when scan_code_blocks is set).
+            // Fenced or indented code blocks: exclude entire block (default) or
+            // scan their prose (when scan_code_blocks is set).
             Event::Start(Tag::CodeBlock(_)) if !opts.scan_code_blocks => {
                 in_code_block = true;
                 code_block_start = range.start;
@@ -206,7 +207,8 @@ fn yaml_key_colon_pos(line: &str) -> Option<usize> {
             in_quote = true;
             quote_char = b;
         } else if b == b':' {
-            // YAML key separator: colon must be followed by whitespace or be at EOL.
+            // YAML key separator: colon must be followed by whitespace or be at
+            // EOL.
             let next = bytes.get(i + 1).copied().unwrap_or(b' ');
             if next == b' ' || next == b'\t' || next == b'\r' {
                 return Some(i);
@@ -307,8 +309,8 @@ pub fn extract_heading_ranges(text: &str) -> Vec<ByteRange> {
             }
             Event::End(TagEnd::Heading(_)) if in_heading => {
                 if let (Some(start), Some(end)) = (current_inline_start, current_inline_end) {
-                    // Skip false-positive headings synthesised from
-                    // frontmatter content + closing `---`.
+                    // Skip false-positive headings synthesised from frontmatter
+                    // content + closing `---`.
                     if start >= frontmatter_end {
                         ranges.push(ByteRange { start, end });
                     }
@@ -354,11 +356,11 @@ fn collect_frontmatter_structural_ranges(text: &str, fm_end: usize, ranges: &mut
             });
         }
 
-        // Preserve ASCII `"` and `'` bytes used as YAML scalar delimiters
-        // by excluding them from the punctuation scanner.  Without this,
-        // the scanner converts `"` to `「`/`」` inside frontmatter values
-        // and breaks downstream YAML parsers (regression observed in
-        // ai-muninn.com calque blindspot sweep, 2026-05).
+        // Preserve ASCII `"` and `'` bytes used as YAML scalar delimiters by
+        // excluding them from the punctuation scanner. Without this, the
+        // scanner converts `"` to `「`/`」` inside frontmatter values and
+        // breaks downstream YAML parsers (regression observed in ai-muninn.com
+        // calque blindspot sweep, 2026-05).
         for (i, b) in raw_line.bytes().enumerate() {
             if b == b'"' || b == b'\'' {
                 ranges.push(ByteRange {
@@ -484,10 +486,11 @@ mod tests {
     #[test]
     fn extract_heading_ranges_skips_frontmatter_setext() {
         // pulldown-cmark synthesises a setext H2 from frontmatter content +
-        // closing `---`.  We must skip that false-positive heading so the
+        // closing `---`. We must skip that false-positive heading so the
         // severity boost does not apply to frontmatter values.
         let md = "---\ntitle: 軟件測試指南\ndate: 2026\n---\n# 真標題\n正文。\n";
         let ranges = extract_heading_ranges(md);
+
         // Should contain the real heading "真標題" but NOT the synthesised
         // frontmatter heading.
         for r in &ranges {
@@ -579,8 +582,8 @@ mod tests {
 
     #[test]
     fn container_fence_lines_excluded() {
-        // The :::warning and ::: fence lines must be excluded.
-        // The prose content between them must NOT be excluded.
+        // The :::warning and ::: fence lines must be excluded. The prose
+        // content between them must NOT be excluded.
         let md = "前言\n:::warning\n這是警告內容，請注意：細節。\n:::\n後語\n";
         let ranges = build_markdown_excluded_ranges(md);
         let any_covers_open_fence = ranges
@@ -619,7 +622,7 @@ mod tests {
         assert!(any_covers_open, "4-colon opening fence should be excluded");
     }
 
-    // --- Tests for build_yaml_excluded_ranges ---
+    // Tests for build_yaml_excluded_ranges
 
     #[test]
     fn yaml_key_colon_excluded() {
@@ -663,7 +666,9 @@ mod tests {
         // - key: value — the key colon inside a list item must be excluded.
         let yaml = "- name: 測試\n- label: 標籤\n";
         let ranges = build_yaml_excluded_ranges(yaml);
-        // Each list mapping line should have one excluded range covering "- name:" / "- label:".
+
+        // Each list mapping line should have one excluded range covering "-
+        // name:" / "- label:".
         let covers_name = ranges
             .iter()
             .any(|r| yaml[r.start..r.end].contains("name:"));

@@ -23,6 +23,9 @@ use rmcp::{ErrorData, ServerHandler};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
+use super::revisions::{
+    is_handshake_free, negotiable_protocol_versions, supported_protocol_versions,
+};
 use super::sampling::{
     PeerSampler, SamplingBridge, DEFAULT_SAMPLING_BUDGET, DEFAULT_SAMPLING_TIMEOUT,
 };
@@ -62,65 +65,6 @@ fn flush_before_exit(inner: &Mutex<Server>) -> Flushed {
             Flushed::SkippedForScanInFlight
         }
     }
-}
-
-/// One protocol revision this server serves, and how a client reaches it.
-///
-/// Whether a revision has a handshake is a fact about that revision, so it is
-/// recorded next to it. Deriving it from position instead ("every revision but
-/// the newest") holds only while exactly one revision lacks `initialize` and
-/// it happens to sort first: the next such revision added to the head would
-/// quietly make 2026-07-28 negotiable, which is the one thing the split exists
-/// to prevent.
-struct Revision {
-    version: ProtocolVersion,
-    /// Whether `initialize` can negotiate it. 2026-07-28 deleted the
-    /// handshake, so it is reached through `server/discover` instead.
-    handshake: bool,
-}
-
-/// The revisions this server serves, newest first.
-const REVISIONS: &[Revision] = &[
-    Revision {
-        version: ProtocolVersion::V_2026_07_28,
-        handshake: false,
-    },
-    Revision {
-        version: ProtocolVersion::V_2025_11_25,
-        handshake: true,
-    },
-    Revision {
-        version: ProtocolVersion::V_2025_06_18,
-        handshake: true,
-    },
-    Revision {
-        version: ProtocolVersion::V_2025_03_26,
-        handshake: true,
-    },
-    Revision {
-        version: ProtocolVersion::V_2024_11_05,
-        handshake: true,
-    },
-];
-
-/// Everything served: what `server/discover` advertises and RMCP negotiates
-/// within.
-fn supported_protocol_versions() -> &'static [ProtocolVersion] {
-    static ALL: std::sync::OnceLock<Vec<ProtocolVersion>> = std::sync::OnceLock::new();
-    ALL.get_or_init(|| REVISIONS.iter().map(|r| r.version.clone()).collect())
-}
-
-/// What `initialize` can reach, which is the only useful thing to offer a
-/// client whose `initialize` was refused.
-fn negotiable_protocol_versions() -> &'static [ProtocolVersion] {
-    static NEGOTIABLE: std::sync::OnceLock<Vec<ProtocolVersion>> = std::sync::OnceLock::new();
-    NEGOTIABLE.get_or_init(|| {
-        REVISIONS
-            .iter()
-            .filter(|r| r.handshake)
-            .map(|r| r.version.clone())
-            .collect()
-    })
 }
 
 /// The methods this server implements, for telling a request it cannot serve
@@ -182,16 +126,50 @@ impl SdkServer {
     /// response that produced it, which is the order clients read causality
     /// from.
     #[allow(deprecated)]
-    async fn flush_logs(&self, peer: &Peer<RoleServer>) {
-        for message in self.lifecycle.drain_logs() {
-            // Built directly rather than round-tripped through a Value, which
-            // rebuilt the whole data tree twice per line and dropped the
-            // message outright if it ever failed to fit. The level arrives
-            // already typed, so nothing has to decide what it means here.
-            let param = LoggingMessageNotificationParam::new(message.level, message.data)
-                .with_logger(message.logger);
-            let _ = peer.notify_logging_message(param).await;
+    async fn flush_logs(&self, ctx: &RequestContext<RoleServer>) {
+        // A handshake declared the opt-in once for the connection, so the peer
+        // is a session RMCP knows about and can carry a notification.
+        if self.lifecycle.initialized() {
+            for message in self.lifecycle.drain_logs() {
+                // Built directly rather than round-tripped through a Value,
+                // which rebuilt the whole data tree twice per line and dropped
+                // the message outright if it ever failed to fit. The level
+                // arrives already typed, so nothing has to decide what it means
+                // here.
+                let param = LoggingMessageNotificationParam::new(message.level, message.data)
+                    .with_logger(message.logger);
+                let _ = ctx.peer.notify_logging_message(param).await;
+            }
+            return;
         }
+        if super::revisions::logging_opt_in(&ctx.meta) {
+            // Framed onto the transport's own queue rather than sent through
+            // the peer. RMCP never saw an `initialize` on this connection, and
+            // a notification handed to that peer waits on a session that will
+            // never open: the send is accepted and the future that resolves
+            // when it reaches the wire never does, which parks the request
+            // forever with no reply and no exit. The queue is the same wire
+            // without the handshake state machine in front of it.
+            self.lifecycle.queue_logs();
+            return;
+        }
+
+        // Declared nothing, so it is owed nothing. Drained either way, because
+        // the opt-in is request-scoped and lines held over would be delivered
+        // to whichever later request happened to ask.
+        //
+        // Capture is process-wide and carries no request identity, so this
+        // drops whatever a concurrent opted-in request logged and has not
+        // flushed yet. Holding the lines back instead only moves the damage:
+        // two overlapping requests that declared nothing would each see the
+        // other still running and neither would ever drain, and the pile would
+        // go out under the next request that did ask, as its own lines. Both
+        // ends of that trade need the one thing the channel does not carry,
+        // which is who logged each line. Tagging them means threading a request
+        // id through the blocking pool and rayon into the trace layer; the loss
+        // here is log lines on a connection that pipelines mixed opt-ins, and
+        // it has not been worth that.
+        self.lifecycle.drain_logs();
     }
 
     /// Run one read-only handler, flushing whatever it logged first.
@@ -234,7 +212,7 @@ impl SdkServer {
         ctx: &RequestContext<RoleServer>,
         result: ParamResult<T>,
     ) -> Result<T, ErrorData> {
-        self.flush_logs(&ctx.peer).await;
+        self.flush_logs(ctx).await;
         result
     }
 }
@@ -339,13 +317,10 @@ impl ServerHandler for SdkServer {
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, ErrorData> {
         // A revision served but without a handshake is not an unsupported
-        // version, it is the wrong entry point, and saying so beats the
-        // generic refusal: that one's list of alternatives cannot include the
-        // version actually wanted.
-        let served_without_handshake = REVISIONS
-            .iter()
-            .any(|r| !r.handshake && r.version == request.protocol_version);
-        if served_without_handshake {
+        // version, it is the wrong entry point, and saying so beats the generic
+        // refusal: that one's list of alternatives cannot include the version
+        // actually wanted.
+        if is_handshake_free(request.protocol_version.as_str()) {
             tracing::warn!(
                 requested = %request.protocol_version,
                 "initialize named a revision that has no handshake"
@@ -364,6 +339,7 @@ impl ServerHandler for SdkServer {
                 })),
             ));
         }
+
         // A revision this server does not serve is refused, not quietly
         // downgraded: since 2026-07-28 the spec makes an unsupported version a
         // server error rather than a client's judgment call, and answering a
@@ -385,40 +361,37 @@ impl ServerHandler for SdkServer {
         let negotiated = request.protocol_version.clone();
         context.peer.set_peer_info(request);
         self.lifecycle.mark_initialized();
+
         // Answered with the revision asked for, set here rather than left to
-        // the service: RMCP patches the negotiated version onto the result
-        // only when the session began with this handshake. A session that
-        // opened with `server/discover` and then sent `initialize` takes a
-        // different path, and the reply went out naming `get_info`'s default
-        // instead of the version requested. That is the same "which of the
-        // two is in force?" the refusal above exists to avoid. The version is
-        // already checked against the negotiable list, so there is nothing
-        // further to validate.
+        // the service: RMCP patches the negotiated version onto the result only
+        // when the session began with this handshake. A session that opened
+        // with `server/discover` and then sent `initialize` takes a different
+        // path, and the reply went out naming `get_info`'s default instead of
+        // the version requested. That is the same "which of the two is in
+        // force?" the refusal above exists to avoid. The version is already
+        // checked against the negotiable list, so there is nothing further to
+        // validate.
         Ok(self.get_info().with_protocol_version(negotiated))
     }
 
-    /// Discovery, which for a client that never sends `initialize` is also the
-    /// handshake: 2026-07-28 has no `initialize` at all, so the declaration
-    /// rides in per-request `_meta` and RMCP serves the session from here.
+    /// Discovery works before a handshake. 2026-07-28 has no `initialize`, so
+    /// its declaration rides in per-request `_meta`.
     ///
-    /// Only the client's identity is recorded, because that is the part with
-    /// no per-request source. Capabilities stay request-scoped and are read
-    /// where they are used.
+    /// Answering does not open the post-handshake gate. A client that asks
+    /// what this server speaks has not yet said what it will speak, and on
+    /// this revision it never will: the declaration arrives with each request
+    /// instead.
+    ///
+    /// Nothing about the caller is recorded here either. Everything this
+    /// revision declares, identity included, is request-scoped and read where
+    /// it is used: `call_tool` takes the name off its own `_meta`, and a
+    /// discovery probe naming a client is not consent for a later request that
+    /// named nobody to be answered as that client. A handshake still records
+    /// one, because there the declaration really is per connection.
     async fn discover(
         &self,
-        context: RequestContext<RoleServer>,
+        _context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::DiscoverResult, ErrorData> {
-        // Recorded only when the request actually declares one. Discovery can
-        // also arrive mid-session, after an `initialize` that already named the
-        // client, and a `_meta` without client info says nothing about who is
-        // calling: overwriting the name with nothing there would silently move
-        // the default output mode back to full for a client that had been
-        // getting compact.
-        if let Some(info) = context.meta.client_info() {
-            self.record_client(info.name.to_string()).await?;
-        }
-        self.lifecycle.mark_initialized();
-
         Ok(rmcp::model::DiscoverResult::from_server_info(
             self.supported_protocol_versions().into_owned(),
             self.get_info(),
@@ -449,13 +422,27 @@ impl ServerHandler for SdkServer {
         // cancellations, and this call's own sampling round trips be serviced
         // while a scan is in flight.
         let inner = self.inner.clone();
+
+        // 2026-07-28 has no handshake to record the client at, so the identity
+        // rides in this request's `_meta` instead: it picks the default output
+        // mode, and a call that never learns who is asking answers an agent
+        // client in full where it had been answering compact. Handed to the
+        // call rather than stored on the server, because the declaration is
+        // scoped to this request and must not decide the mode for a later one
+        // that declared nothing.
+        let declared_client = ctx.meta.client_info().map(|info| info.name);
         let (sampling_tx, mut sampling_rx) = mpsc::channel::<SamplingCall>(1);
         let scan = tokio::task::spawn_blocking(move || {
             let mut server = inner.lock().unwrap_or_else(PoisonError::into_inner);
             let mut sampler = ChannelSampler { tx: sampling_tx };
             let mut bridge =
                 sampling.then(|| SamplingBridge::new(&mut sampler, DEFAULT_SAMPLING_BUDGET));
-            server.call_tool(&name, &arguments, bridge.as_mut())
+            server.call_tool(
+                &name,
+                &arguments,
+                bridge.as_mut(),
+                declared_client.as_deref(),
+            )
         });
 
         // The scan owns the sending half, so the channel closing is how this
@@ -475,7 +462,7 @@ impl ServerHandler for SdkServer {
         }
         let response = scan.await;
 
-        self.flush_logs(&ctx.peer).await;
+        self.flush_logs(&ctx).await;
         // A panic in the pipeline costs this request, not the connection.
         let response = response.map_err(|_| handler_panicked())?;
         response.map(Into::into)
@@ -489,6 +476,7 @@ impl ServerHandler for SdkServer {
         _: RequestContext<RoleServer>,
     ) -> Result<(), ErrorData> {
         self.lifecycle.enable_logs();
+
         // The level is the point of the request. Turning forwarding on and
         // ignoring which level was asked for sends a client that wants errors
         // every info notification this server produces.
@@ -587,8 +575,8 @@ impl ServerHandler for SdkServer {
         // `ClientRequest` is untagged with `CustomRequest` last, so a
         // `tools/call` whose params are the wrong shape falls through to here
         // rather than being rejected as a typed request. Answering
-        // METHOD_NOT_FOUND for the second kind tells a client its tool does
-        // not exist when the tool exists and the arguments are wrong.
+        // METHOD_NOT_FOUND for the second kind tells a client its tool does not
+        // exist when the tool exists and the arguments are wrong.
         if IMPLEMENTED_METHODS.contains(&request.method.as_ref()) {
             return Err(ErrorData::invalid_params(
                 format!("invalid parameters for {}", request.method),
@@ -615,10 +603,11 @@ impl ServerHandler for SdkServer {
             return;
         }
         tracing::info!("exit notification, terminating");
-        // The cache is this path's own business; the log flush, the queue
-        // drain and the status are the same for both ways out and live at the
-        // one exit. It runs after the drain so a scan finishing during it
-        // still gets its judgments written.
+
+        // The cache is this path's own business; the log flush, the queue drain
+        // and the status are the same for both ways out and live at the one
+        // exit. It runs after the drain so a scan finishing during it still
+        // gets its judgments written.
         let inner = self.inner.clone();
         self.lifecycle
             .terminate(move || {
@@ -668,55 +657,11 @@ mod tests {
     #[test]
     fn a_scan_in_flight_is_left_to_finish_without_the_flush() {
         // The other half, and it is about contention alone: a lock genuinely
-        // held is what the warning is for. Poisoning it as well would pass
-        // only because `try_lock` reports contention ahead of poison.
+        // held is what the warning is for. Poisoning it as well would pass only
+        // because `try_lock` reports contention ahead of poison.
         let (inner, _dir) = test_server();
         let _held = inner.lock().expect("a fresh lock is not poisoned");
         assert_eq!(flush_before_exit(&inner), Flushed::SkippedForScanInFlight);
-    }
-
-    #[test]
-    fn a_revision_without_a_handshake_is_never_offered_by_one() {
-        // The refusal for an unsupported `initialize` names what the client
-        // could ask for instead, so a revision that has no `initialize` must
-        // not appear there: it would send the client back to the method that
-        // just failed. The table is what keeps the two lists in step.
-        //
-        // 2026-07-28 is named outright rather than left to the loop below,
-        // which passes for free if nothing is marked as lacking a handshake.
-        // That it deleted `initialize` is a fact about the revision, not a
-        // preference, so the table is wrong if it ever says otherwise.
-        let negotiable = negotiable_protocol_versions();
-        assert!(
-            supported_protocol_versions().contains(&ProtocolVersion::V_2026_07_28),
-            "2026-07-28 is served, through server/discover"
-        );
-        assert!(
-            !negotiable.contains(&ProtocolVersion::V_2026_07_28),
-            "2026-07-28 has no initialize, so it cannot be negotiated by one"
-        );
-        for revision in REVISIONS.iter().filter(|r| !r.handshake) {
-            assert!(
-                !negotiable.contains(&revision.version),
-                "{} has no handshake but is offered as one to negotiate",
-                revision.version
-            );
-        }
-        assert!(
-            !negotiable.is_empty(),
-            "some revision has to be reachable through initialize"
-        );
-    }
-
-    #[test]
-    fn every_served_revision_is_advertised() {
-        // `server/discover` is the only place a client can learn about a
-        // revision it cannot negotiate, so the advertised list is all of them.
-        let supported = supported_protocol_versions();
-        assert_eq!(supported.len(), REVISIONS.len());
-        for revision in REVISIONS {
-            assert!(supported.contains(&revision.version));
-        }
     }
 
     #[test]
@@ -769,9 +714,9 @@ mod tests {
 
     #[test]
     fn a_sampling_reply_yields_its_first_non_blank_text() {
-        // The model is free to lead with an empty or whitespace-only block,
-        // and taking it would hand the caller "" as though that were the
-        // judgment. First block with something in it wins, trimmed.
+        // The model is free to lead with an empty or whitespace-only block, and
+        // taking it would hand the caller "" as though that were the judgment.
+        // First block with something in it wins, trimmed.
         assert_eq!(
             reply_text(sampling_reply(&["  ", "", "  軟體  ", "檔案"])),
             Some("軟體".to_string())

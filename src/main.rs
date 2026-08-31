@@ -75,6 +75,8 @@ fn run(cli: Cli) -> Result<()> {
             &convert.files,
             convert.content_type.as_deref(),
             overrides_path.unwrap_or_else(zhtw_mcp::rules::store::default_overrides_path),
+            packs_dir,
+            &active_packs,
             #[cfg(feature = "translate")]
             convert.verify,
         ),
@@ -375,6 +377,8 @@ fn run_convert(
     file_args: &[String],
     content_type_str: Option<&str>,
     overrides_path: PathBuf,
+    packs_dir: PathBuf,
+    active_packs: &[String],
     #[cfg(feature = "translate")] verify: bool,
 ) -> Result<()> {
     use zhtw_mcp::engine::scan::Scanner;
@@ -404,12 +408,18 @@ fn run_convert(
     // Step 2: Build scanner with overrides.
     let store = OverrideStore::open(&overrides_path)?;
     let ruleset = load_embedded_ruleset()?;
+
+    // The active packs, not an empty selection. Passing `&[]` here meant every
+    // convert ran against the unpacked ruleset: `--pack` parsed, the command
+    // succeeded, and the answer was computed from rules the caller had asked to
+    // add. That reached the fix loop below as well as `--verify`, so the
+    // rewrite itself was wrong, not just the verification of it.
     let (spelling_rules, case_rules) = zhtw_mcp::rules::store::build_merged_rules(
         &ruleset.spelling_rules,
         &ruleset.case_rules,
         &store,
-        &zhtw_mcp::rules::store::PackStore::new(zhtw_mcp::rules::store::default_packs_dir()),
-        &[],
+        &zhtw_mcp::rules::store::PackStore::new(packs_dir),
+        active_packs,
     );
     let scanner = Scanner::new(spelling_rules, case_rules);
 

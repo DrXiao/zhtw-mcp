@@ -980,11 +980,11 @@ fn process_scanned_file(
     let mut translationese_signature = output.translationese_signature;
     let mut issues = output.issues;
 
-    // 35.9 — Apply project glossary precedence (proper_noun suppression +
-    // banned-term injection) before disambiguation, so the rest of the pipeline
-    // sees the canonical issue list. Synthetic banned-term issues land with
-    // `line: 0, col: 0` from `Issue::new`; reapply LineIndex so output
-    // formatters and the 35.1 consistency report see correct coordinates.
+    // Apply project glossary precedence (proper_noun suppression + banned-term
+    // injection) before disambiguation, so the rest of the pipeline sees the
+    // canonical issue list. Synthetic banned-term issues land with `line: 0,
+    // col: 0` from `Issue::new`; reapply LineIndex so output formatters and the
+    // consistency report see correct coordinates.
     issues = zhtw_mcp::rules::glossary::apply_glossary_with_coordinates(
         &text,
         content_type,
