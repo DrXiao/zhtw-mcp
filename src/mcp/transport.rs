@@ -341,6 +341,14 @@ impl Lifecycle {
             .len()
     }
 
+    pub(crate) fn initialized(&self) -> bool {
+        self.initialized.load(Ordering::Acquire)
+    }
+
+    fn may_route_peer_response(&self) -> bool {
+        self.initialized() || self.outstanding() != 0
+    }
+
     /// Open the post-handshake request gate after a handshake succeeds.
     pub(crate) fn mark_initialized(&self) {
         self.initialized.store(true, Ordering::Release);
@@ -755,7 +763,7 @@ fn gate(lifecycle: &Lifecycle, request: &super::types::JsonRpcRequest) -> Gate {
     // session rather than deliver it, and no scan has run, so there is nothing
     // to flush and the transport can honor it directly.
     if method == "exit" {
-        if lifecycle.initialized.load(Ordering::Relaxed) {
+        if lifecycle.initialized() {
             return Gate::Forward;
         }
         return Gate::Exit;
@@ -790,13 +798,6 @@ fn gate(lifecycle: &Lifecycle, request: &super::types::JsonRpcRequest) -> Gate {
             JsonRpcResponse::success(Some(id), serde_json::json!({}))
         });
     }
-
-    // Discovery is by definition pre-handshake: a client asks what this server
-    // speaks before committing to a revision. Its handler opens the gate after
-    // it has successfully produced the discovery response.
-    if method == "server/discover" {
-        return Gate::Forward;
-    }
     if method == "initialize" {
         // A `logging` key in the client capabilities is this server's own
         // extension, and RMCP's typed capabilities drop it before the handler
@@ -806,7 +807,32 @@ fn gate(lifecycle: &Lifecycle, request: &super::types::JsonRpcRequest) -> Gate {
         }
         return Gate::Forward;
     }
-    if lifecycle.initialized.load(Ordering::Relaxed) {
+
+    // Discovery is by definition pre-handshake, and it is the one question a
+    // client on a revision this server does not serve can still ask. Refusing
+    // it here for a malformed or unknown declaration answers "server not
+    // initialized", which is both untrue and useless: the gate does not know
+    // the version list, and that list is the entire point of the request. RMCP
+    // owns the `_meta` contract, so let it answer with the key it is missing or
+    // with the revisions on offer. Forwarding does not open the gate; nothing
+    // on this path marks the session initialized.
+    if method == "server/discover" {
+        return Gate::Forward;
+    }
+
+    // 2026-07-28 deleted the handshake: every request carries its own protocol
+    // declaration in `_meta`, so a client may open a connection and send a call
+    // on it without a preceding `initialize` or `server/discover`. The
+    // declaration is request-scoped: do not turn it into connection state.
+    //
+    // What counts as a declaration is the revision table's business, not the
+    // framing layer's, so both questions are asked of `revisions`.
+    if let Some(meta) = super::revisions::declaration(&request.params) {
+        if super::revisions::is_self_declaring(meta) {
+            return Gate::Forward;
+        }
+    }
+    if lifecycle.initialized() {
         return Gate::Forward;
     }
 
@@ -963,7 +989,7 @@ impl Transport<RoleServer> for StdioTransport {
                     // as a failed handshake and ends the session. Dropping it
                     // costs nothing and keeps a stray line from taking the
                     // connection down.
-                    if !self.lifecycle.initialized.load(Ordering::Relaxed) {
+                    if !self.lifecycle.may_route_peer_response() {
                         continue;
                     }
                     match serde_json::from_str(&line) {
@@ -1235,6 +1261,18 @@ mod tests {
         }
     }
 
+    /// A request declaring the handshake-free revision the way its clients do.
+    fn declared(method: &str, id: i64) -> super::super::types::JsonRpcRequest {
+        let mut request = req(method, Some(id));
+        request.params = serde_json::json!({
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
+        });
+        request
+    }
+
     #[test]
     fn pre_init_request_is_rejected_not_fatal() {
         let lc = lifecycle();
@@ -1242,6 +1280,50 @@ mod tests {
             panic!("a pre-init request must be answered, not dropped");
         };
         assert_eq!(response.error.unwrap().code, SERVER_NOT_INITIALIZED);
+    }
+
+    #[test]
+    fn self_declaring_request_is_served_without_opening_the_gate() {
+        // 2026-07-28 clients open a connection per call and declare the
+        // revision in `_meta`, so this must be served, not refused. What it
+        // must not do is turn that declaration into connection state: the
+        // undeclared follow-up is how the gate proves it stayed shut.
+        let lc = lifecycle();
+        assert!(matches!(
+            gate(&lc, &declared("tools/list", 1)),
+            Gate::Forward
+        ));
+
+        let Gate::Reply(response) = gate(&lc, &req("tools/call", Some(2))) else {
+            panic!("an undeclared follow-up request must be refused");
+        };
+        assert_eq!(response.error.unwrap().code, SERVER_NOT_INITIALIZED);
+    }
+
+    #[test]
+    fn an_active_stateless_request_allows_its_peer_reply() {
+        let lc = lifecycle();
+        assert!(!lc.may_route_peer_response());
+        lc.accept_request(PeerRequestId::Number(1));
+        assert!(lc.may_route_peer_response());
+        lc.retire_request(&PeerRequestId::Number(1));
+        assert!(!lc.may_route_peer_response());
+    }
+
+    #[test]
+    fn a_handshake_revision_in_meta_does_not_skip_the_handshake() {
+        // `_meta` is not where the older revisions carry the protocol version,
+        // so naming one there buys no exemption from their `initialize`.
+        let lc = lifecycle();
+        let mut request = req("tools/list", Some(1));
+        request.params = serde_json::json!({
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2025-06-18" }
+        });
+        let Gate::Reply(response) = gate(&lc, &request) else {
+            panic!("a request that declares a handshake revision must be refused");
+        };
+        assert_eq!(response.error.unwrap().code, SERVER_NOT_INITIALIZED);
+        assert!(!lc.initialized.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -1299,19 +1381,18 @@ mod tests {
     }
 
     #[test]
-    fn successful_discover_opens_the_gate() {
-        // Discovery precedes the handshake, so the gate has to let it reach
-        // RMCP, and RMCP serves the session from there.
+    fn discover_forwards_without_opening_the_gate() {
+        // Forwarded whatever it declares: the branch above the declaration
+        // check takes it, because the version list is the one answer a client
+        // on an unknown revision still needs. Declaring is therefore not what
+        // is under test, and passing a declaration would hide which branch
+        // answered.
         let lc = lifecycle();
         assert!(matches!(
             gate(&lc, &req("server/discover", Some(1))),
             Gate::Forward
         ));
-        lc.mark_initialized();
-        assert!(matches!(
-            gate(&lc, &req("tools/list", Some(2))),
-            Gate::Forward
-        ));
+        assert!(!lc.initialized(), "discovery must not mark the session up");
     }
 
     #[test]

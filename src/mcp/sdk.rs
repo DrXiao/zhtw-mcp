@@ -340,9 +340,13 @@ impl ServerHandler for SdkServer {
         Ok(self.get_info().with_protocol_version(negotiated))
     }
 
-    /// Discovery, which for a client that never sends `initialize` is also the
-    /// handshake: 2026-07-28 has no `initialize` at all, so the declaration
-    /// rides in per-request `_meta` and RMCP serves the session from here.
+    /// Discovery works before a handshake. 2026-07-28 has no `initialize`, so
+    /// its declaration rides in per-request `_meta`.
+    ///
+    /// Answering does not open the post-handshake gate. A client that asks
+    /// what this server speaks has not yet said what it will speak, and on
+    /// this revision it never will: the declaration arrives with each request
+    /// instead.
     ///
     /// Only the client's identity is recorded, because that is the part with
     /// no per-request source. Capabilities stay request-scoped and are read
@@ -360,7 +364,6 @@ impl ServerHandler for SdkServer {
         if let Some(info) = context.meta.client_info() {
             self.record_client(info.name.to_string()).await?;
         }
-        self.lifecycle.mark_initialized();
 
         Ok(rmcp::model::DiscoverResult::from_server_info(
             self.supported_protocol_versions().into_owned(),

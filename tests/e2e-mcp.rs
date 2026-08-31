@@ -973,6 +973,36 @@ fn e2e_discover_mid_session_keeps_the_client_it_was_told_about() {
 }
 
 #[test]
+fn e2e_a_first_message_call_from_a_handshake_revision_is_refused() {
+    // The exemption is the property of a revision that has no handshake, not of
+    // anything that puts a version in `_meta`. A client naming an older
+    // revision there is not a client of that revision, and still owes the
+    // `initialize` its own revision defines.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    let call = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2025-06-18" },
+                "name": "zhtw",
+                "arguments": { "text": "這個軟件的質量" }
+            }
+        }),
+    );
+    assert_eq!(
+        call["error"]["code"], -32002,
+        "a handshake revision does not get to skip its handshake: {call}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
 fn e2e_every_termination_path_reports_the_code_it_promises() {
     // The exit contract in one place, because its cells have been wrong
     // separately: a reply queued and then abandoned, a drain that never
@@ -1443,6 +1473,44 @@ fn e2e_sampling_reply_reaches_the_server() {
         elapsed < std::time::Duration::from_secs(5),
         "{answered} sampling repl(ies) sent but the call took {elapsed:?}, \
          so the server waited out its timeout instead of reading them"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_discovery_answers_a_revision_it_does_not_serve() {
+    // The one question a client on an unknown revision can still ask. Refusing
+    // it at the gate answered "server not initialized", which is untrue and
+    // leaves the client with nothing to fall back to: the version list is the
+    // entire point of the request, and the gate does not have it.
+    let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
+    let refused = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "server/discover",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2027-05-01",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }
+            }
+        }),
+    );
+    assert_eq!(
+        refused["error"]["code"], -32022,
+        "an unknown revision is an unsupported version, not a missing handshake: {refused}"
+    );
+    let supported = refused["error"]["data"]["supported"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the refusal must name what is on offer: {refused}"));
+    assert!(
+        supported.iter().any(|v| v == "2026-07-28"),
+        "the client needs the list to fall back onto: {refused}"
     );
 
     drop(stdin);
