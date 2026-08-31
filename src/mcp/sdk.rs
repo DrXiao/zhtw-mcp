@@ -23,6 +23,9 @@ use rmcp::{ErrorData, ServerHandler};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
+use super::revisions::{
+    is_handshake_free, negotiable_protocol_versions, supported_protocol_versions,
+};
 use super::sampling::{
     PeerSampler, SamplingBridge, DEFAULT_SAMPLING_BUDGET, DEFAULT_SAMPLING_TIMEOUT,
 };
@@ -62,65 +65,6 @@ fn flush_before_exit(inner: &Mutex<Server>) -> Flushed {
             Flushed::SkippedForScanInFlight
         }
     }
-}
-
-/// One protocol revision this server serves, and how a client reaches it.
-///
-/// Whether a revision has a handshake is a fact about that revision, so it is
-/// recorded next to it. Deriving it from position instead ("every revision but
-/// the newest") holds only while exactly one revision lacks `initialize` and
-/// it happens to sort first: the next such revision added to the head would
-/// quietly make 2026-07-28 negotiable, which is the one thing the split exists
-/// to prevent.
-struct Revision {
-    version: ProtocolVersion,
-    /// Whether `initialize` can negotiate it. 2026-07-28 deleted the
-    /// handshake, so it is reached through `server/discover` instead.
-    handshake: bool,
-}
-
-/// The revisions this server serves, newest first.
-const REVISIONS: &[Revision] = &[
-    Revision {
-        version: ProtocolVersion::V_2026_07_28,
-        handshake: false,
-    },
-    Revision {
-        version: ProtocolVersion::V_2025_11_25,
-        handshake: true,
-    },
-    Revision {
-        version: ProtocolVersion::V_2025_06_18,
-        handshake: true,
-    },
-    Revision {
-        version: ProtocolVersion::V_2025_03_26,
-        handshake: true,
-    },
-    Revision {
-        version: ProtocolVersion::V_2024_11_05,
-        handshake: true,
-    },
-];
-
-/// Everything served: what `server/discover` advertises and RMCP negotiates
-/// within.
-fn supported_protocol_versions() -> &'static [ProtocolVersion] {
-    static ALL: std::sync::OnceLock<Vec<ProtocolVersion>> = std::sync::OnceLock::new();
-    ALL.get_or_init(|| REVISIONS.iter().map(|r| r.version.clone()).collect())
-}
-
-/// What `initialize` can reach, which is the only useful thing to offer a
-/// client whose `initialize` was refused.
-fn negotiable_protocol_versions() -> &'static [ProtocolVersion] {
-    static NEGOTIABLE: std::sync::OnceLock<Vec<ProtocolVersion>> = std::sync::OnceLock::new();
-    NEGOTIABLE.get_or_init(|| {
-        REVISIONS
-            .iter()
-            .filter(|r| r.handshake)
-            .map(|r| r.version.clone())
-            .collect()
-    })
 }
 
 /// The methods this server implements, for telling a request it cannot serve
@@ -342,10 +286,7 @@ impl ServerHandler for SdkServer {
         // version, it is the wrong entry point, and saying so beats the generic
         // refusal: that one's list of alternatives cannot include the version
         // actually wanted.
-        let served_without_handshake = REVISIONS
-            .iter()
-            .any(|r| !r.handshake && r.version == request.protocol_version);
-        if served_without_handshake {
+        if is_handshake_free(request.protocol_version.as_str()) {
             tracing::warn!(
                 requested = %request.protocol_version,
                 "initialize named a revision that has no handshake"
@@ -677,50 +618,6 @@ mod tests {
         let (inner, _dir) = test_server();
         let _held = inner.lock().expect("a fresh lock is not poisoned");
         assert_eq!(flush_before_exit(&inner), Flushed::SkippedForScanInFlight);
-    }
-
-    #[test]
-    fn a_revision_without_a_handshake_is_never_offered_by_one() {
-        // The refusal for an unsupported `initialize` names what the client
-        // could ask for instead, so a revision that has no `initialize` must
-        // not appear there: it would send the client back to the method that
-        // just failed. The table is what keeps the two lists in step.
-        //
-        // 2026-07-28 is named outright rather than left to the loop below,
-        // which passes for free if nothing is marked as lacking a handshake.
-        // That it deleted `initialize` is a fact about the revision, not a
-        // preference, so the table is wrong if it ever says otherwise.
-        let negotiable = negotiable_protocol_versions();
-        assert!(
-            supported_protocol_versions().contains(&ProtocolVersion::V_2026_07_28),
-            "2026-07-28 is served, through server/discover"
-        );
-        assert!(
-            !negotiable.contains(&ProtocolVersion::V_2026_07_28),
-            "2026-07-28 has no initialize, so it cannot be negotiated by one"
-        );
-        for revision in REVISIONS.iter().filter(|r| !r.handshake) {
-            assert!(
-                !negotiable.contains(&revision.version),
-                "{} has no handshake but is offered as one to negotiate",
-                revision.version
-            );
-        }
-        assert!(
-            !negotiable.is_empty(),
-            "some revision has to be reachable through initialize"
-        );
-    }
-
-    #[test]
-    fn every_served_revision_is_advertised() {
-        // `server/discover` is the only place a client can learn about a
-        // revision it cannot negotiate, so the advertised list is all of them.
-        let supported = supported_protocol_versions();
-        assert_eq!(supported.len(), REVISIONS.len());
-        for revision in REVISIONS {
-            assert!(supported.contains(&revision.version));
-        }
     }
 
     #[test]

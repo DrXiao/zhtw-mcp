@@ -1,5 +1,6 @@
 pub mod prompts;
 pub mod resources;
+pub mod revisions;
 pub mod sampling;
 pub mod sdk;
 pub mod setup;
