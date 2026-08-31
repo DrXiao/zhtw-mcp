@@ -766,7 +766,7 @@ pub fn build_exclusions_for_content_type(text: &str, content_type: ContentType) 
 }
 
 /// Build exclusion ranges with explicit Markdown options.  Honors the
-/// caller-supplied [MdScanOptions] (e.g. 35.7 blockquote exemption);
+/// caller-supplied [MdScanOptions] (e.g. the blockquote exemption);
 /// falls back to defaults for non-Markdown content types.
 pub fn build_exclusions_for_content_type_with_options(
     text: &str,
@@ -781,7 +781,7 @@ pub fn build_exclusions_for_content_type_with_options(
         ContentType::MarkdownScanCode => {
             // MarkdownScanCode forces scan_code_blocks=true regardless of the
             // caller-supplied flag, but still honors exempt_blockquotes so the
-            // 35.7 opt-in works for source-code content too.
+            // blockquote opt-in works for source-code content too.
             let opts = MdScanOptions::new(true, md_opts.exempt_blockquotes);
             excluded.extend(build_markdown_excluded_ranges_with_options(text, opts));
         }

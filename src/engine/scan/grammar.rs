@@ -3,12 +3,12 @@
 // Detects interlingual transfer errors (English grammar calques in Chinese) and
 // structural redundancies without requiring POS tagging.
 //
-// Phase 2a: interlingual transfer detection
+// Interlingual transfer detection:
 //   - 和-connecting-clauses (和 between verb phrases instead of nouns)
 //   - 是+adjective copula (是 before adjective without 很/非常)
 //   - Redundant preposition after transitive verb
 //
-// Phase 2b: A-not-A + 嗎 clash detection
+// A-not-A and 嗎 clash detection:
 //   - A-not-A question structure with redundant sentence-final 嗎
 //
 // Architecture: a single Aho-Corasick automaton pre-scans the document once for
@@ -701,7 +701,7 @@ fn validate_double_attribution(
     }
 }
 
-// Phase 2b: detect A-not-A structures co-occurring with sentence-final 嗎.
+// Detect A-not-A structures co-occurring with sentence-final 嗎.
 #[cfg(test)]
 pub(crate) fn scan_a_not_a_ma(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue>) {
     for pattern in A_NOT_A_PATTERNS {
@@ -751,7 +751,7 @@ pub(crate) fn scan_a_not_a_ma(text: &str, excluded: &[ByteRange], issues: &mut V
     }
 }
 
-// Phase 2a: detect 和 connecting clauses (verb phrases) instead of nouns.
+// Detect 和 connecting clauses (verb phrases) instead of nouns.
 #[cfg(test)]
 pub(crate) fn scan_he_connecting_clauses(
     text: &str,
@@ -821,7 +821,7 @@ pub(crate) fn scan_he_connecting_clauses(
     }
 }
 
-// Phase 2a: detect bare 是+adjective (English copula calque).
+// Detect bare 是+adjective (English copula calque).
 #[cfg(test)]
 pub(crate) fn scan_bare_shi_adjective(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue>) {
     let shi = "是";
@@ -911,7 +911,7 @@ pub(crate) fn scan_bare_shi_adjective(text: &str, excluded: &[ByteRange], issues
     }
 }
 
-// Phase 2a: detect transitive verb + redundant preposition.
+// Detect transitive verb + redundant preposition.
 #[cfg(test)]
 pub(crate) fn scan_redundant_preposition(
     text: &str,
@@ -2087,7 +2087,7 @@ fn scan_ai_zero_width(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue
 
 // Structural AI detectors (require BoundaryIndex)
 
-// S1: tricolon detection — three 、-separated spans with identical char length
+// Tricolon detection: three 、-separated spans with identical char length,
 // or identical sentence-final particles.
 fn scan_ai_tricolon(
     text: &str,
@@ -2165,7 +2165,7 @@ fn char_bounded_end(text: &str, start_byte: usize, n_chars: usize) -> usize {
         .unwrap_or(text.len())
 }
 
-// S2: negative parallel — 不只是/不僅是 + 而是/更是 within ≤30 chars.
+// Negative parallel: 不只是/不僅是 plus 而是/更是 within 30 chars.
 fn scan_ai_negative_parallel(
     text: &str,
     excluded: &[ByteRange],
@@ -2297,8 +2297,8 @@ fn is_in_markdown_heading_line(text: &str, pos: usize) -> bool {
     is_markdown_heading_line(&text[line_start..line_end])
 }
 
-// S3: formulaic section endings — last sentence of a section-closing paragraph
-// matching formulaic closing phrases.
+// Formulaic section endings: the last sentence of a section-closing
+// paragraph, matching formulaic closing phrases.
 fn scan_ai_formulaic_section_endings(
     text: &str,
     excluded: &[ByteRange],
@@ -2457,7 +2457,7 @@ fn flag_gradual_development(
     ));
 }
 
-// S4: mechanical bullet lists — every item starts with **keyword**
+// Mechanical bullet lists: every item starts with **keyword**.
 fn scan_ai_mechanical_bullets(
     text: &str,
     excluded: &[ByteRange],
@@ -2532,7 +2532,7 @@ fn scan_ai_mechanical_bullets(
     }
 }
 
-// S5: excessive bold — ≥3 **...** runs per 200 chars in a paragraph.
+// Excessive bold: three or more **...** runs per 200 chars in a paragraph.
 fn emit_ai_mechanical_bullet_issue(
     text: &str,
     first_item_offset: usize,
@@ -2809,7 +2809,7 @@ fn count_non_excluded_matches(
     (count, first_offset)
 }
 
-// S6: em-dash overuse — ≥1 '——' per paragraph.
+// Em-dash overuse: one or more '——' per paragraph.
 fn scan_ai_emdash_overuse(
     text: &str,
     excluded: &[ByteRange],
@@ -2840,7 +2840,7 @@ fn scan_ai_emdash_overuse(
     }
 }
 
-// S7: formulaic 'despite' — 儘管.*挑戰 + forward-looking verb within one
+// Formulaic 'despite': 儘管.*挑戰 plus a forward-looking verb within one
 // sentence.
 fn scan_ai_formulaic_despite(
     text: &str,
@@ -2887,7 +2887,7 @@ fn scan_ai_formulaic_despite(
     }
 }
 
-// S8: false ranges — 從...到...再到 chains.
+// False ranges: 從...到...再到 chains.
 fn scan_ai_false_ranges(
     text: &str,
     excluded: &[ByteRange],
@@ -2929,8 +2929,8 @@ fn scan_ai_false_ranges(
     }
 }
 
-// V2: hedging density — promote Info to Warning when ≥3 hedging hits per 200
-// chars.
+// Hedging density: promote Info to Warning at three or more hedging hits
+// per 200 chars.
 fn scan_ai_hedging_density(
     text: &str,
     excluded: &[ByteRange],
@@ -2976,7 +2976,8 @@ fn scan_ai_hedging_density(
 
 // Syntactic translationese detectors (require BoundaryIndex)
 
-// G1: passive voice density — count 被 per paragraph, flag at >2 per 100 chars.
+// Passive voice density: count 被 per paragraph, flag above two per 100
+// chars.
 fn scan_trans_passive_density(
     text: &str,
     excluded: &[ByteRange],
@@ -3046,8 +3047,8 @@ fn scan_trans_passive_density(
     }
 }
 
-// G2: abstract subject — noun phrase ending in 的(減少|增加|...) at sentence
-// head followed by 導致|標誌著|意味著.
+// Abstract subject: a noun phrase ending in 的(減少|增加|...) at sentence
+// head, followed by 導致|標誌著|意味著.
 fn scan_trans_abstract_subject(
     text: &str,
     excluded: &[ByteRange],
@@ -3137,7 +3138,8 @@ fn scan_trans_displaced_conditional(
     }
 }
 
-// G8: pronoun overuse — ≥3 consecutive sentences starting with 他/她/它/他們.
+// Pronoun overuse: three or more consecutive sentences starting with
+// 他/她/它/他們.
 fn scan_trans_pronoun_overuse(
     text: &str,
     excluded: &[ByteRange],
@@ -3197,7 +3199,7 @@ fn scan_trans_pronoun_overuse(
     }
 }
 
-// Y1: copula+classifier inflation — 他是一個/名/位...的...人
+// Copula plus classifier inflation: 他是一個/名/位...的...人.
 fn scan_trans_copula_classifier(
     text: &str,
     excluded: &[ByteRange],
@@ -3237,7 +3239,7 @@ fn scan_trans_copula_classifier(
     }
 }
 
-// Y2: 的/地 confusion — adjective + 的 + verb where 地 is correct.
+// 的 and 地 confusion: adjective plus 的 plus verb where 地 is correct.
 fn scan_trans_adverbial_particle_mixup(
     text: &str,
     excluded: &[ByteRange],
@@ -3280,7 +3282,7 @@ fn scan_trans_adverbial_particle_mixup(
     }
 }
 
-// S3: 的的不休 (余光中) — ≥4 的 in one continuous span without comma.
+// 的的不休 (余光中): four or more 的 in one continuous span with no comma.
 fn scan_trans_excessive_de_chain(
     text: &str,
     excluded: &[ByteRange],
@@ -3355,7 +3357,7 @@ fn emit_excessive_de_chain(
     );
 }
 
-// V7: 地 overuse on disyllabic adverbs — 慢慢地、靜靜地、認真地.
+// 地 overuse on disyllabic adverbs: 慢慢地、靜靜地、認真地.
 fn scan_trans_adverbial_particle_redundant(
     text: &str,
     excluded: &[ByteRange],
@@ -3905,8 +3907,8 @@ fn has_ascii_parenthetical_after(text: &str, after_byte: usize, excluded: &[Byte
     bytes[i + 1..close].iter().any(|&b| b.is_ascii_alphabetic())
 }
 
-// V13: tense marker overuse — multiple 曾/已/過/了 in one sentence when an
-// explicit date is present.
+// Tense marker overuse: several 曾/已/過/了 in one sentence when an explicit
+// date is present.
 fn scan_trans_tense_marker(
     text: &str,
     excluded: &[ByteRange],
@@ -5067,7 +5069,7 @@ mod tests {
         );
     }
 
-    // Phase 1: plumbing — IssueType::Grammar fundamentals
+    // Plumbing: IssueType::Grammar fundamentals
 
     #[test]
     fn grammar_issue_type_serde_round_trip() {
@@ -5127,7 +5129,7 @@ mod tests {
         assert!(scan(clean).is_empty());
     }
 
-    // Phase 2b: A-not-A + 嗎 — all 14 patterns × with/without 嗎
+    // A-not-A plus 嗎: all 14 patterns, with and without 嗎
 
     // -- with 嗎 (should flag) --
 
@@ -5344,7 +5346,7 @@ mod tests {
         assert_eq!(issues.len(), 1);
     }
 
-    // Phase 2a: 和-connecting-clauses
+    // 和-connecting-clauses
 
     #[test]
     fn he_verb_suffix_le_with_pronoun() {
@@ -5419,7 +5421,7 @@ mod tests {
         assert_eq!(issues[0].suggestions[0], "，");
     }
 
-    // Phase 2a: 是+adjective copula
+    // 是+adjective copula
 
     #[test]
     fn bare_shi_disyllabic_adj() {
@@ -5558,7 +5560,7 @@ mod tests {
         assert_eq!(issues.len(), 1);
     }
 
-    // Phase 2a: redundant preposition
+    // Redundant preposition
 
     #[test]
     fn redundant_prep_taolun_guanyu() {
@@ -5941,7 +5943,7 @@ mod tests {
         assert!(scan("研究顯示成果很好").is_empty());
     }
 
-    // Phase 2c: 對X進行Y — fronted-object bureaucratic padding
+    // 對X進行Y: fronted-object bureaucratic padding
 
     #[test]
     fn dui_jinxing_basic() {

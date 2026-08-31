@@ -74,7 +74,7 @@ fn assert_term_silent(issues: &[Issue], line: usize, forbidden_from: &str) {
     );
 }
 
-/// Phase 1 — coverage audit.  Each of the 14 audited terms (plus a few
+/// Coverage audit. Each of the 14 audited terms (plus a few
 /// closely related compounds) must produce a non-zero hit when used in
 /// realistic prose under the `base` profile.
 #[test]
@@ -112,7 +112,7 @@ fn phase1_high_frequency_terms_fire() {
     }
 }
 
-/// Phase 2 — `元數據` parent rule must keep firing exactly once and
+/// The `元數據` parent rule must keep firing exactly once and
 /// surface "metadata" verbatim as the suggestion (no `元資料` /
 /// `詮釋資料` / `後設資料` translation target).
 #[test]
@@ -151,7 +151,7 @@ fn phase2_metadata_parent_rule_keeps_firing_with_english_anchor() {
         parent.suggestions,
     );
 
-    // Phase 2 invariant: the inner 數據 hit must NOT double-fire on the same
+    // Invariant: the inner 數據 hit must NOT double-fire on the same
     // span — overlap resolution + the parent rule should yield exactly one
     // issue covering the full 元數據 span.
     let inner_data: Vec<_> = line_31
@@ -209,7 +209,7 @@ fn phase2_metadata_acceptable_forms_pass_through() {
     );
 }
 
-/// Phase 2 — `算法` must not fire inside `演算法` (canonical zh-TW form).
+/// `算法` must not fire inside `演算法` (canonical zh-TW form).
 #[test]
 fn phase2_algorithm_silent_inside_canonical_form() {
     let body = std::fs::read_to_string(fixture_path()).expect("fixture exists");
@@ -220,7 +220,7 @@ fn phase2_algorithm_silent_inside_canonical_form() {
     }
 }
 
-/// Phase 3 — `消息` rule must respect legitimate zh-TW collocations.
+/// The `消息` rule must respect legitimate zh-TW collocations.
 #[test]
 fn phase3_message_silent_in_legitimate_collocations() {
     let body = std::fs::read_to_string(fixture_path()).expect("fixture exists");
@@ -231,7 +231,7 @@ fn phase3_message_silent_in_legitimate_collocations() {
     }
 }
 
-/// Phase 3 — bare `文件` rule is intentionally disabled
+/// The bare `文件` rule is intentionally disabled
 /// (assets/ruleset.json `"disabled": true`).  The audit must NOT
 /// accidentally re-enable it.  This test catches a regression where
 /// someone toggles the flag without realizing the bare-word

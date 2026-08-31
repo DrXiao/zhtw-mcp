@@ -64,8 +64,7 @@ pub fn build_markdown_excluded_ranges_no_code(text: &str) -> Vec<ByteRange> {
 }
 
 /// Build Markdown exclusion ranges with explicit options.  Backbone for the
-/// two named wrappers above, plus opt-in features like 35.7's
-/// `exempt_blockquotes`.
+/// two named wrappers above, plus opt-in features like `exempt_blockquotes`.
 pub fn build_markdown_excluded_ranges_with_options(
     text: &str,
     opts: MdScanOptions,

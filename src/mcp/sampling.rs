@@ -1001,7 +1001,7 @@ mod tests {
         assert_eq!(bridge.used(), 1);
     }
 
-    // 32.6: bulk confirm tests
+    // bulk confirm tests
 
     #[test]
     fn bulk_confirm_parses_json_response() {

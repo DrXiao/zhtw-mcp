@@ -1,4 +1,4 @@
-// 35.1 — `--consistency` flag emits consistency report when both regional
+// `--consistency` flag emits consistency report when both regional
 // variants of the same concept appear in one document.
 
 use std::process::{Command, Stdio};

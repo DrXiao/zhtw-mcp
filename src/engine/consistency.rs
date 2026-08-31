@@ -1,4 +1,4 @@
-// 35.1 — Document-wide terminology consistency report.
+// Document-wide terminology consistency report.
 //
 // Groups scan issues by their `english` field (natural equivalence
 // class), then for each group checks whether the canonical zh-TW form

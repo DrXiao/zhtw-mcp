@@ -470,7 +470,7 @@ impl Server {
         let tm_suppressed = self.apply_tm(&mut issues);
         apply_ignore_set(&mut issues, ignore_set);
 
-        // 35.9 — Apply project glossary precedence (banned > TM):
+        // Apply project glossary precedence (banned > TM):
         // proper_nouns suppress, banned inject synthetic Errors.
         issues = crate::rules::glossary::apply_glossary_with_coordinates(
             text,
@@ -480,7 +480,7 @@ impl Server {
             glossary,
         );
 
-        // 35.1 — Document-wide consistency report.
+        // Document-wide consistency report.
         let consistency_report = consistency_requested
             .then(|| {
                 crate::engine::consistency::compute_consistency_report(text, &issues, glossary)
@@ -2951,7 +2951,7 @@ mod tests {
         assert!(ann.get("destructive").is_none());
     }
 
-    /// 35.2 — high confidence: cross_strait without context_clues, single
+    /// High confidence: cross_strait without context_clues, single
     /// suggestion.  Auto-fix safety still gated on rule_type being one of
     /// the unambiguous classes (Punctuation/Case/Variant/Typo); a plain
     /// CrossStrait keeps `auto_fix_safe=false` because the choice between
@@ -2976,7 +2976,7 @@ mod tests {
         assert!(!meta.needs_review);
     }
 
-    /// 35.2 — rule-tagged low confidence (e.g. `優化`, `算法`, `場景`
+    /// Rule-tagged low confidence (e.g. `優化`, `算法`, `場景`
     /// in `assets/ruleset.json`) surfaces as `low` so reviewers know
     /// they are editorial preference, not binary error.  Invariant:
     /// low ⇒ auto_fix_safe=false AND needs_review=true.
@@ -3012,7 +3012,7 @@ mod tests {
         }
     }
 
-    /// 35.2 — `@domain X` extraction populates the `domain` field.
+    /// `@domain X` extraction populates the `domain` field.
     #[test]
     fn explain_meta_extracts_domain_from_context() {
         let mut issue = Issue::new(
@@ -3028,7 +3028,7 @@ mod tests {
         assert_eq!(meta.domain, Some("IT"));
     }
 
-    /// 35.2 — Translationese / AiStyle / Grammar always demand review.
+    /// Translationese / AiStyle / Grammar always demand review.
     #[test]
     fn explain_meta_translationese_marks_low_confidence() {
         let issue = Issue::new(
@@ -3048,7 +3048,7 @@ mod tests {
         assert!(meta.needs_review);
     }
 
-    /// 35.9 — `parse_glossary` extracts banned/preferred/proper_nouns
+    /// `parse_glossary` extracts banned/preferred/proper_nouns
     /// from the tool args object.
     #[test]
     fn parse_glossary_extracts_three_lists() {
@@ -3081,7 +3081,7 @@ mod tests {
         assert!(g.proper_nouns.is_empty());
     }
 
-    /// 35.2 — Punctuation with single suggestion is auto-fix safe.
+    /// Punctuation with single suggestion is auto-fix safe.
     #[test]
     fn explain_meta_punctuation_is_auto_fix_safe() {
         let issue = Issue::new(

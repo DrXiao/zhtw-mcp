@@ -1,4 +1,4 @@
-// 35.7 — Markdown blockquote exemption (opt-in) and YAML scalar quote
+// Markdown blockquote exemption (opt-in) and YAML scalar quote
 // preservation (always-on).
 //
 // Both behaviors are anchored to the ai-muninn.com calque blindspot sweep
