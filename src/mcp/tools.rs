@@ -157,7 +157,17 @@ impl Server {
         if let Some(error) = reject_unknown_params(arguments) {
             return Err(error);
         }
-        self.tool_check(arguments, bridge, declared_client)
+        let result = self.tool_check(arguments, bridge, declared_client);
+
+        // Whatever this call judged is written now rather than at exit. A
+        // stateless client opens a process per call and ends it with a signal,
+        // which runs neither `Drop` nor the exit flush, so a session's
+        // judgments were being thrown away on the teardown path the clients
+        // actually use. A call that judged nothing writes nothing: eviction
+        // alone does not earn a rewrite of the whole store, because the next
+        // open redoes it anyway.
+        self.judgment_cache.flush_if_judged();
+        result
     }
 
     // Tool implementation

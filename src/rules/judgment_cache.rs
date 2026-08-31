@@ -121,6 +121,16 @@ pub struct JudgmentCache {
     path: PathBuf,
     store: CacheStore,
     dirty: bool,
+    /// Whether this process has recorded a judgment, as opposed to merely
+    /// having evicted something.
+    ///
+    /// `dirty` cannot answer that. Opening the cache sets it whenever an entry
+    /// has expired, and a miss sets it again on the way past, so under daily
+    /// use the first call of most processes starts out dirty having judged
+    /// nothing. Flushing on `dirty` therefore rewrites the whole store on
+    /// calls that learned nothing, which at the entry cap is megabytes for
+    /// housekeeping a later open would redo for free.
+    judged: bool,
     ttl: Duration,
     /// Cache access statistics for telemetry.
     pub hits: u64,
@@ -163,6 +173,7 @@ impl JudgmentCache {
             path: path.to_path_buf(),
             store,
             dirty,
+            judged: false,
             ttl: Duration::from_secs(DEFAULT_TTL_SECS),
             hits: 0,
             misses: 0,
@@ -211,6 +222,7 @@ impl JudgmentCache {
         let ks = key_string(key);
         self.store.entries.insert(ks, value);
         self.dirty = true;
+        self.judged = true;
     }
 
     /// Create a JudgmentValue with proper timestamps.
@@ -261,6 +273,26 @@ impl JudgmentCache {
 
     /// Flush to disk if dirty.  Uses atomic write (tempfile + rename) to
     /// prevent truncated cache files on crash/power loss.
+    /// Persist only what a judgment earned.
+    ///
+    /// For the caller that runs after every tool call: a stateless client ends
+    /// its process with a signal, so a judgment it paid for has to reach disk
+    /// while the call that made it is still running. Eviction has no such
+    /// deadline, since the next open redoes it, so it waits for the exit flush
+    /// rather than making every call pay a full rewrite.
+    pub fn flush_if_judged(&mut self) {
+        if !self.judged {
+            return;
+        }
+
+        // Cleared on the attempt, not on success. A store that cannot be
+        // written, a read-only config directory being the usual reason, would
+        // otherwise re-serialize and re-fail on every later call in the
+        // process. `dirty` stays set, so `Drop` still retries once.
+        self.judged = false;
+        self.flush();
+    }
+
     pub fn flush(&mut self) {
         if !self.dirty {
             return;
@@ -386,6 +418,40 @@ mod tests {
         assert_eq!(cache.misses, 1);
         // Entry was lazily removed.
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn a_call_that_judged_nothing_does_not_rewrite_the_store() {
+        // The per-call flush exists for judgments a signal would otherwise take
+        // with it, and for nothing else. Opening a store marks it stale
+        // whenever housekeeping changed it, which has no deadline: the next
+        // open redoes it. Writing megabytes for that on a call that learned
+        // nothing is the amplification this separation removes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        {
+            let mut cache = JudgmentCache::open(&path);
+            let value = cache.make_value(Some("行程".into()), 0.8, "t".into(), "claude".into());
+            cache.insert(&test_key(), value);
+            cache.flush();
+        }
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let mut cache = JudgmentCache::open(&path);
+        cache.flush_if_judged();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before,
+            "a call that judged nothing must not rewrite the store"
+        );
+
+        let value = cache.make_value(Some("行程".into()), 0.8, "t".into(), "claude".into());
+        cache.insert(&test_key(), value);
+        cache.flush_if_judged();
+        assert!(
+            !cache.dirty,
+            "a judgment has to reach disk on the call itself"
+        );
     }
 
     #[test]
