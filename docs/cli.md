@@ -200,6 +200,9 @@ zhtw-mcp convert -- < input.txt
 
 # Specify content type explicitly
 zhtw-mcp convert file.md --content-type markdown
+
+# Rule packs apply here too, same as they do to lint
+zhtw-mcp --pack medical convert file.md
 ```
 
 This is a two-stage pipeline: first a built-in character/phrase converter (SC→TC), then iterative vocabulary normalization via the standard scanner.
