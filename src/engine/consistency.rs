@@ -1,13 +1,12 @@
 // Document-wide terminology consistency report.
 //
-// Groups scan issues by their `english` field (natural equivalence
-// class), then for each group checks whether the canonical zh-TW form
-// also appears elsewhere in the document.  Mixed usage produces a
-// `Consistency` diagnostic alerting the author that the same concept
-// is referred to with both regional variants.
+// Groups scan issues by their `english` field (natural equivalence class), then
+// for each group checks whether the canonical zh-TW form also appears elsewhere
+// in the document. Mixed usage produces a `Consistency` diagnostic alerting the
+// author that the same concept is referred to with both regional variants.
 //
-// TM-suppressed issues are excluded from consistency grouping — those
-// are user-approved overrides, not inadvertent inconsistency.
+// TM-suppressed issues are excluded from consistency grouping — those are
+// user-approved overrides, not inadvertent inconsistency.
 
 use std::collections::BTreeMap;
 
@@ -91,14 +90,14 @@ pub fn compute_consistency_report(
     for (english, issues_in_group) in grouped {
         let canonical = preferred_canonical_for_group(text, &issues_in_group, glossary);
         let Some(canonical) = canonical else { continue };
+
         // Mixed usage: the canonical TW form must appear independently
         // somewhere in the document (i.e. NOT as a substring of an
-        // already-flagged calque region).  Cheap proxy: the canonical
-        // form is found at an offset that is not covered by any
-        // `from`-span issue.  For the typical case where canonical and
-        // calque differ in characters, plain `text.contains` is
-        // sufficient because the calque span doesn't contain the
-        // canonical form as a substring.
+        // already-flagged calque region). Cheap proxy: the canonical form is
+        // found at an offset that is not covered by any `from`-span issue. For
+        // the typical case where canonical and calque differ in characters,
+        // plain `text.contains` is sufficient because the calque span doesn't
+        // contain the canonical form as a substring.
         if !text.contains(canonical.as_str()) {
             continue;
         }
@@ -130,8 +129,8 @@ fn preferred_canonical_for_group(
 ) -> Option<String> {
     // Prefer project glossary house terms when they also appear in the
     // document, but only when the rule already surfaced that term as a
-    // canonical suggestion for this equivalence class. Short zh terms are
-    // too collision-prone for edit-distance matching.
+    // canonical suggestion for this equivalence class. Short zh terms are too
+    // collision-prone for edit-distance matching.
     if !glossary.preferred.is_empty() {
         for preferred in &glossary.preferred {
             if preferred.is_empty() {
@@ -203,8 +202,8 @@ mod tests {
 
     #[test]
     fn groups_multiple_calques_for_same_english() {
-        // Both 線程 and an alternative mainland form 線程數 share english="thread".
-        // (Simulated for the test — real ruleset may differ.)
+        // Both 線程 and an alternative mainland form 線程數 share
+        // english="thread". (Simulated for the test — real ruleset may differ.)
         let text = "我們的線程很慢，線程數量太多。執行緒重構。";
         let issues = vec![
             cross_strait(9, "線程", "執行緒", "thread"),
@@ -260,12 +259,11 @@ mod tests {
 
     #[test]
     fn prefers_glossary_preferred_form_over_default_suggestion() {
-        // The rule lists two acceptable TW forms; the glossary picks
-        // one as the project-canonical.  When both regional variants
-        // appear in the document AND the glossary's choice is among
-        // the rule's suggestions (matches_group), the consistency
-        // report surfaces the glossary's choice instead of the rule's
-        // first suggestion.
+        // The rule lists two acceptable TW forms; the glossary picks one as the
+        // project-canonical. When both regional variants appear in the document
+        // AND the glossary's choice is among the rule's suggestions
+        // (matches_group), the consistency report surfaces the glossary's
+        // choice instead of the rule's first suggestion.
         let text = "我們的線程很慢。緒程設計需要重構。";
         let mut issue = Issue::new(
             9,
@@ -303,9 +301,8 @@ mod tests {
 
     #[test]
     fn edit_distance_neighbor_does_not_hijack_group() {
-        // Regression guard for short zh terms: sharing one edge
-        // character with the calque is not enough to join the same
-        // concept group.
+        // Regression guard for short zh terms: sharing one edge character with
+        // the calque is not enough to join the same concept group.
         let text = "我們的線程很慢。執行緒設計需要重構。線性代數也出現。";
         let issues = vec![cross_strait(9, "線程", "執行緒", "thread")];
         let glossary = ProjectGlossary {

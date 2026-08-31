@@ -1,13 +1,12 @@
 // Project-level glossary: `banned`, `preferred`, `proper_nouns`.
 //
 // Layered above the embedded ruleset and pack store but below banned-term
-// enforcement and translation memory. Full precedence order: glossary
-// `banned` > TM > glossary `preferred` > domain pack > embedded ruleset.
+// enforcement and translation memory. Full precedence order: glossary `banned`
+// > TM > glossary `preferred` > domain pack > embedded ruleset.
 //
 // `banned`: terms that must always fire, regardless of context_clues.
 // `preferred`: TW forms the consistency report uses to choose the canonical
-// suggestion.
-// `proper_nouns`: never flag (added to the suppression list).
+// suggestion. `proper_nouns`: never flag (added to the suppression list).
 
 use crate::engine::excluded::{is_excluded, ByteRange};
 use crate::rules::ruleset::{Issue, IssueType, Severity};

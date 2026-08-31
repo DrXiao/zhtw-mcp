@@ -248,11 +248,11 @@ impl Lifecycle {
     /// because `exit` is unconditional. End of input is the path that waits
     /// for those, through `drain_in_flight`.
     pub(crate) async fn drain_outbound(&self) {
-        // Cloned into this future rather than borrowed, and it has to stay
-        // that way: holding a sender across the await is what stops a
-        // concurrent `close()` from finishing its writer join before this
-        // resumes. Hoisting the clone out reintroduces the deadlock family
-        // this has already been bitten by twice.
+        // Cloned into this future rather than borrowed, and it has to stay that
+        // way: holding a sender across the await is what stops a concurrent
+        // `close()` from finishing its writer join before this resumes.
+        // Hoisting the clone out reintroduces the deadlock family this has
+        // already been bitten by twice.
         let Some(outbound) = self
             .outbound
             .lock()
@@ -272,9 +272,11 @@ impl Lifecycle {
                 Err(_) => {
                     tracing::warn!("exiting with output still queued: the client is not reading");
                 }
+
                 // Worth saying out loud rather than exiting quietly: the queue
                 // emptied because stdout broke, not because it was written.
                 Ok(Ok(Err(e))) => tracing::warn!("exiting with output unwritten: {e}"),
+
                 // Either it was written, or the writer went away without
                 // answering, which leaves nothing to report but also nothing
                 // still queued.
@@ -353,6 +355,7 @@ impl Lifecycle {
         let Some(rx) = slot.as_ref() else {
             return Vec::new();
         };
+
         // Drained either way, so a level the client is not reading cannot
         // accumulate in the channel.
         let floor = self.log_level.load(Ordering::Relaxed);
@@ -415,10 +418,10 @@ async fn write_outbound<W: AsyncWrite + Unpin>(
     rx: &mut mpsc::UnboundedReceiver<Outbound>,
     lifecycle: &Lifecycle,
 ) {
-    // The error that stopped the writer, once one has. Everything still
-    // queued is then settled from it rather than written, which is what lets
-    // the frames behind a failure report the errno that actually happened
-    // instead of a synthesized BrokenPipe standing in for all of them.
+    // The error that stopped the writer, once one has. Everything still queued
+    // is then settled from it rather than written, which is what lets the
+    // frames behind a failure report the errno that actually happened instead
+    // of a synthesized BrokenPipe standing in for all of them.
     let mut failed: Option<std::io::ErrorKind> = None;
     while let Some(item) = rx.recv().await {
         let written = match failed {
@@ -430,10 +433,12 @@ async fn write_outbound<W: AsyncWrite + Unpin>(
         };
         if let (None, Err(error)) = (failed, written.as_ref()) {
             failed = Some(error.kind());
+
             // Raised before the sender is woken. That wake can resume RMCP,
             // which re-enters `receive`, and the read has to see the failure
             // rather than park on a stdin that may never say anything again.
             lifecycle.mark_write_failed();
+
             // Closing is what makes the rest of this loop terminate: senders
             // are still held by the lifecycle and the transport, so recv would
             // otherwise wait forever for a frame that can no longer be written.
@@ -451,6 +456,7 @@ async fn write_outbound<W: AsyncWrite + Unpin>(
 /// Build the stdio transport for `lifecycle`.
 pub fn stdio(lifecycle: Arc<Lifecycle>) -> StdioTransport {
     let (outbound, mut rx) = mpsc::unbounded_channel::<Outbound>();
+
     // Writing happens here and nowhere else. RMCP polls `receive` inside a
     // select! and drops that future whenever another arm wins, which under a
     // stream of responses is most of the time. A write awaited inside it is
@@ -507,6 +513,7 @@ impl StdioTransport {
         answers: Option<PeerRequestId>,
     ) -> oneshot::Receiver<std::io::Result<()>> {
         let (done, written) = oneshot::channel();
+
         // A refused send hands the frame back, so the id it answers can be
         // retired from that rather than from a clone kept for the failure.
         // Reporting through the same channel the caller already awaits keeps
@@ -556,18 +563,19 @@ async fn read_line<R: AsyncBufRead + Unpin>(
     raw: &mut Vec<u8>,
 ) -> std::io::Result<ReadLine> {
     // The bound is on the line, not the call, so a resumed read gets what is
-    // left of the budget. Saturating because a cancelled read may already
-    // hold all of it, in which case there is nothing left to take.
+    // left of the budget. Saturating because a cancelled read may already hold
+    // all of it, in which case there is nothing left to take.
     let budget = (MAX_LINE_BYTES + 1).saturating_sub(raw.len()) as u64;
     reader.take(budget).read_until(b'\n', raw).await?;
 
     // `read_until` stops at a delimiter, at end of input, or when the budget
-    // runs out, and its byte count does not say which. What distinguishes
-    // them is the buffer: a delimiter at the end, or the whole budget spent
-    // without one.
+    // runs out, and its byte count does not say which. What distinguishes them
+    // is the buffer: a delimiter at the end, or the whole budget spent without
+    // one.
     if !raw.ends_with(b"\n") && raw.len() > MAX_LINE_BYTES {
         let recovered = drain_until_newline(reader).await?;
         raw.clear();
+
         // If the discard gave up, the stream has no line boundary left to
         // resynchronize on, so there is nothing to go back to reading.
         return Ok(if recovered {
@@ -579,6 +587,7 @@ async fn read_line<R: AsyncBufRead + Unpin>(
     if raw.is_empty() {
         return Ok(ReadLine::Eof);
     }
+
     // Either a whole line, or a final one the client left unterminated before
     // closing. The second still parses: a batch caller that writes its last
     // request without a newline and closes gets it answered, and end of input
@@ -629,6 +638,7 @@ async fn drain_until_newline<R: AsyncBufRead + Unpin>(reader: &mut R) -> std::io
                 let len = available.len();
                 reader.consume(len);
                 discarded = discarded.saturating_add(len);
+
                 // A line that never ends is not a line. Without a bound this
                 // reads forever, and since a client has one stream, it would
                 // never get to send anything else either.
@@ -756,6 +766,7 @@ fn gate(lifecycle: &Lifecycle, request: &super::types::JsonRpcRequest) -> Gate {
             JsonRpcResponse::error(Some(id), INVALID_REQUEST, "server is shutting down".into())
         });
     }
+
     // A notification carrying an id is a client bug that used to be reported
     // rather than silently reinterpreted.
     if method.starts_with("notifications/") && id.is_some() {
@@ -767,6 +778,7 @@ fn gate(lifecycle: &Lifecycle, request: &super::types::JsonRpcRequest) -> Gate {
             )
         });
     }
+
     // Answered here rather than forwarded, for two reasons: the handler runs
     // asynchronously, so a pipelined request could otherwise pass this gate
     // while it waits to run, and before the handshake RMCP would treat it as a
@@ -778,6 +790,7 @@ fn gate(lifecycle: &Lifecycle, request: &super::types::JsonRpcRequest) -> Gate {
             JsonRpcResponse::success(Some(id), serde_json::json!({}))
         });
     }
+
     // Discovery is by definition pre-handshake: a client asks what this server
     // speaks before committing to a revision. Its handler opens the gate after
     // it has successfully produced the discovery response.
@@ -824,11 +837,12 @@ impl Transport<RoleServer> for StdioTransport {
         &mut self,
         item: TxJsonRpcMessage<RoleServer>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-        // Only a reply retires a request. A notification answers nothing, and
-        // a server-initiated request (sampling) is this server asking, not
+        // Only a reply retires a request. A notification answers nothing, and a
+        // server-initiated request (sampling) is this server asking, not
         // answering.
         let answers = match &item {
             TxJsonRpcMessage::<RoleServer>::Response(response) => Some(response.id.clone()),
+
             // An error response may carry no id, when nothing could be
             // correlated; there is then no request for it to retire.
             TxJsonRpcMessage::<RoleServer>::Error(error) => error.id.clone(),
@@ -843,6 +857,7 @@ impl Transport<RoleServer> for StdioTransport {
                 if let Some(id) = &answers {
                     self.lifecycle.retire_request(id);
                 }
+
                 // Reported the same way a refused send is, so both ways of
                 // never reaching the wire come back through one channel.
                 let (done, written) = oneshot::channel();
@@ -867,6 +882,7 @@ impl Transport<RoleServer> for StdioTransport {
             // blocks. Request-scoped logs are flushed by the handler instead,
             // which is what keeps them ahead of their own response.
             self.flush_logs();
+
             // Nothing can be answered once stdout is gone, and RMCP only logs
             // the send errors that say so. Reading on would accept requests
             // whose replies go nowhere until stdin happened to close too.
@@ -940,13 +956,13 @@ impl Transport<RoleServer> for StdioTransport {
                     // waiting for its timeout and the sampled answer lost. A
                     // reply carrying no id, or one whose envelope RMCP cannot
                     // model, has nothing to correlate against and is dropped,
-                    // which is what the peer would do with it anyway.
-                    // Only once a session exists. Before the handshake this
-                    // server has asked the client nothing, so there is no id
-                    // for a reply to match, and RMCP reads any non-request
-                    // arriving there as a failed handshake and ends the
-                    // session. Dropping it costs nothing and keeps a stray
-                    // line from taking the connection down.
+                    // which is what the peer would do with it anyway. Only once
+                    // a session exists. Before the handshake this server has
+                    // asked the client nothing, so there is no id for a reply
+                    // to match, and RMCP reads any non-request arriving there
+                    // as a failed handshake and ends the session. Dropping it
+                    // costs nothing and keeps a stray line from taking the
+                    // connection down.
                     if !self.lifecycle.initialized.load(Ordering::Relaxed) {
                         continue;
                     }
@@ -973,6 +989,7 @@ impl Transport<RoleServer> for StdioTransport {
                 Gate::Drop => continue,
                 Gate::Exit => {
                     tracing::info!("exit notification before initialize, terminating");
+
                     // Nothing to do beyond terminating: no scan has run before
                     // the handshake, so there is no cache to flush.
                     self.lifecycle.terminate(|| {}).await;
@@ -982,16 +999,17 @@ impl Transport<RoleServer> for StdioTransport {
             match serde_json::from_str::<RxJsonRpcMessage<RoleServer>>(&line) {
                 Ok(message) => {
                     // Counted here rather than in the handlers, so every
-                    // request is covered whether or not its handler knows
-                    // about the drain. A notification has nothing to answer.
+                    // request is covered whether or not its handler knows about
+                    // the drain. A notification has nothing to answer.
                     match &message {
                         RxJsonRpcMessage::<RoleServer>::Request(request) => {
                             self.lifecycle.accept_request(request.id.clone());
                         }
+
                         // A cancelled request will never be answered, so it
-                        // stops being owed one here. Without this, end of
-                        // input waits out its whole deadline for a response
-                        // that by definition is not coming.
+                        // stops being owed one here. Without this, end of input
+                        // waits out its whole deadline for a response that by
+                        // definition is not coming.
                         RxJsonRpcMessage::<RoleServer>::Notification(notification) => {
                             if let Some(id) = cancelled_request_id(notification) {
                                 self.lifecycle.retire_request(&id);
@@ -1019,8 +1037,8 @@ impl Transport<RoleServer> for StdioTransport {
 
     async fn close(&mut self) -> Result<(), Self::Error> {
         // Dropping the queue ends the writer task once it has drained, so
-        // whatever was queued still reaches the client before the process
-        // goes. Waiting on the task is what makes that ordering hold.
+        // whatever was queued still reaches the client before the process goes.
+        // Waiting on the task is what makes that ordering hold.
         self.lifecycle.close_outbound();
         self.outbound = mpsc::unbounded_channel().0;
         if let Some(writer) = self.writer.take() {
@@ -1128,8 +1146,9 @@ mod tests {
 
             write_outbound(&mut out, &mut rx, &lifecycle).await;
             assert_eq!(written.await.unwrap().unwrap_err().kind(), kind);
-            // RMCP only logs the send errors, so raising this is what stops
-            // the server accepting requests it can no longer answer.
+
+            // RMCP only logs the send errors, so raising this is what stops the
+            // server accepting requests it can no longer answer.
             tokio::time::timeout(Duration::from_secs(1), lifecycle.write_failed_wait())
                 .await
                 .expect("a write failure has to stop the read side");
@@ -1151,8 +1170,8 @@ mod tests {
 
         // `tx` stays alive on purpose. Both the lifecycle and the transport
         // hold sender clones in the real thing, so the drain has to close the
-        // receiver itself; without that this waits forever for a frame that
-        // can no longer be written.
+        // receiver itself; without that this waits forever for a frame that can
+        // no longer be written.
         let mut out = FailingWriter::on_write(io::ErrorKind::ConnectionReset);
         let drained = tokio::time::timeout(
             Duration::from_secs(1),
@@ -1177,9 +1196,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_parked_read_gives_up_when_stdout_fails() {
-        // The whole point of the signal. Stdout dying does not close stdin,
-        // so a failure noticed only between lines would never be noticed at
-        // all: this read is parked on a client that has stopped talking.
+        // The whole point of the signal. Stdout dying does not close stdin, so
+        // a failure noticed only between lines would never be noticed at all:
+        // this read is parked on a client that has stopped talking.
         let lifecycle = Arc::new(lifecycle());
         // Held open, so the read parks rather than seeing end of input.
         let (client, _server) = tokio::io::duplex(64);
@@ -1193,6 +1212,7 @@ mod tests {
                     .is_none()
             }
         });
+
         // Let the read park before the failure lands, which is the ordering
         // that has no other way out.
         tokio::task::yield_now().await;
@@ -1298,8 +1318,8 @@ mod tests {
     fn pre_init_exit_terminates_rather_than_forwarding() {
         // Forwarding it would reach RMCP as a failed handshake, which ends the
         // session with the wrong status and an error the client did not cause.
-        // The gate decides that this terminates; what status it terminates
-        // with is read at the exit, from the same flag either path consults.
+        // The gate decides that this terminates; what status it terminates with
+        // is read at the exit, from the same flag either path consults.
         let lc = lifecycle();
         assert!(matches!(gate(&lc, &req("exit", None)), Gate::Exit));
         assert_eq!(lc.exit_code(), 1);
@@ -1385,8 +1405,8 @@ mod tests {
     async fn a_reused_id_does_not_hold_the_drain_open() {
         // RMCP keeps one cancellation-token entry per request id, so a client
         // that reuses an id while the first request is still running is
-        // answered once and RMCP discards the other response. Counting two
-        // owed responses here would hold end of input open for the full drain
+        // answered once and RMCP discards the other response. Counting two owed
+        // responses here would hold end of input open for the full drain
         // deadline waiting for a reply that no longer exists: measured at 30s
         // to exit instead of 0s. One entry per id is what RMCP will deliver.
         let lifecycle = Lifecycle::default();
@@ -1468,8 +1488,8 @@ mod tests {
     async fn a_final_frame_without_its_newline_is_still_answered() {
         // A caller that writes its last request and closes without a trailing
         // newline gets it answered. Nothing distinguishes that from a line
-        // still being written except end of input, so it is only delivered
-        // once the client has stopped sending.
+        // still being written except end of input, so it is only delivered once
+        // the client has stopped sending.
         let (client, mut server) = tokio::io::duplex(64);
         let mut reader = BufReader::new(client);
         let mut raw = Vec::new();
@@ -1511,10 +1531,10 @@ mod tests {
     #[tokio::test]
     async fn a_read_resumed_mid_character_still_decodes() {
         // `raw` outlives one call on purpose: RMCP polls `receive` inside a
-        // select! and drops the read whenever another arm wins, which can
-        // land between the bytes of one character. The decode runs once on
-        // the reassembled buffer, so the halves have to be carried as bytes
-        // rather than decoded apart and rejected as malformed.
+        // select! and drops the read whenever another arm wins, which can land
+        // between the bytes of one character. The decode runs once on the
+        // reassembled buffer, so the halves have to be carried as bytes rather
+        // than decoded apart and rejected as malformed.
         let mut raw = vec![0xE4, 0xBD]; // the first two bytes of 你
         let rest = [0xA0, b'\n'];
         let mut reader = BufReader::new(&rest[..]);
@@ -1555,8 +1575,8 @@ mod tests {
         // dropped whenever a response becomes ready. The bytes already taken
         // have to survive that, or the client's request is split in two and
         // never answered. This is the failure that hung CI: it needs an
-        // outgoing response to land mid-read, so it is timing-dependent in
-        // the server and deterministic only here.
+        // outgoing response to land mid-read, so it is timing-dependent in the
+        // server and deterministic only here.
         let (client, mut server) = tokio::io::duplex(64);
         let mut reader = BufReader::new(client);
         let mut raw = Vec::new();
@@ -1598,8 +1618,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn draining_after_the_queue_is_closed_returns_rather_than_waiting() {
-        // The shape of the bug this has been bitten by: a drain that waits on
-        // a writer which can no longer answer. With the sender taken there is
+        // The shape of the bug this has been bitten by: a drain that waits on a
+        // writer which can no longer answer. With the sender taken there is
         // nothing to enqueue against, so it has to return, not block.
         let lifecycle = Lifecycle::default();
         let (outbound, _rx) = mpsc::unbounded_channel();

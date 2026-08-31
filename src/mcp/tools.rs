@@ -277,6 +277,7 @@ impl Server {
         let text = s2t_converted.as_deref().unwrap_or(text);
 
         let params = CheckParams::parse(args, default_output_mode(self.client_name.as_deref()))?;
+
         // Copy fields bind by value, the two owned ones by reference, so the
         // struct itself stays put for `CheckRequest` to borrow below.
         let CheckParams {
@@ -324,8 +325,8 @@ impl Server {
         .find(|&(_, requested)| requested)
         .filter(|_| output_mode == OutputMode::Tabular);
         if let Some((name, _)) = tabular_conflict {
-            // The constraint is about `output`, so the machine-readable list
-            // is the output modes that allow this flag, derived rather than
+            // The constraint is about `output`, so the machine-readable list is
+            // the output modes that allow this flag, derived rather than
             // copied; the prose belongs in the message.
             let allowed: Vec<&str> = accepted_values("output")
                 .into_iter()
@@ -465,13 +466,13 @@ impl Server {
         let ai_signature = scan.ai_signature;
         let translationese_signature = scan.translationese_signature;
 
-        // TM applies here because nothing rewrites the text on this
-        // path; the fix path defers it until after the rescan.
+        // TM applies here because nothing rewrites the text on this path; the
+        // fix path defers it until after the rescan.
         let tm_suppressed = self.apply_tm(&mut issues);
         apply_ignore_set(&mut issues, ignore_set);
 
-        // Apply project glossary precedence (banned > TM):
-        // proper_nouns suppress, banned inject synthetic Errors.
+        // Apply project glossary precedence (banned > TM): proper_nouns
+        // suppress, banned inject synthetic Errors.
         issues = crate::rules::glossary::apply_glossary_with_coordinates(
             text,
             content_type,
@@ -583,8 +584,8 @@ impl Server {
         } = params;
         let cfg = stage_args.cfg;
 
-        // Fix path: shared stage, then apply fixes and re-scan for
-        // residual issues.
+        // Fix path: shared stage, then apply fixes and re-scan for residual
+        // issues.
         let stage = self.run_scan_stage(stage_args, bridge);
         let ScanStage {
             excluded,
@@ -598,9 +599,9 @@ impl Server {
             ..
         } = stage;
 
-        // TM is NOT applied here: the fixer filter (should_suppress)
-        // prevents fixing TM-rejected terms, and the post-fix apply_tm
-        // handles severity downgrade + counting on the final residual.
+        // TM is NOT applied here: the fixer filter (should_suppress) prevents
+        // fixing TM-rejected terms, and the post-fix apply_tm handles severity
+        // downgrade + counting on the final residual.
         apply_ignore_set(&mut issues, ignore_set);
         issues = crate::rules::glossary::apply_glossary_with_coordinates(
             text,
@@ -610,12 +611,12 @@ impl Server {
             glossary,
         );
 
-        // Snapshot AFTER suppressions so restored severity reflects
-        // final state.
+        // Snapshot AFTER suppressions so restored severity reflects final
+        // state.
         let preserved_states = snapshot_states(&issues);
 
-        // Filter out TM-suppressed issues before fixing: a term the
-        // user deliberately rejected must not be auto-corrected.
+        // Filter out TM-suppressed issues before fixing: a term the user
+        // deliberately rejected must not be auto-corrected.
         let fix_issues: Vec<Issue> = match &self.tm_store {
             Some(tm) => issues
                 .iter()
@@ -633,10 +634,10 @@ impl Server {
             Some(self.catalog.scanner.segmenter()),
         );
 
-        // Re-scan after fixes — use post-fix ai_signature, not pre-fix.
-        // Remap exclusion zones to post-fix coordinates instead of
-        // rebuilding from scratch (avoids re-parsing markdown/URLs on
-        // the entire document for every fix cycle).
+        // Re-scan after fixes — use post-fix ai_signature, not pre-fix. Remap
+        // exclusion zones to post-fix coordinates instead of rebuilding from
+        // scratch (avoids re-parsing markdown/URLs on the entire document for
+        // every fix cycle).
         let remapped_excl = crate::fixer::remap_exclusions(&excluded, &fix_result.applied_fixes);
         let rescan_out = self.catalog.scanner.scan_with_prebuilt_excluded_config(
             &fix_result.text,
@@ -662,8 +663,8 @@ impl Server {
             &fix_result.applied_fixes,
         );
 
-        // Suppress convergent-chain noise: remove re-scan issues whose
-        // offset falls within a byte range written by the fixer.
+        // Suppress convergent-chain noise: remove re-scan issues whose offset
+        // falls within a byte range written by the fixer.
         suppress_convergent_issues(&mut remaining_issues, &fix_result.applied_fixes);
 
         remaining_issues = crate::rules::glossary::apply_glossary_with_coordinates(
@@ -674,8 +675,8 @@ impl Server {
             glossary,
         );
 
-        // Apply TM after preserved state restoration so the count
-        // reflects the true final state, not a pre-fix snapshot.
+        // Apply TM after preserved state restoration so the count reflects the
+        // true final state, not a pre-fix snapshot.
         let tm_suppressed = self.apply_tm(&mut remaining_issues);
 
         let consistency_report = consistency_requested
@@ -705,8 +706,8 @@ impl Server {
             .with_issue_count(remaining_issues.len())
             .with_output(&fix_result.text);
 
-        // Composite scorecard against the post-fix text and remaining
-        // issues, so the scorecard reflects the user-visible state.
+        // Composite scorecard against the post-fix text and remaining issues,
+        // so the scorecard reflects the user-visible state.
         let style_scorecard = style_scorecard_for(
             detect_style,
             ai_signature.as_ref(),
@@ -996,8 +997,8 @@ fn parse_fix_mode(args: &Value) -> ParamResult<FixMode> {
 fn parse_content_type(args: &Value) -> ParamResult<ContentType> {
     match optional_str_validated(args, "content_type")? {
         // Plain, not the file-name guess the CLI makes: a tool call carries
-        // text and no name to guess from, and reading unmarked text as
-        // Markdown would skip whatever looks like a fence inside it.
+        // text and no name to guess from, and reading unmarked text as Markdown
+        // would skip whatever looks like a fence inside it.
         None => Ok(ContentType::Plain),
         Some(other) => {
             ContentType::from_name(other).ok_or_else(|| enum_param_error("content_type", other))
@@ -2767,9 +2768,9 @@ fn input_schema_properties() -> &'static JsonObject {
 }
 
 fn tool_definitions() -> Vec<Tool> {
-    // Cloning the Arc, not the schema: the value is identical on every
-    // listing, and deep-copying a dozen nested property objects to produce it
-    // again is work with no result.
+    // Cloning the Arc, not the schema: the value is identical on every listing,
+    // and deep-copying a dozen nested property objects to produce it again is
+    // work with no result.
     let input_schema = input_schema().clone();
 
     vec![Tool::new(
@@ -2831,9 +2832,9 @@ impl Catalog {
                 result.with_ttl_ms(0).with_cache_scope(CacheScope::Private)
             })
             // resource_not_found rather than invalid_params: the URI is
-            // well-formed, it just names nothing. The SDK maps this to
-            // -32002, and upgrades it to -32602 for a peer on 2026-07-28 or
-            // newer, per SEP-2164, so each revision gets the code it expects.
+            // well-formed, it just names nothing. The SDK maps this to -32002,
+            // and upgrades it to -32602 for a peer on 2026-07-28 or newer, per
+            // SEP-2164, so each revision gets the code it expects.
             .ok_or_else(|| {
                 ErrorData::resource_not_found(format!("unknown resource URI: {uri}"), None)
             })
@@ -3528,9 +3529,9 @@ mod tests {
     #[test]
     fn every_value_the_schema_advertises_actually_parses() {
         // The schema is what a client reads to learn what it may send, and
-        // these parsers are what decides. Stating the vocabulary in both
-        // places is how a value gets advertised and then refused as invalid,
-        // so the check is that each advertised value survives its parser.
+        // these parsers are what decides. Stating the vocabulary in both places
+        // is how a value gets advertised and then refused as invalid, so the
+        // check is that each advertised value survives its parser.
         /// A parameter name and the parser that decides its values.
         type ParserFor = (&'static str, fn(&Value) -> bool);
         let cases: &[ParserFor] = &[
@@ -3543,8 +3544,8 @@ mod tests {
         ];
 
         // Every field routed through `enum_param_error` needs a schema enum to
-        // quote, including the two parsed inline rather than by a named
-        // parser: without one the rejection reports an empty `accepted` list.
+        // quote, including the two parsed inline rather than by a named parser:
+        // without one the rejection reports an empty `accepted` list.
         for field in [
             "fix_mode",
             "content_type",

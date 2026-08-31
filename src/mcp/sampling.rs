@@ -544,8 +544,8 @@ pub(crate) fn refine_issues_with_sampling(
             continue;
         }
 
-        // Use semantic chunking: extract a structurally bounded chunk
-        // rather than a raw ±120 char window.
+        // Use semantic chunking: extract a structurally bounded chunk rather
+        // than a raw ±120 char window.
         let chunk =
             crate::engine::disambig::extract_semantic_chunk(text, issue.offset, issue.length);
         eligible.push((idx, chunk.to_string()));
@@ -849,8 +849,8 @@ mod tests {
     #[test]
     fn bridge_returns_none_when_client_does_not_answer() {
         // Silence and an error reply reach the adapter identically, as an
-        // answer with no result, so this covers both. Either way the round
-        // trip happened and still counts against the budget.
+        // answer with no result, so this covers both. Either way the round trip
+        // happened and still counts against the budget.
         let issue = make_confusable_issue("並行", vec!["平行", "並行"], "parallelism");
         let mut sampler = MockSampler::silent();
         let mut bridge = SamplingBridge::new(&mut sampler, 5);

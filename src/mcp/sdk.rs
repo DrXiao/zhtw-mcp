@@ -339,9 +339,9 @@ impl ServerHandler for SdkServer {
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, ErrorData> {
         // A revision served but without a handshake is not an unsupported
-        // version, it is the wrong entry point, and saying so beats the
-        // generic refusal: that one's list of alternatives cannot include the
-        // version actually wanted.
+        // version, it is the wrong entry point, and saying so beats the generic
+        // refusal: that one's list of alternatives cannot include the version
+        // actually wanted.
         let served_without_handshake = REVISIONS
             .iter()
             .any(|r| !r.handshake && r.version == request.protocol_version);
@@ -364,6 +364,7 @@ impl ServerHandler for SdkServer {
                 })),
             ));
         }
+
         // A revision this server does not serve is refused, not quietly
         // downgraded: since 2026-07-28 the spec makes an unsupported version a
         // server error rather than a client's judgment call, and answering a
@@ -385,15 +386,16 @@ impl ServerHandler for SdkServer {
         let negotiated = request.protocol_version.clone();
         context.peer.set_peer_info(request);
         self.lifecycle.mark_initialized();
+
         // Answered with the revision asked for, set here rather than left to
-        // the service: RMCP patches the negotiated version onto the result
-        // only when the session began with this handshake. A session that
-        // opened with `server/discover` and then sent `initialize` takes a
-        // different path, and the reply went out naming `get_info`'s default
-        // instead of the version requested. That is the same "which of the
-        // two is in force?" the refusal above exists to avoid. The version is
-        // already checked against the negotiable list, so there is nothing
-        // further to validate.
+        // the service: RMCP patches the negotiated version onto the result only
+        // when the session began with this handshake. A session that opened
+        // with `server/discover` and then sent `initialize` takes a different
+        // path, and the reply went out naming `get_info`'s default instead of
+        // the version requested. That is the same "which of the two is in
+        // force?" the refusal above exists to avoid. The version is already
+        // checked against the negotiable list, so there is nothing further to
+        // validate.
         Ok(self.get_info().with_protocol_version(negotiated))
     }
 
@@ -489,6 +491,7 @@ impl ServerHandler for SdkServer {
         _: RequestContext<RoleServer>,
     ) -> Result<(), ErrorData> {
         self.lifecycle.enable_logs();
+
         // The level is the point of the request. Turning forwarding on and
         // ignoring which level was asked for sends a client that wants errors
         // every info notification this server produces.
@@ -587,8 +590,8 @@ impl ServerHandler for SdkServer {
         // `ClientRequest` is untagged with `CustomRequest` last, so a
         // `tools/call` whose params are the wrong shape falls through to here
         // rather than being rejected as a typed request. Answering
-        // METHOD_NOT_FOUND for the second kind tells a client its tool does
-        // not exist when the tool exists and the arguments are wrong.
+        // METHOD_NOT_FOUND for the second kind tells a client its tool does not
+        // exist when the tool exists and the arguments are wrong.
         if IMPLEMENTED_METHODS.contains(&request.method.as_ref()) {
             return Err(ErrorData::invalid_params(
                 format!("invalid parameters for {}", request.method),
@@ -615,10 +618,11 @@ impl ServerHandler for SdkServer {
             return;
         }
         tracing::info!("exit notification, terminating");
-        // The cache is this path's own business; the log flush, the queue
-        // drain and the status are the same for both ways out and live at the
-        // one exit. It runs after the drain so a scan finishing during it
-        // still gets its judgments written.
+
+        // The cache is this path's own business; the log flush, the queue drain
+        // and the status are the same for both ways out and live at the one
+        // exit. It runs after the drain so a scan finishing during it still
+        // gets its judgments written.
         let inner = self.inner.clone();
         self.lifecycle
             .terminate(move || {
@@ -668,8 +672,8 @@ mod tests {
     #[test]
     fn a_scan_in_flight_is_left_to_finish_without_the_flush() {
         // The other half, and it is about contention alone: a lock genuinely
-        // held is what the warning is for. Poisoning it as well would pass
-        // only because `try_lock` reports contention ahead of poison.
+        // held is what the warning is for. Poisoning it as well would pass only
+        // because `try_lock` reports contention ahead of poison.
         let (inner, _dir) = test_server();
         let _held = inner.lock().expect("a fresh lock is not poisoned");
         assert_eq!(flush_before_exit(&inner), Flushed::SkippedForScanInFlight);
@@ -769,9 +773,9 @@ mod tests {
 
     #[test]
     fn a_sampling_reply_yields_its_first_non_blank_text() {
-        // The model is free to lead with an empty or whitespace-only block,
-        // and taking it would hand the caller "" as though that were the
-        // judgment. First block with something in it wins, trimmed.
+        // The model is free to lead with an empty or whitespace-only block, and
+        // taking it would hand the caller "" as though that were the judgment.
+        // First block with something in it wins, trimmed.
         assert_eq!(
             reply_text(sampling_reply(&["  ", "", "  軟體  ", "檔案"])),
             Some("軟體".to_string())
