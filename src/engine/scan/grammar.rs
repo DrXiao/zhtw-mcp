@@ -2087,8 +2087,8 @@ fn scan_ai_zero_width(text: &str, excluded: &[ByteRange], issues: &mut Vec<Issue
 
 // Structural AI detectors (require BoundaryIndex)
 
-// Tricolon detection: three 、-separated spans with identical char length,
-// or identical sentence-final particles.
+// Tricolon detection: three 、-separated spans with identical char length, or
+// identical sentence-final particles.
 fn scan_ai_tricolon(
     text: &str,
     excluded: &[ByteRange],
@@ -2297,8 +2297,8 @@ fn is_in_markdown_heading_line(text: &str, pos: usize) -> bool {
     is_markdown_heading_line(&text[line_start..line_end])
 }
 
-// Formulaic section endings: the last sentence of a section-closing
-// paragraph, matching formulaic closing phrases.
+// Formulaic section endings: the last sentence of a section-closing paragraph,
+// matching formulaic closing phrases.
 fn scan_ai_formulaic_section_endings(
     text: &str,
     excluded: &[ByteRange],
@@ -2430,6 +2430,7 @@ fn flag_gradual_development(
     sent: &crate::engine::sentence::SentenceBound,
 ) {
     let s = &text[sent.byte_start..sent.byte_end];
+
     // Two bindings rather than one tuple: a tuple evaluates both arms, so the
     // second search would run over every sentence even though 隨著 is rare.
     let Some(start) = s.find("隨著") else {
@@ -2809,7 +2810,8 @@ fn count_non_excluded_matches(
     (count, first_offset)
 }
 
-// Em-dash overuse: one or more '——' per paragraph.
+// Em-dash overuse: two or more '——' in one paragraph. A single one is ordinary
+// punctuation and always has been.
 fn scan_ai_emdash_overuse(
     text: &str,
     excluded: &[ByteRange],
@@ -2929,8 +2931,8 @@ fn scan_ai_false_ranges(
     }
 }
 
-// Hedging density: promote Info to Warning at three or more hedging hits
-// per 200 chars.
+// Hedging density: promote Info to Warning at three or more hedging hits per
+// 200 chars.
 fn scan_ai_hedging_density(
     text: &str,
     excluded: &[ByteRange],
@@ -2976,8 +2978,7 @@ fn scan_ai_hedging_density(
 
 // Syntactic translationese detectors (require BoundaryIndex)
 
-// Passive voice density: count 被 per paragraph, flag above two per 100
-// chars.
+// Passive voice density: count 被 per paragraph, flag above two per 100 chars.
 fn scan_trans_passive_density(
     text: &str,
     excluded: &[ByteRange],
@@ -3060,8 +3061,9 @@ fn scan_trans_abstract_subject(
 
     for sent in &idx.sentences {
         let s = &text[sent.byte_start..sent.byte_end];
-        // The abstract noun has to lead the sentence; the verb may sit
-        // anywhere after it. One issue per sentence either way.
+
+        // The abstract noun has to lead the sentence; the verb may sit anywhere
+        // after it. One issue per sentence either way.
         let head = &s[..char_bounded_end(s, 0, 20)];
         if !ABSTRACT_NOUNS.iter().any(|noun| head.contains(noun)) {
             continue;
@@ -4406,9 +4408,9 @@ fn emit_zy5_span_if_qualifies(
     // Every candidate is a prefix of the span, so the tests that look at a
     // prefix are answered once here rather than recomputed per 的. Rescanning
     // them made the walk quadratic in the number of 的, which the early exit
-    // below only bounds when the noun run happens to reach the end of the
-    // span: one Latin character or digit stops the run short and the walk
-    // goes back to rescanning everything.
+    // below only bounds when the noun run happens to reach the end of the span:
+    // one Latin character or digit stops the run short and the walk goes back
+    // to rescanning everything.
     if span
         .chars()
         .next()
@@ -4436,18 +4438,22 @@ fn emit_zy5_span_if_qualifies(
     debug_assert!(PREDICATE_VERBS.iter().all(|v| v.len() <= MAX_VERB_BYTES));
 
     let mut best_candidate: Option<(usize, usize, usize)> = None;
+
     // The prefix before the 的 only grows, so it is scanned for a predicate
     // verb once in total: each pass covers what the last one had not reached,
     // plus enough overlap for a verb lying across the seam.
     let mut verb_scanned_to = 0usize;
     let mut verb_seen = false;
-    // Computed on the first candidate that needs it, since the region it
-    // covers is the same for all of them.
+
+    // Computed on the first candidate that needs it, since the region it covers
+    // is the same for all of them.
     let mut predicate_close: Option<Option<usize>> = None;
+
     // Only read by the debug assertion below, which guards the reasoning the
     // predicate break depends on.
     #[cfg(debug_assertions)]
     let mut furthest_candidate_end = 0usize;
+
     // Characters in span[..counted_to], carried across iterations so the whole
     // span is walked once in total rather than once per 的.
     let mut chars_before = 0usize;
@@ -4504,6 +4510,7 @@ fn emit_zy5_span_if_qualifies(
                 })
                 .collect()
         });
+
         // Both the check and the state it needs are debug-only, so release
         // builds carry neither.
         #[cfg(debug_assertions)]
@@ -4518,20 +4525,21 @@ fn emit_zy5_span_if_qualifies(
         if de_count < min_de {
             continue;
         }
-        // A predicate between the first and last 的 means separate phrases.
-        // The region starts at the first 的, which never moves, so the answer
-        // for every candidate comes from one pass built on first use.
+
+        // A predicate between the first and last 的 means separate phrases. The
+        // region starts at the first 的, which never moves, so the answer for
+        // every candidate comes from one pass built on first use.
         let region_start = de_positions[0] + de_len;
         let region_end = de_positions[de_count - 1];
         if region_end > region_start {
             let close =
                 *predicate_close.get_or_insert_with(|| first_predicate_close(span, region_start));
             if close.is_some_and(|close| close <= region_end) {
-                // `close` is fixed for the span and `region_end` only grows,
-                // so every later candidate lands here too. Walking on costs a
-                // noun run and a character count per remaining 的 to reach the
-                // same answer, which on a span with thousands of them is the
-                // whole rest of the walk.
+                // `close` is fixed for the span and `region_end` only grows, so
+                // every later candidate lands here too. Walking on costs a noun
+                // run and a character count per remaining 的 to reach the same
+                // answer, which on a span with thousands of them is the whole
+                // rest of the walk.
                 break;
             }
         }
@@ -4548,6 +4556,7 @@ fn emit_zy5_span_if_qualifies(
         if should_replace {
             best_candidate = Some((candidate_end, char_count, de_count));
         }
+
         // Only a longer candidate can replace this one, and none reaches past
         // the end of the span.
         if candidate_end == span.len() {
@@ -6883,6 +6892,24 @@ mod tests {
     }
 
     #[test]
+    fn ai_emdash_overuse_needs_two_dashes_in_a_paragraph() {
+        // Pins the threshold the doc comment states. One dash is ordinary
+        // punctuation; the detector's own message counts occurrences, so a
+        // one-dash paragraph firing would also report "段落內 1 處".
+        for (text, want) in [("這段文字——結尾", 0), ("這段文字——持續補充——結尾", 1)]
+        {
+            let idx = BoundaryIndex::build(text, &[]);
+            let mut issues = Vec::new();
+            scan_ai_emdash_overuse(text, &[], &mut issues, &idx);
+            assert_eq!(
+                issues.len(),
+                want,
+                "{text:?} should produce {want} issue(s)"
+            );
+        }
+    }
+
+    #[test]
     fn ai_emdash_overuse_ignores_excluded_markers() {
         let text = "`——` 這段文字——持續補充——結尾";
         let code_start = text.find('`').unwrap();
@@ -7751,9 +7778,10 @@ mod tests {
             "沒有任何標記的一般文字",
             "才對的說法的意思",
         ];
-        // Only right edges that fall on a 的 are checked, because those are
-        // the only ones ZY5 asks about, and they are what makes reading the
-        // windows from the span rather than the region equivalent.
+
+        // Only right edges that fall on a 的 are checked, because those are the
+        // only ones ZY5 asks about, and they are what makes reading the windows
+        // from the span rather than the region equivalent.
         for case in cases {
             for lo in (0..case.len()).filter(|&i| case.is_char_boundary(i)) {
                 let close = first_predicate_close(case, lo);
@@ -7773,9 +7801,9 @@ mod tests {
     fn zy5_reports_a_span_reaching_the_last_noun() {
         // Pins what the early exit depends on: the reported span runs to the
         // end of the comma-free segment, so stopping at the first candidate to
-        // reach that end loses nothing. It reaches the end because the noun
-        // run after 的 is taken over CJK characters and 的 is one of them, so
-        // the run swallows the following phrases.
+        // reach that end loses nothing. It reaches the end because the noun run
+        // after 的 is taken over CJK characters and 的 is one of them, so the
+        // run swallows the following phrases.
         let text = "那個在車站外面的雨裡等了三個小時的男人的外套";
         let issues = scan_general(text);
         let zy5 = issues
