@@ -27,8 +27,39 @@ pub fn replace_file(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::create_dir_all(parent)?;
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(bytes)?;
-    tmp.persist(dest)?;
-    Ok(())
+    persist_with_retry(tmp, dest)
+}
+
+/// Persist `tmp` to `dest`, retrying a transient Windows failure.
+///
+/// `NamedTempFile::persist` on Windows is one `MoveFileExW` call with no
+/// retry of its own, and replacing a file that way is not race-free the way
+/// POSIX `rename(2)` is: two callers racing the same `dest` can make one
+/// call's `MoveFileExW` fail with `ERROR_ACCESS_DENIED` (surfaced here as
+/// `PermissionDenied`) even though neither caller did anything wrong. A short
+/// bounded retry clears it; `uv` hit the identical failure persisting temp
+/// files and fixed it the same way (astral-sh/uv#9543).
+fn persist_with_retry(mut tmp: tempfile::NamedTempFile, dest: &Path) -> std::io::Result<()> {
+    const MAX_ATTEMPTS: u32 = 6;
+    let mut delay_ms = 10u64;
+    let mut attempt = 1;
+    loop {
+        match tmp.persist(dest) {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                let retryable = cfg!(windows)
+                    && err.error.kind() == std::io::ErrorKind::PermissionDenied
+                    && attempt < MAX_ATTEMPTS;
+                if !retryable {
+                    return Err(err.error);
+                }
+                tmp = err.file;
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                delay_ms *= 2;
+                attempt += 1;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
