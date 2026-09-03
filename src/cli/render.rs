@@ -217,11 +217,14 @@ fn display_path_prefix(file_arg: &str) -> String {
     if file_arg == "--" {
         return String::new();
     }
+    // The cwd goes through the same normalizer the path itself did in
+    // `cli::discover`, or the two spellings of one directory do not match and
+    // nothing is stripped.
     let display_path = std::env::current_dir()
         .ok()
         .and_then(|cwd| {
             Path::new(file_arg)
-                .strip_prefix(&cwd)
+                .strip_prefix(super::discover::normalize_path(&cwd))
                 .ok()
                 .map(|p| p.to_string_lossy().into_owned())
         })
