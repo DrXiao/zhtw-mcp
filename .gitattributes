@@ -1,10 +1,5 @@
-# Line endings are part of the test contract, so pin the working tree to LF on
-# every platform. Fixtures under tests/fixtures carry byte offsets, and
-# scripts/schema-facts.json is compared byte for byte against what the Rust
-# types serialize. A Windows checkout with core.autocrlf=true (the GitHub
-# Actions default) rewrote both and failed schema_facts_file_is_current.
+# Fixtures under tests/fixtures carry byte offsets and scripts/schema-facts.json
+# is compared byte for byte against what the Rust types serialize, so line
+# endings are part of the test contract.  Pin them, because a Windows checkout
+# defaults to core.autocrlf=true and rewrites both.
 * text=auto eol=lf
-
-# Auto-detection already treats these as binary; say so anyway so a stray
-# 0x0d in the pixel data can never be read as a line ending.
-*.png binary

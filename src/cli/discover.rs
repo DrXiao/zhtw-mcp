@@ -192,11 +192,11 @@ fn walk_directory(dir: &Path, files: &mut BTreeSet<String>, exclude: &[String]) 
 /// same way but drops the prefix when the plain form is sufficient; on
 /// non-Windows it is a pass-through to `std::fs::canonicalize`.
 ///
-/// `cli::render` calls this on the current directory before stripping it off a
-/// path that came from here, because canonicalization is not a no-op on an
-/// already-absolute path: it resolves symlinks, and on Windows it also expands
-/// 8.3 short components. A Windows temp directory reached through its short
-/// name relativized to nothing, so compact output printed the full path.
+/// Canonicalizing is not a no-op on a path that is already absolute: it
+/// resolves symlinks, and on Windows it expands 8.3 short components.  Anything
+/// comparing one of these strings against a path obtained some other way has to
+/// send that path through here first, or the two spellings of one directory
+/// will not match.
 pub(crate) fn normalize_path(path: &Path) -> String {
     match dunce::canonicalize(path) {
         Ok(abs) => abs.to_string_lossy().into_owned(),

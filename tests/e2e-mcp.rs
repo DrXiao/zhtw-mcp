@@ -47,18 +47,14 @@ fn send_notification(stdin: &mut impl Write, request: &Value) {
     stdin.flush().unwrap();
 }
 
-/// Build the binary path. In cargo test, the binary is in target/debug/.
+/// Path to the binary under test.
+///
+/// `CARGO_BIN_EXE_<name>` is set by cargo for every integration test and
+/// carries the platform's executable suffix.  Deriving it from
+/// `current_exe()` instead, which every one of these test files used to do,
+/// dropped the `.exe` on Windows and left a path that does not exist.
 fn binary_path() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-
-    // test binary is in target/debug/deps/e2e_mcp-<hash> the main binary is in
-    // target/debug/zhtw-mcp
-    path.pop(); // remove test binary name
-    if path.ends_with("deps") {
-        path.pop(); // remove deps/
-    }
-    path.push("zhtw-mcp");
-    path
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_zhtw-mcp"))
 }
 
 /// Spawn the server with a throwaway config and cache, and hold the temp dir
@@ -86,10 +82,6 @@ fn spawn_server_with(
     BufReader<std::process::ChildStdout>,
 ) {
     let bin = binary_path();
-    assert!(
-        bin.exists(),
-        "binary not found at {bin:?}; run `cargo build` first"
-    );
     let tmp = tempfile::tempdir().expect("create temp dir for the server session");
     let mut child = Command::new(&bin)
         .args(args)
@@ -222,10 +214,6 @@ fn handshake(stdin: &mut impl Write, stdout: &mut impl BufRead) -> Value {
 #[test]
 fn e2e_initialize_and_tools_list() {
     let bin = binary_path();
-    if !bin.exists() {
-        panic!("binary not found at {:?}; run `cargo build` first", bin);
-    }
-
     let tmp_dir = tempfile::tempdir().expect("create temp dir");
     let overrides_path = tmp_dir.path().join("overrides.json");
     let suppressions_path = tmp_dir.path().join("suppressions.json");
@@ -2189,10 +2177,6 @@ fn e2e_mcp_logging_parse_error_is_not_stale() {
 #[test]
 fn e2e_include_telemetry_returns_metrics() {
     let bin = binary_path();
-    if !bin.exists() {
-        panic!("binary not found at {:?}; run `cargo build` first", bin);
-    }
-
     let tmp_dir = tempfile::tempdir().expect("create temp dir");
     let overrides_path = tmp_dir.path().join("overrides.json");
     let suppressions_path = tmp_dir.path().join("suppressions.json");
@@ -2277,10 +2261,6 @@ fn e2e_include_telemetry_returns_metrics() {
 #[test]
 fn e2e_include_telemetry_summary_output_returns_metrics() {
     let bin = binary_path();
-    if !bin.exists() {
-        panic!("binary not found at {:?}; run `cargo build` first", bin);
-    }
-
     let tmp_dir = tempfile::tempdir().expect("create temp dir");
     let overrides_path = tmp_dir.path().join("overrides.json");
     let suppressions_path = tmp_dir.path().join("suppressions.json");
@@ -2362,10 +2342,6 @@ fn e2e_include_telemetry_summary_output_returns_metrics() {
 #[test]
 fn e2e_include_telemetry_rejected_for_tabular_output() {
     let bin = binary_path();
-    if !bin.exists() {
-        panic!("binary not found at {:?}; run `cargo build` first", bin);
-    }
-
     let tmp_dir = tempfile::tempdir().expect("create temp dir");
     let overrides_path = tmp_dir.path().join("overrides.json");
     let suppressions_path = tmp_dir.path().join("suppressions.json");
@@ -3015,10 +2991,6 @@ fn e2e_auto_compact_for_ai_clients() {
 #[test]
 fn e2e_explain_mode_and_determinism() {
     let bin = binary_path();
-    if !bin.exists() {
-        panic!("binary not found at {:?}; run `cargo build` first", bin);
-    }
-
     let tmp_dir = tempfile::tempdir().expect("create temp dir");
     let overrides_path = tmp_dir.path().join("overrides.json");
     let suppressions_path = tmp_dir.path().join("suppressions.json");
