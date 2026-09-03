@@ -29,7 +29,7 @@ jobs:
   check:
     strategy:
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: [ubuntu-24.04, macos-15, windows-2025]
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -58,7 +58,29 @@ jobs:
       run: pip install black
 
     - name: make check
+      if: matrix.os != 'windows-2025'
       run: make check
+
+    # `make` is not dependable on the Windows runner (see build-latest's
+    # "Build and package" step below), so run the same checks `make check`
+    # would directly instead. This is what caught #124 and #126 turning
+    # into recurring Windows-only regressions: those bugs only ever
+    # surfaced on a contributor's own Windows machine because nothing in CI
+    # ran the test suite there.
+    - name: make check (Windows)
+      if: matrix.os == 'windows-2025'
+      shell: bash
+      run: |
+        python scripts/gen-s2t-tables.py
+        rustfmt src/engine/s2t_data.rs
+        cargo metadata --locked --format-version 1 >/dev/null
+        cargo test
+        cargo clippy --all-targets -- -D warnings
+        cargo clippy --lib --no-default-features -- -D warnings
+        cargo clippy --lib --no-default-features --features browser-wasm -- -D warnings
+        cargo fmt --check
+        black --check .
+        python scripts/check-ruleset.py --lint
 
   # Reads Cargo.lock against the RustSec advisory DB. Deliberately has no
   # Swatinem/rust-cache step: this job never compiles the workspace, and sharing
