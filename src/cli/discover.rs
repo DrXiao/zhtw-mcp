@@ -184,8 +184,16 @@ fn walk_directory(dir: &Path, files: &mut BTreeSet<String>, exclude: &[String]) 
 }
 
 /// Normalize a path to a string for consistent deduplication.
+///
+/// `dunce::canonicalize` rather than `Path::canonicalize`: on Windows the
+/// latter returns the `\\?\`-prefixed verbatim form, which does not
+/// string-match the plain paths this crate compares it against elsewhere
+/// (`std::env::current_dir()` in `cli::render`, `--exclude` patterns in
+/// `path_excluded` below). `dunce` canonicalizes the same way but drops the
+/// prefix when the plain form is sufficient; on non-Windows it is a
+/// pass-through to `std::fs::canonicalize`.
 fn normalize_path(path: &Path) -> String {
-    match path.canonicalize() {
+    match dunce::canonicalize(path) {
         Ok(abs) => abs.to_string_lossy().into_owned(),
         Err(_) => path.to_string_lossy().into_owned(),
     }
@@ -198,6 +206,12 @@ fn normalize_path(path: &Path) -> String {
 /// - dir/** — match anything under the given directory component
 /// - Literal path-component match as a fallback
 fn path_excluded(path: &str, patterns: &[String]) -> bool {
+    // Patterns are always written with `/` (`vendor/**`, doc comment above),
+    // but `path` carries the OS separator; on Windows that's `\`, so every
+    // `/`-delimited comparison below missed every match. Normalize once
+    // rather than teach each branch two separators.
+    let path = path.replace('\\', "/");
+    let path = path.as_str();
     for pat in patterns {
         if pat.starts_with("*.") {
             // Extension match: *.tmp, *.bak

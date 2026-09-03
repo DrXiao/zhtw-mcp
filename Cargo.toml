@@ -28,6 +28,7 @@ source-hash = "959b88f60c9dcc0d"
 default = ["native", "translate"]
 native = [
     "dep:dirs",
+    "dep:dunce",
     "dep:fs2",
     "dep:rayon",
     "dep:rmcp",
@@ -60,6 +61,7 @@ pulldown-cmark = { version = "0.13", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
 dirs = { version = "5.0", optional = true }
+dunce = { version = "1", optional = true }
 tempfile = { version = "3.0", optional = true }
 toml = { version = "0.8", optional = true }
 ureq = { version = "3", optional = true }
