@@ -209,9 +209,16 @@ fn path_excluded(path: &str, patterns: &[String]) -> bool {
     // Patterns are always written with `/` (`vendor/**`, doc comment above),
     // but `path` carries the OS separator; on Windows that's `\`, so every
     // `/`-delimited comparison below missed every match. Normalize once
-    // rather than teach each branch two separators.
-    let path = path.replace('\\', "/");
-    let path = path.as_str();
+    // rather than teach each branch two separators. Restricted to Windows:
+    // on Unix `\` is a legal filename byte, not a separator, so rewriting
+    // it there would misparse a literal backslash in a filename as a
+    // directory boundary.
+    let normalized_path = if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path.to_owned()
+    };
+    let path = normalized_path.as_str();
     for pat in patterns {
         if pat.starts_with("*.") {
             // Extension match: *.tmp, *.bak
