@@ -1,0 +1,5 @@
+# Fixtures under tests/fixtures carry byte offsets and scripts/schema-facts.json
+# is compared byte for byte against what the Rust types serialize, so line
+# endings are part of the test contract.  Pin them, because a Windows checkout
+# defaults to core.autocrlf=true and rewrites both.
+* text=auto eol=lf

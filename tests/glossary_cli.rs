@@ -5,14 +5,14 @@
 
 use std::process::{Command, Stdio};
 
+/// Path to the binary under test.
+///
+/// `CARGO_BIN_EXE_<name>` is set by cargo for every integration test and
+/// carries the platform's executable suffix.  Deriving it from
+/// `current_exe()` instead, which every one of these test files used to do,
+/// dropped the `.exe` on Windows and left a path that does not exist.
 fn binary_path() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop();
-    if path.ends_with("deps") {
-        path.pop();
-    }
-    path.push("zhtw-mcp");
-    path
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_zhtw-mcp"))
 }
 
 #[test]

@@ -6,6 +6,7 @@
 
 use std::io::IsTerminal;
 use std::path::Path;
+use std::sync::OnceLock;
 
 // ANSI color helpers for human-format output
 
@@ -217,14 +218,21 @@ fn display_path_prefix(file_arg: &str) -> String {
     if file_arg == "--" {
         return String::new();
     }
-    let display_path = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| {
-            Path::new(file_arg)
-                .strip_prefix(&cwd)
-                .ok()
-                .map(|p| p.to_string_lossy().into_owned())
-        })
+    // These paths came out of cli::discover canonicalized, so the current
+    // directory has to be canonicalized the same way or the two spellings of
+    // one directory do not match and nothing is stripped.  Resolved once:
+    // both halves are syscalls, this runs per file, and nothing in the process
+    // calls set_current_dir.
+    static CWD: OnceLock<Option<String>> = OnceLock::new();
+    let cwd = CWD.get_or_init(|| {
+        std::env::current_dir()
+            .ok()
+            .map(|dir| super::discover::normalize_path(&dir))
+    });
+    let display_path = cwd
+        .as_deref()
+        .and_then(|cwd| Path::new(file_arg).strip_prefix(cwd).ok())
+        .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| file_arg.to_string());
     format!("{display_path}:")
 }

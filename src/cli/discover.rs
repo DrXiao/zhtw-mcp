@@ -188,11 +188,16 @@ fn walk_directory(dir: &Path, files: &mut BTreeSet<String>, exclude: &[String]) 
 /// `dunce::canonicalize` rather than `Path::canonicalize`: on Windows the
 /// latter returns the `\\?\`-prefixed verbatim form, which does not
 /// string-match the plain paths this crate compares it against elsewhere
-/// (`std::env::current_dir()` in `cli::render`, `--exclude` patterns in
-/// `path_excluded` below). `dunce` canonicalizes the same way but drops the
-/// prefix when the plain form is sufficient; on non-Windows it is a
-/// pass-through to `std::fs::canonicalize`.
-fn normalize_path(path: &Path) -> String {
+/// (`--exclude` patterns in `path_excluded` below). `dunce` canonicalizes the
+/// same way but drops the prefix when the plain form is sufficient; on
+/// non-Windows it is a pass-through to `std::fs::canonicalize`.
+///
+/// Canonicalizing is not a no-op on a path that is already absolute: it
+/// resolves symlinks, and on Windows it expands 8.3 short components.  Anything
+/// comparing one of these strings against a path obtained some other way has to
+/// send that path through here first, or the two spellings of one directory
+/// will not match.
+pub(crate) fn normalize_path(path: &Path) -> String {
     match dunce::canonicalize(path) {
         Ok(abs) => abs.to_string_lossy().into_owned(),
         Err(_) => path.to_string_lossy().into_owned(),
