@@ -260,6 +260,58 @@ fn case_rule_word_boundary() {
 }
 
 #[test]
+fn case_rule_leaves_identifiers_alone() {
+    // An underscore neighbour means the term is part of a name, not prose.
+    // Applying the canonical spelling there renames the thing: the fixer used
+    // to turn TYPESCRIPT_HOME into TypeScript_HOME, and an environment variable
+    // nothing sets is worse than a lowercase mention.
+    let scanner = Scanner::new(vec![], sample_case_rules());
+    for text in [
+        "Set TYPESCRIPT_HOME first",
+        "Read MY_TYPESCRIPT now",
+        "Keep MY_TYPESCRIPT_ unchanged",
+        "Keep _TYPESCRIPT_HOME unchanged",
+        "Use typescript-eslint here",
+        "Keep my-typescript unchanged",
+        // A digit neighbour is the same case: typescript5 is a name too, and
+        // this repository's own instructions say python3.
+        "Install typescript5 today",
+        "Run 3typescript now",
+        // A dotted neighbour makes it a hostname or file-name label.
+        "See typescript.org first",
+        "See www.typescript.org first",
+        "Open cdn.typescript today",
+    ] {
+        let issues = scanner.scan(text).issues;
+        assert_eq!(issues.len(), 0, "{text}: {issues:?}");
+    }
+}
+
+#[test]
+fn case_rule_checks_emphasis_and_sentence_dots() {
+    let scanner = Scanner::new(vec![], sample_case_rules());
+    // A sentence-ending dot is punctuation, not a hostname separator.
+    for text in [
+        "_typescript_",
+        "__typescript__",
+        "I use typescript.",
+        "用typescript.這",
+        // A hyphen joins only a lowercase package name; this is prose miscased.
+        "Use Typescript-based tooling",
+    ] {
+        // The CJK sample also draws a mixed-script spacing finding.
+        let issues: Vec<_> = scanner
+            .scan(text)
+            .issues
+            .into_iter()
+            .filter(|issue| issue.rule_type == IssueType::Case)
+            .collect();
+        assert_eq!(issues.len(), 1, "{text}: {issues:?}");
+        assert_eq!(issues[0].suggestions[..], ["TypeScript"]);
+    }
+}
+
+#[test]
 fn case_rule_in_code_excluded() {
     let scanner = Scanner::new(vec![], sample_case_rules());
     let issues = scanner.scan("Use `typescript` in your code").issues;
@@ -575,11 +627,51 @@ fn context_suggestions_stop_at_paragraph_breaks() {
         only_suggestions(&scanner, "我們要優化演算法。\n\n流程改造報告"),
         ["最佳化"]
     );
-    // Same clue, same distance, no break: the group still selects.
+
+    // A sentence end is the same kind of boundary: the clue in the next
+    // sentence describes something else.
     assert_eq!(
         only_suggestions(&scanner, "我們要優化演算法。流程改造報告"),
+        ["最佳化"]
+    );
+    // Same clue, same distance, no break: the group still selects.
+    assert_eq!(
+        only_suggestions(&scanner, "我們要優化演算法，流程改造報告"),
         ["改善", "提升"]
     );
+}
+
+#[test]
+fn context_clues_follow_shared_sentence_boundaries() {
+    let quality = Scanner::new(
+        vec![SpellingRule {
+            context_clues: Some(vec!["產品".into(), "測試".into()]),
+            ..SpellingRule::new("質量", vec!["品質".into()], RuleType::CrossStrait)
+        }],
+        vec![],
+    );
+
+    // A half-width period against Chinese ends the sentence too, though the
+    // shared splitter wants whitespace after it.
+    for text in [
+        "這顆行星的質量很高；產品測試由另一組負責。",
+        "這顆行星的質量很高.產品測試由另一組負責。",
+    ] {
+        let issues = quality.scan(text).issues;
+        assert!(
+            issues.iter().all(|issue| issue.found != "質量"),
+            "{text}: {issues:?}"
+        );
+    }
+
+    let interface = Scanner::new(
+        vec![SpellingRule {
+            context_clues: Some(vec!["API".into()]),
+            ..SpellingRule::new("接口", vec!["介面".into()], RuleType::CrossStrait)
+        }],
+        vec![],
+    );
+    assert_eq!(interface.scan("接口由 Dr. Wang 更新 API。").issues.len(), 1);
 }
 
 #[test]
@@ -841,6 +933,102 @@ fn positional_not_before_vetoes() {
         issues.is_empty(),
         "should be vetoed by 的 after match: {issues:?}"
     );
+}
+
+#[test]
+fn positional_ascii_clue_matches_whole_words() {
+    // An ASCII letter beside the term makes it part of a longer word; a digit
+    // does not, because a unit is written against its number.
+    let rules = vec![SpellingRule {
+        positional_clues: Some(vec!["not_before:kg".into()]),
+        ..SpellingRule::new("項目", vec!["專案".into()], RuleType::CrossStrait)
+    }];
+    let scanner = Scanner::new(rules, vec![]);
+    for text in ["項目重 5kg", "項目重 5 kg 左右", "項目(kg)"] {
+        assert!(scanner.scan(text).issues.is_empty(), "vetoed: {text}");
+    }
+    for text in ["項目見 pkg 目錄", "項目用 kgs 計"] {
+        assert_eq!(scanner.scan(text).issues.len(), 1, "not a word: {text}");
+    }
+}
+
+#[test]
+fn positional_clause_vetoes_stop_where_plain_vetoes_do_not() {
+    // The _clause kinds are opt-in so that existing rule packs keep the plain
+    // 20-char meaning. Both halves are asserted: a clause veto stops at the
+    // comma, and a plain veto still reaches across it.
+    let scanner_with = |clues: [&str; 2]| {
+        Scanner::new(
+            vec![SpellingRule {
+                positional_clues: Some(clues.iter().map(|c| c.to_string()).collect()),
+                ..SpellingRule::new("項目", vec!["專案".into()], RuleType::CrossStrait)
+            }],
+            vec![],
+        )
+    };
+    let clause = scanner_with(["not_before_clause:清單", "not_after_clause:清單"]);
+    let plain = scanner_with(["not_before:清單", "not_after:清單"]);
+
+    for text in ["項目進度超前，清單另外處理", "清單另外處理，項目進度超前"]
+    {
+        assert_eq!(
+            clause.scan(text).issues.len(),
+            1,
+            "clause veto crossed: {text}"
+        );
+        assert!(
+            plain.scan(text).issues.is_empty(),
+            "plain veto stopped: {text}"
+        );
+    }
+    for text in ["項目清單需要確認", "清單項目需要確認"] {
+        assert!(clause.scan(text).issues.is_empty(), "same clause: {text}");
+    }
+    // A thousands separator is not a clause break.
+    assert!(clause.scan("項目數量 1,000 清單").issues.is_empty());
+}
+
+#[test]
+fn positional_clause_vetoes_stop_at_colons() {
+    let scanner = Scanner::new(
+        vec![SpellingRule {
+            positional_clues: Some(vec!["not_before_clause:公斤".into()]),
+            ..SpellingRule::new("產品質量", vec!["產品品質".into()], RuleType::CrossStrait)
+        }],
+        vec![],
+    );
+    for text in [
+        "產品質量很好：重量為兩公斤。",
+        "產品質量很好:重量為兩公斤。",
+    ] {
+        assert_eq!(
+            scanner
+                .scan(text)
+                .issues
+                .iter()
+                .filter(|issue| issue.found == "產品質量")
+                .count(),
+            1,
+            "{text}"
+        );
+    }
+
+    // A colon right after the term introduces its value, and a colon between
+    // digits is a time, so neither closes the clause.
+    for text in [
+        "產品質量重兩公斤。",
+        "產品質量：兩公斤",
+        "產品質量:兩公斤",
+        "產品質量 12:30 公斤",
+    ] {
+        // A half-width colon also draws a punctuation finding; only the rule
+        // under test matters here.
+        let issues = scanner.scan(text).issues;
+        assert!(
+            issues.iter().all(|issue| issue.found != "產品質量"),
+            "{text}: {issues:?}"
+        );
+    }
 }
 
 #[test]

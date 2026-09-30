@@ -48,6 +48,16 @@ const ABBREVIATION_SUFFIXES: &[&str] = &[
     "al", "Vol", "No", "Fig", "Eq", "Rev",
 ];
 
+/// Whether the character "ch" at byte "start" ends a sentence. CJK
+/// terminators and the semicolon always do; a Latin one only when followed by
+/// whitespace and a capital or CJK, and not after a listed abbreviation.
+pub(crate) fn is_sentence_terminator(text: &str, start: usize, ch: char) -> bool {
+    CJK_TERMINATORS.contains(&ch)
+        || CJK_SOFT_TERMINATORS.contains(&ch)
+        || LATIN_TERMINATORS.contains(&ch)
+            && is_latin_sentence_end(text, start, start + ch.len_utf8())
+}
+
 impl BoundaryIndex {
     /// Build a boundary index for the given text, respecting exclusion zones.
     ///
@@ -166,18 +176,7 @@ fn build_sentences(text: &str, excluded: &[ByteRange]) -> Vec<SentenceBound> {
             continue;
         }
 
-        // CJK hard terminators: always split.
-        if CJK_TERMINATORS.contains(&ch) || CJK_SOFT_TERMINATORS.contains(&ch) {
-            // Include the terminator in the sentence.
-            push_sentence(&mut sentences, text, sent_start, ch_end);
-            sent_start = ch_end;
-            last_was_content = false;
-            byte_offset = ch_end;
-            continue;
-        }
-
-        // Latin terminators: split only if followed by whitespace + uppercase.
-        if LATIN_TERMINATORS.contains(&ch) && is_latin_sentence_end(text, byte_offset, ch_end) {
+        if is_sentence_terminator(text, byte_offset, ch) {
             push_sentence(&mut sentences, text, sent_start, ch_end);
             sent_start = ch_end;
             last_was_content = false;

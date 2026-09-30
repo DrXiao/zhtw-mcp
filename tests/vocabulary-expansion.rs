@@ -164,6 +164,40 @@ fn namespace_not_flagged() {
 }
 
 #[test]
+fn hackathon_keeps_heike() {
+    // 駭客 is the zh-TW word for hacker in both senses (the cracker is 怪客),
+    // so 黑客 still localizes to it. 黑客松 (hackathon) is the exception: that
+    // loanword is what Taiwanese events call themselves, and 駭客松 is not.
+    let scanner = full_scanner();
+    let issues = scanner.scan("這位黑客寫出了編譯器").issues;
+    assert!(issues.iter().any(|i| i.found == "黑客"), "{issues:?}");
+
+    let issues = scanner.scan("總統盃黑客松的參賽團隊").issues;
+    assert!(
+        issues.iter().all(|i| i.found != "黑客"),
+        "黑客松 must not be rewritten, got {:?}",
+        issues.iter().map(|i| &i.found).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shenfen_card_is_a_strict_only_variant() {
+    // 身份證 is the same glyph question as 身份, not a cross-strait term. As a
+    // longer match it shadows the 身份 rule, so it has to carry the same type,
+    // or strict mode reports one glyph choice at two different severities.
+    let scanner = full_scanner();
+    let issues = scanner.scan_profiled("身份證字號", Profile::Strict).issues;
+    let hit = issues
+        .iter()
+        .find(|i| i.found == "身份證")
+        .unwrap_or_else(|| panic!("{issues:?}"));
+    assert_eq!(hit.rule_type, IssueType::Variant);
+
+    let issues = scanner.scan_profiled("身份證字號", Profile::Base).issues;
+    assert!(issues.iter().all(|i| i.found != "身份證"), "{issues:?}");
+}
+
+#[test]
 fn row_column_vector_terms_not_swapped() {
     // 列/行 terms are valid Taiwanese terms in row/column contexts. Generic
     // math clues cannot prove the author meant the PRC sense, and swapping them
@@ -462,6 +496,261 @@ fn scanner_suppresses_zhichi_in_political_context() {
         "支持 must not fire in non-IT political context, got {:?}",
         issues.iter().map(|i| &i.found).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn scanner_context_clues_do_not_cross_contaminate_matches() {
+    let scanner = full_scanner();
+
+    for (text, untouched) in [
+        ("大型語言模型的上下文窗口為十萬個令牌", "窗口"),
+        ("這篇論文探討恆星演化中的質量問題", "質量"),
+    ] {
+        let issues = scanner.scan(text).issues;
+        assert!(issues.iter().all(|issue| issue.found != untouched));
+    }
+
+    let issues = scanner
+        .scan("報告把中國臺灣列為區域，並說明中國臺灣與美國之間的關係")
+        .issues;
+    assert_eq!(
+        issues
+            .iter()
+            .filter(|issue| issue.found == "中國臺灣")
+            .count(),
+        2
+    );
+
+    let issues = scanner.scan("日本學者訪問中國高校，討論大學合作").issues;
+    assert!(issues.iter().any(|issue| issue.found == "中國高校"));
+
+    // A pass-sense object later in the same clause wins over a via reading, so
+    // only a clause without one stays flagged.
+    for text in ["資料通過系統提交提案", "使用者通過 API 取得資料"] {
+        let issues = scanner.scan(text).issues;
+        assert!(issues.iter().any(|issue| issue.found == "通過"));
+    }
+
+    let text = "資料通過系統提交，提案也通過稽核";
+    let issues = scanner.scan(text).issues;
+    let matches: Vec<_> = issues
+        .iter()
+        .filter(|issue| issue.found == "通過")
+        .collect();
+    assert_eq!(matches.len(), 1, "{issues:?}");
+    assert_eq!(matches[0].offset, text.find("通過").unwrap());
+
+    // The pass-sense object is a clause-bounded positional veto, so any
+    // modifier between 通過 and it is covered without being listed, and a
+    // via-sense occurrence in another clause is not suppressed.
+    for text in [
+        "立法院通過了新的法案，建立新的機制。",
+        "董事會通過了下半年預算，也更新演算法。",
+        "他通過了期末考，用新方法準備。",
+        "軟體通過所有測試，系統已上線。",
+        "設備通過安全檢驗，並透過網路回報。",
+        "版本通過嚴格審核，再透過 API 發佈。",
+        "設備通過工安檢驗，並透過網路回報。",
+        "軟體通過全部測試，系統已上線。",
+        "版本通過嚴密審核，再透過 API 發佈。",
+        "系統通過壓力測試。",
+        "他通過專業認證。系統稍後更新。",
+    ] {
+        let issues = scanner.scan(text).issues;
+        assert!(
+            issues.iter().all(|issue| issue.found != "通過"),
+            "{text}: {issues:?}"
+        );
+    }
+
+    // Pass-sense objects beyond tests and reviews, the noun-first order, and
+    // the rate noun all keep the pass sense.
+    for text in [
+        "這套系統通過了驗證。",
+        "新版 API 通過檢查後才上線。",
+        "系統通過評估後正式啟用。",
+        "本系統通過資安檢測。",
+        "這個方法可以讓程式碼通過編譯。",
+        "修改後系統才能通過 CI。",
+        "系統的通過率很高。",
+        "系統的驗證通過後上線。",
+        "他順利通過。系統稍後更新。",
+    ] {
+        let issues = scanner.scan(text).issues;
+        assert!(
+            issues.iter().all(|issue| issue.found != "通過"),
+            "{text}: {issues:?}"
+        );
+    }
+
+    // 驗證 and 檢查 are only exempt next to 通過: as clause-wide vetoes they
+    // also swallowed the via sense in 通過鏈接檢查器驗證, where 檢查器 is the
+    // channel. A modifier in between (通過安全驗證) is a known false positive.
+    let issues = scanner.scan("軟件更新會通過鏈接檢查器驗證文檔引用").issues;
+    assert!(
+        issues.iter().any(|issue| issue.found == "通過"),
+        "{issues:?}"
+    );
+
+    // Via-sense channels are clues, and a pass-sense veto in the next clause
+    // does not reach back across the comma.
+    for text in [
+        "通過電子郵件傳送報告。",
+        "通過代理伺服器連線。",
+        "通過資料庫同步設定。",
+        "使用者通過 API 取得資料，董事會稍後開會。",
+    ] {
+        let issues = scanner.scan(text).issues;
+        assert!(
+            issues.iter().any(|issue| issue.found == "通過"),
+            "{text}: {issues:?}"
+        );
+    }
+
+    // Juxtaposed place names are a list, not the political name.
+    for text in [
+        "中國臺灣之間的貿易逐年成長。",
+        "中國台灣香港三地的學者。",
+        "中國台灣日本韓國都參加。",
+    ] {
+        let issues = scanner.scan(text).issues;
+        assert!(
+            issues
+                .iter()
+                .all(|issue| issue.rule_type != IssueType::PoliticalColoring),
+            "{text}: {issues:?}"
+        );
+    }
+
+    for term in ["產品質量", "商品質量"] {
+        let issues = scanner.scan(&format!("{term}不佳")).issues;
+        assert!(issues.iter().any(|issue| issue.found == term));
+    }
+
+    // The mass guard reads the same clause only: the weight after the comma
+    // belongs to 重量, so the quality sense before it still fires.
+    for text in [
+        "產品質量很好，重量為兩公斤。",
+        "產品質量很好, 重量為兩公斤。",
+        "產品質量很好. 重量為兩公斤。",
+    ] {
+        let issues = scanner.scan(text).issues;
+        assert!(
+            issues.iter().any(|issue| issue.found.contains("質量")),
+            "{text}: {issues:?}"
+        );
+    }
+
+    for text in [
+        "產品質量為 1,000 公斤。",
+        "產品質量為 2.5 公斤。",
+        "商品質量為一公噸。",
+        "產品質量為 3 KG。",
+        "兩公斤的產品質量",
+        "產品質量為五百公克。",
+        "產品質量為 5kg。",
+        "商品質量為兩噸。",
+        "產品的質量約 2 噸。",
+    ] {
+        let issues = scanner.scan(text).issues;
+        assert!(
+            issues.iter().all(|issue| !issue.found.contains("質量")),
+            "{text}: {issues:?}"
+        );
+    }
+
+    // The unit guard names 公克/毫克/千克, not a bare 克, which sits inside
+    // 巧克力 and 克服 far more often than it stands alone as a unit. The price
+    // is that 產品質量為五百克 reads as quality. An ASCII unit or pass-sense
+    // object is a whole word, so pkg and ASCII do not trip kg and CI.
+    for (text, term) in [
+        ("這款巧克力的產品質量很好。", "產品質量"),
+        ("團隊克服困難，產品質量大幅提升。", "產品質量"),
+        ("pkg 產品質量管理流程", "產品質量"),
+        ("資料通過 ASCII 網路系統傳送。", "通過"),
+    ] {
+        let issues = scanner.scan(text).issues;
+        assert!(
+            issues.iter().any(|issue| issue.found == term),
+            "{text}: {issues:?}"
+        );
+    }
+    let issues = scanner.scan("修改後系統才能通過 CI 流程。").issues;
+    assert!(
+        issues.iter().all(|issue| issue.found != "通過"),
+        "{issues:?}"
+    );
+
+    for text in ["癌症資料篩查可找出異常紀錄", "癌症數據篩查可找出異常紀錄"]
+    {
+        let issues = scanner.scan(text).issues;
+        assert!(
+            issues.iter().all(|issue| issue.found != "篩查"),
+            "{text}: {issues:?}"
+        );
+    }
+
+    // A clue in another sentence is not context for this one.
+    let issues = scanner.scan("癌症資料另存。系統正在篩查紀錄。").issues;
+    assert!(
+        issues.iter().all(|issue| issue.found != "篩查"),
+        "{issues:?}"
+    );
+
+    for text in ["醫院提供視力篩查服務。", "產前篩查與基因篩查"] {
+        let issues = scanner.scan(text).issues;
+        assert!(
+            issues.iter().any(|issue| issue.found == "篩查"),
+            "{text}: {issues:?}"
+        );
+    }
+
+    let issues = scanner.scan("資料已備妥, 癌症篩查明日開始").issues;
+    assert!(
+        issues.iter().any(|issue| issue.found == "篩查"),
+        "{issues:?}"
+    );
+
+    let issues = scanner.scan("這則消息，來源尚未確認。").issues;
+    assert!(
+        issues.iter().all(|issue| issue.found != "消息"),
+        "{issues:?}"
+    );
+
+    let issues = scanner.scan("The anthropic principle is debated.").issues;
+    assert!(issues.iter().all(|issue| issue.found != "anthropic"));
+}
+
+#[test]
+fn scanner_prefers_the_longer_form_of_a_suffixed_term() {
+    // A rule whose "to" already carries the suffix the source term repeats
+    // writes nonsense when the short rule wins: 老年痴呆 -> 失智症 applied to
+    // 老年痴呆症 yields 失智症症, and 請求頭 -> 請求標頭 applied to 請求頭部
+    // yields 請求標頭部. The longer rule has to exist so overlap resolution
+    // consumes the suffix too.
+    let scanner = full_scanner();
+
+    for (text, want_found, want_to) in [
+        ("老年痴呆症的診斷標準已更新", "老年痴呆症", "失智症"),
+        ("請求頭部欄位需要調整", "請求頭部", "請求標頭"),
+        ("老年癡呆症的診斷標準已更新", "老年癡呆症", "失智症"),
+    ] {
+        let issues = scanner.scan(text).issues;
+        let hit = issues
+            .iter()
+            .find(|issue| issue.found == want_found)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{text}: expected {want_found}, got {:?}",
+                    issues.iter().map(|i| &i.found).collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            hit.suggestions.iter().any(|s| s == want_to),
+            "{text}: expected {want_to}, got {:?}",
+            hit.suggestions
+        );
+    }
 }
 
 #[test]

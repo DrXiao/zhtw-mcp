@@ -44,3 +44,4 @@ rule list.
 | 麪 | 麵 | "noodle" |
 | 着 | 著 | particle usage unified under 著 in TW; exception for chess (下著) and proper nouns |
 | 台 | 臺 | Lexical contexts only: 臺灣/臺北/臺中/臺南; 平台/月台/舞台/台詞 keep 台 |
+| 身份 | 身分 | 身分證/身分認同; 身份 is a widespread folk form, not a simplified one |

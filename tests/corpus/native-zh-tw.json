@@ -1018,6 +1018,174 @@
       "must_be_clean": true,
       "expected_fixed": "「軟件」是中國用語；臺灣技術文件通常寫作「軟體」。",
       "expected_issues": []
+    },
+    {
+      "id": "native_hackathon",
+      "repeat": 1,
+      "input": "總統盃黑客松的參賽團隊在兩天內完成原型。",
+      "must_be_clean": true,
+      "expected_fixed": "總統盃黑客松的參賽團隊在兩天內完成原型。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_mass_sense_physics",
+      "repeat": 1,
+      "input": "這顆行星的質量是地球的兩倍；這篇論文探討恆星演化中的質量問題。",
+      "must_be_clean": true,
+      "expected_fixed": "這顆行星的質量是地球的兩倍；這篇論文探討恆星演化中的質量問題。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_product_mass",
+      "repeat": 1,
+      "input": "商品質量為兩公斤，產品質量為三公斤。",
+      "must_be_clean": true,
+      "expected_fixed": "商品質量為兩公斤，產品質量為三公斤。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_nlp_context_window",
+      "repeat": 1,
+      "input": "大型語言模型的上下文窗口可容納十萬個詞元。",
+      "must_be_clean": true,
+      "expected_fixed": "大型語言模型的上下文窗口可容納十萬個詞元。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_china_taiwan_two_places",
+      "repeat": 1,
+      "input": "中國臺灣兩地的研究團隊持續交流。",
+      "must_be_clean": true,
+      "expected_fixed": "中國臺灣兩地的研究團隊持續交流。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_high_mass_star",
+      "repeat": 1,
+      "input": "高質量恆星會演化為黑洞。",
+      "must_be_clean": true,
+      "expected_fixed": "高質量恆星會演化為黑洞。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_japanese_high_school",
+      "repeat": 1,
+      "input": "日本的高校相當於臺灣高中，高校棒球大會也吸引許多高校生參加。",
+      "must_be_clean": true,
+      "expected_fixed": "日本的高校相當於臺灣高中，高校棒球大會也吸引許多高校生參加。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_grease_sense",
+      "repeat": 1,
+      "input": "烘焙工廠替軸承補充黃油。",
+      "must_be_clean": true,
+      "expected_fixed": "烘焙工廠替軸承補充黃油。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_filtering_sense",
+      "repeat": 1,
+      "input": "系統先篩查癌症資料，再彙整統計。",
+      "must_be_clean": true,
+      "expected_fixed": "系統先篩查癌症資料，再彙整統計。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_respiratory_function",
+      "repeat": 1,
+      "input": "運動可以改善心肺與呼吸機能。",
+      "must_be_clean": true,
+      "expected_fixed": "運動可以改善心肺與呼吸機能。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_list_item_near_manager",
+      "repeat": 1,
+      "input": "里程碑文件列出驗收項目。",
+      "must_be_clean": true,
+      "expected_fixed": "里程碑文件列出驗收項目。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_project_name_case",
+      "repeat": 1,
+      "input": "zhtw-mcp 是這個專案的名稱。",
+      "must_be_clean": true,
+      "expected_fixed": "zhtw-mcp 是這個專案的名稱。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_tongguo_budget",
+      "repeat": 1,
+      "input": "董事會通過了年度預算與現金增資案，系統也通過測試。",
+      "must_be_clean": true,
+      "expected_fixed": "董事會通過了年度預算與現金增資案，系統也通過測試。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_tongguo_bill",
+      "repeat": 1,
+      "input": "立法院通過了這項法案的修正條文，未來將建立新的機制。",
+      "must_be_clean": true,
+      "expected_fixed": "立法院通過了這項法案的修正條文，未來將建立新的機制。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_tongguo_review",
+      "repeat": 1,
+      "input": "這項提案通過了董事會審核，也通過內部稽核，並透過系統公告。",
+      "must_be_clean": true,
+      "expected_fixed": "這項提案通過了董事會審核，也通過內部稽核，並透過系統公告。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_respiratory_mechanism",
+      "repeat": 1,
+      "input": "呼吸機制的調控由腦幹負責。",
+      "must_be_clean": true,
+      "expected_fixed": "呼吸機制的調控由腦幹負責。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_si_meter_names",
+      "repeat": 1,
+      "input": "房間約二十平方米，走廊寬三百釐米，櫃子容積零點五立方米。",
+      "must_be_clean": true,
+      "expected_fixed": "房間約二十平方米，走廊寬三百釐米，櫃子容積零點五立方米。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_saline_swab",
+      "repeat": 1,
+      "input": "換藥時先用生理食鹽水棉籤清潔，再用優碘棉籤消毒。",
+      "must_be_clean": true,
+      "expected_fixed": "換藥時先用生理食鹽水棉籤清潔，再用優碘棉籤消毒。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_tongguo_modifiers",
+      "repeat": 1,
+      "input": "機台通過工安檢驗，軟體通過全部測試，系統通過壓力測試。",
+      "must_be_clean": true,
+      "expected_fixed": "機台通過工安檢驗，軟體通過全部測試，系統通過壓力測試。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_tongguo_certification",
+      "repeat": 1,
+      "input": "他通過專業認證。系統稍後更新。",
+      "must_be_clean": true,
+      "expected_fixed": "他通過專業認證。系統稍後更新。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_clue_in_next_sentence",
+      "repeat": 1,
+      "input": "這顆行星的質量是地球的兩倍。產品測試由另一組負責。他順利通過。系統稍後更新。癌症資料另存。系統正在整理紀錄。",
+      "must_be_clean": true,
+      "expected_fixed": "這顆行星的質量是地球的兩倍。產品測試由另一組負責。他順利通過。系統稍後更新。癌症資料另存。系統正在整理紀錄。",
+      "expected_issues": []
     }
   ]
 }

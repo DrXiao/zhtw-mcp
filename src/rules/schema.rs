@@ -130,13 +130,19 @@ pub struct SpellingRule {
     pub negative_context_clues: Option<Vec<String>>,
     /// Positional conditions that constrain WHERE a context term must appear
     /// relative to the match.  More expressive than flat context_clues (which
-    /// check presence anywhere in +-40-char window).  Syntax:
+    /// check presence anywhere in the +-40-char window, which stops at sentence
+    /// ends and paragraph breaks).  Syntax:
     ///
     /// - `before:TERM` -- TERM must appear within 20 chars AFTER the match
     /// - `after:TERM` -- TERM must appear within 20 chars BEFORE the match
     /// - `adjacent:TERM` -- TERM must be immediately adjacent (no gap)
     /// - `not_before:TERM` -- TERM must NOT appear within 20 chars after
     /// - `not_after:TERM` -- TERM must NOT appear within 20 chars before
+    /// - `not_before_clause:TERM` -- same as not_before, limited to this clause
+    /// - `not_after_clause:TERM` -- same as not_after, limited to this clause
+    ///
+    /// An ASCII TERM matches only as a whole word: kg is not found in pkg, CI
+    /// not in ASCII. A digit beside it is fine, so 5kg still matches kg.
     ///
     /// All positive conditions must pass (AND). Any negative condition vetoes.
     /// When both context_clues and positional_clues are present, both must

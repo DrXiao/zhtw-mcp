@@ -666,9 +666,10 @@ fn inflate_spelling_issues_inner(
             // group's clues appear nearby. First matching group wins, so
             // ruleset order is the precedence order. The window comes from the
             // same context_byte_window the clue gate uses, so it stops at
-            // paragraph breaks and excluded ranges: a clue in the next
-            // paragraph or inside a fenced code block must not swap the
-            // replacement set, which would also silently disable auto-fix.
+            // sentence ends, paragraph breaks and excluded ranges: a clue in
+            // the next sentence or paragraph or inside a fenced code block must
+            // not swap the replacement set, which would also silently disable
+            // auto-fix.
             issue.suggestions = db.spelling_context_suggestions[idx]
                 .as_ref()
                 .and_then(|sel| {

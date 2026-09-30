@@ -138,7 +138,7 @@
       "repeat": 80,
       "input": "软件更新会通过链接检查器验证文档引用,并把数据写入缓存。",
       "scan_text": "軟件更新會通過鏈接檢查器驗證文檔引用,並把數據寫入緩存。",
-      "expected_fixed": "軟體更新會透過連結檢查器驗證文件引用，並把資料寫入快取。",
+      "expected_fixed": "軟體更新會通過連結檢查器驗證文件引用，並把資料寫入快取。",
       "expected_issues": [
         {
           "found": "軟件",
@@ -344,6 +344,11 @@
           "found": "硬件",
           "replace": "硬體",
           "rule_type": "cross_strait"
+        },
+        {
+          "found": "接口",
+          "replace": "介面",
+          "rule_type": "cross_strait"
         }
       ]
     },
@@ -381,7 +386,7 @@
       "repeat": 55,
       "input": "开发者通过调试器来分析程序中的内存泄漏问题。",
       "scan_text": "開發者通過調試器來分析程序中的內存洩漏問題。",
-      "expected_fixed": "開發者透過除錯器來分析程序中的記憶體洩漏問題。",
+      "expected_fixed": "開發者通過除錯器來分析程序中的記憶體洩漏問題。",
       "expected_issues": [
         {
           "found": "通過",
@@ -569,6 +574,246 @@
         {
           "found": "話筒",
           "replace": "麥克風",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_account_char",
+      "repeat": 1,
+      "input": "财务部门先核对转账记录和坏账明细，再更新应收账款。",
+      "scan_text": "財務部門先核對轉賬記錄和壞賬明細，再更新應收賬款。",
+      "expected_fixed": "財務部門先核對轉帳記錄和壞帳明細，再更新應收帳款。",
+      "expected_issues": [
+        {
+          "found": "賬",
+          "replace": "帳",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "賬",
+          "replace": "帳",
+          "rule_type": "cross_strait",
+          "occurrence": 2
+        },
+        {
+          "found": "賬",
+          "replace": "帳",
+          "rule_type": "cross_strait",
+          "occurrence": 3
+        }
+      ]
+    },
+    {
+      "id": "cn_it_terms_2",
+      "repeat": 1,
+      "input": "虚拟现实团队把工作流与触摸板设定写进说明，也要同步请求头设定。",
+      "scan_text": "虛擬現實團隊把工作流與觸摸板設定寫進說明，也要同步請求頭設定。",
+      "expected_fixed": "虛擬實境團隊把工作流與觸控板設定寫進說明，也要同步請求標頭設定。",
+      "expected_issues": [
+        {
+          "found": "虛擬現實",
+          "replace": "虛擬實境",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "觸摸板",
+          "replace": "觸控板",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "請求頭",
+          "replace": "請求標頭",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_units_daily",
+      "repeat": 1,
+      "input": "早餐的面包要涂黄油。房间有二十平方米，走廊宽三百厘米，柜子零点五立方米。",
+      "scan_text": "早餐的麵包要塗黃油。房間有二十平方米，走廊寬三百釐米，櫃子零點五立方米。",
+      "expected_fixed": "早餐的麵包要塗黃油。房間有二十平方米，走廊寬三百釐米，櫃子零點五立方米。",
+      "expected_issues": [
+        {
+          "found": "黃油",
+          "replace": "奶油",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_finance_labor",
+      "repeat": 1,
+      "input": "按揭放款的劳动合同条款由用人单位负责说明。",
+      "scan_text": "按揭放款的勞動合同條款由用人單位負責說明。",
+      "expected_fixed": "按揭放款的勞動契約條款由雇主負責說明。",
+      "expected_issues": [
+        {
+          "found": "按揭",
+          "replace": "抵押",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "勞動合同",
+          "replace": "勞動契約",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "用人單位",
+          "replace": "雇主",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_academic",
+      "repeat": 1,
+      "input": "日本学者访问中国高校，讨论大学合作与论文答辩。",
+      "scan_text": "日本學者訪問中國高校，討論大學合作與論文答辯。",
+      "expected_fixed": "日本學者訪問中國大專院校，討論大學合作與論文口試。",
+      "expected_issues": [
+        {
+          "found": "中國高校",
+          "replace": "中國大專院校",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "論文答辯",
+          "replace": "論文口試",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_medical",
+      "repeat": 1,
+      "input": "医疗团队为患者筛查艾滋病与脑卒中，靶向治疗流程要准备呼吸机和棉签，老年痴呆患者另行评估。",
+      "scan_text": "醫療團隊為患者篩查艾滋病與腦卒中，靶向治療流程要準備呼吸機和棉籤，老年痴呆患者另行評估。",
+      "expected_fixed": "醫療團隊為患者篩查愛滋病與腦中風，標靶治療流程要準備呼吸器和棉籤，失智症患者另行評估。",
+      "expected_issues": [
+        {
+          "found": "篩查",
+          "replace": "篩檢",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "艾滋",
+          "replace": "愛滋",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "腦卒中",
+          "replace": "腦中風",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "靶向治療",
+          "replace": "標靶治療",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "呼吸機",
+          "replace": "呼吸器",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "老年痴呆",
+          "replace": "失智症",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_political_taiwan",
+      "repeat": 1,
+      "input": "报告把中国台湾列为区域，并说明中国台湾与美国之间的关系。",
+      "scan_text": "報告把中國臺灣列為區域，並說明中國臺灣與美國之間的關係。",
+      "expected_fixed": "報告把臺灣列為區域，並說明臺灣與美國之間的關係。",
+      "expected_issues": [
+        {
+          "found": "中國臺灣",
+          "replace": "臺灣",
+          "rule_type": "political_coloring"
+        },
+        {
+          "found": "中國臺灣",
+          "replace": "臺灣",
+          "rule_type": "political_coloring",
+          "occurrence": 2
+        }
+      ]
+    },
+    {
+      "id": "cn_quality_compounds",
+      "repeat": 1,
+      "input": "高质量的产品质量报告要连同商品质量与教学质量一起复核。",
+      "scan_text": "高質量的產品質量報告要連同商品質量與教學質量一起復核。",
+      "expected_fixed": "高質量的產品品質報告要連同商品品質與教學質量一起復核。",
+      "expected_issues": [
+        {
+          "found": "質量",
+          "replace": "品質",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "產品質量",
+          "replace": "產品品質",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "商品質量",
+          "replace": "商品品質",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "質量",
+          "replace": "品質",
+          "rule_type": "cross_strait",
+          "occurrence": 4
+        }
+      ]
+    },
+    {
+      "id": "cn_clue_in_own_sentence",
+      "repeat": 1,
+      "input": "虚拟机的驱动程序和硬件接口需要更新。连接超时要重试。早餐面包要涂黄油。齿轮另外保养。",
+      "scan_text": "虛擬機的驅動程序和硬件接口需要更新。連接超時要重試。早餐麵包要塗黃油。齒輪另外保養。",
+      "expected_fixed": "虛擬機器的驅動程式和硬體接口需要更新。連線超時要重試。早餐麵包要塗黃油。齒輪另外保養。",
+      "expected_issues": [
+        {
+          "found": "虛擬機",
+          "replace": "虛擬機器",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "驅動程序",
+          "replace": "驅動程式",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "硬件",
+          "replace": "硬體",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "接口",
+          "replace": "介面",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "連接",
+          "replace": "連線",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "超時",
+          "replace": "逾時",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "黃油",
+          "replace": "奶油",
           "rule_type": "cross_strait"
         }
       ]

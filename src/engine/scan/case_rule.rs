@@ -15,8 +15,11 @@ impl Scanner {
     /// For each match, check:
     /// 1. The matched text is NOT already in a valid form (canonical term
     ///    or one of the listed alternatives).
-    /// 2. The match has word boundaries: no adjacent ASCII letter on either
-    ///    side (prevents matching "React" inside "Unreactive").
+    /// 2. The match has word boundaries: no adjacent ASCII alphanumeric or
+    ///    identifier underscore on either side (nor a hyphen, when the match is
+    ///    all lowercase like a package name), and no dot that joins
+    ///    it to another hostname or file-name label. Markdown emphasis
+    ///    delimiters remain lintable.
     pub(crate) fn scan_case(&self, em: &mut Emitter<'_>) {
         let text = em.text;
         let excluded = em.excluded;
@@ -50,11 +53,38 @@ impl Scanner {
                 }
             }
 
-            // Word boundary check: no adjacent ASCII alpha.
-            if start > 0 && bytes[start - 1].is_ascii_alphabetic() {
+            // A hyphen joins a package name only when the match is all
+            // lowercase (typescript-eslint); Github-hosted is prose miscased.
+            let hyphen_joins = !found.bytes().any(|b| b.is_ascii_uppercase());
+            let in_identifier =
+                |b: u8| b.is_ascii_alphanumeric() || b == b'_' || (hyphen_joins && b == b'-');
+
+            // Glued to an identifier character on either side means the match
+            // is part of a name. Symmetric underscore runs bounded by prose are
+            // Markdown emphasis, not identifier separators, so they still lint.
+            let glued = |s: usize, e: usize| {
+                matches!(bytes[..s], [.., b] if in_identifier(b))
+                    || matches!(bytes[e..], [b, ..] if in_identifier(b))
+            };
+            let before = bytes[..start]
+                .iter()
+                .rev()
+                .take_while(|&&b| b == b'_')
+                .count();
+            let after = bytes[end..].iter().take_while(|&&b| b == b'_').count();
+            let emphasis =
+                before == after && (1..=3).contains(&before) && !glued(start - before, end + after);
+            if glued(start, end) && !emphasis {
                 continue;
             }
-            if end < bytes.len() && bytes[end].is_ascii_alphabetic() {
+
+            // A dot joined to an alphanumeric on its far side makes the match
+            // one label of a hostname or file name (openai.com, api.github.com,
+            // python.exe), and those are case-sensitive or lowercase by rule. A
+            // sentence-ending dot is followed by space or CJK and still lints.
+            if matches!(bytes[..start], [.., a, b'.'] if a.is_ascii_alphanumeric())
+                || matches!(bytes[end..], [b'.', b, ..] if b.is_ascii_alphanumeric())
+            {
                 continue;
             }
 

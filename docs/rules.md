@@ -114,6 +114,7 @@ Character variant normalization per the MoE Standard Form of National Characters
 | 麪 | 麵 | "noodle" |
 | 着 | 著 | Particle usage; exception: chess term 下著, proper nouns |
 | 台 | 臺 | `strict` profile only; lexical contexts: 臺灣/臺北/臺中/臺南 |
+| 身份 | 身分 | Widespread but non-standard; `strict` profile only, severity info |
 
 Variant rules are filtered inside the spelling scan, with exception phrase checking. The strict profile enables them. MoE forms are appropriate where a publisher requires them, including teaching material, government documents, and school publishing; elsewhere a glyph preference is advisory. Proper names and plain spelling errors in this family remain warnings.
 
@@ -132,9 +133,11 @@ Country names and international organizations with cross-strait naming differenc
 Proper casing for technology terms. Matched case-insensitively with word boundary checks.
 
 ```
-JavaScript  TypeScript  Python  Rust  HTTP  HTTPS
-API  JSON  GitHub  Instagram  Google  Facebook
-React  Linux  macOS
+AGENTS.md  API  CLAUDE.md  ChatGPT  Claude Code  Facebook
+GEMINI.md  Gemini CLI  GitHub  GitHub Copilot  Google  HTTP
+HTTPS  Instagram  JSON  JavaScript  Linux
+Model Context Protocol  OpenAI  Python  React  Rust
+TypeScript  macOS
 ```
 
 ## Optional rule fields
@@ -159,7 +162,7 @@ The MCP `explain` output also reports `auto_fix_safe` and `needs_review`, but on
 
 ### context_suggestions
 
-One source term can need different corrections in different domains, and a flat `to` list cannot say so. `context_suggestions` is a list of `{clues, to}` groups: when any clue appears in the same ±40-character window the context-clue gate uses (clamped at paragraph breaks and at excluded ranges such as code blocks, so a clue in the next paragraph or inside a fence cannot select a group), that group's `to` replaces the rule's default for that match only. Groups are tried in order, so the first match wins and ruleset order is the precedence order.
+One source term can need different corrections in different domains, and a flat `to` list cannot say so. `context_suggestions` is a list of `{clues, to}` groups: when any clue appears in the same ±40-character window the context-clue gate uses (clamped at sentence ends, paragraph breaks, and excluded ranges such as code blocks, so a clue in the next sentence or paragraph or inside a fence cannot select a group), that group's `to` replaces the rule's default for that match only. Groups are tried in order, so the first match wins and ruleset order is the precedence order.
 
 `優化` is the worked example. IT `optimize` takes 最佳化, but where the text means improve rather than make-optimal, 「優化」is a misuse and the right word is 改善 or 提升, per <https://hackmd.io/@sysprog/it-vocabulary>:
 

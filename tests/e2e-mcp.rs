@@ -127,7 +127,11 @@ fn start_sampling_call(stdin: &mut impl Write, stdout: &mut impl BufRead) {
         &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
     );
 
-    let text = "這個項目的質量和性能都很好，軟件的並行處理和內存管理需要優化。".repeat(3);
+    // 令牌 is the sampling anchor on purpose: three suggestions plus an English
+    // gloss make it eligible structurally, so the probe does not depend on some
+    // other rule keeping a context_clues list it may lose.
+    let text = "這個項目的質量和性能都很好，軟件的並行處理和內存管理需要優化，存取令牌也要輪替。"
+        .repeat(3);
     writeln!(
         stdin,
         "{}",
@@ -1337,42 +1341,7 @@ fn e2e_cancelling_a_call_stops_it_waiting_on_sampling() {
     // five-second deadline rather than at it, so a single call that had already
     // burned part of its deadline would still be caught.
     let (_tmp, mut child, mut stdin, mut stdout) = spawn_server();
-    let init = send_recv(
-        &mut stdin,
-        &mut stdout,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": { "sampling": {} },
-                "clientInfo": { "name": "test", "version": "0.1" }
-            }
-        }),
-    );
-    assert!(init["result"].is_object(), "initialize: {init}");
-    send_notification(
-        &mut stdin,
-        &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
-    );
-
-    let text = "這個項目的質量和性能都很好，軟件的並行處理和內存管理需要優化。".repeat(3);
-    writeln!(
-        stdin,
-        "{}",
-        json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {
-                "name": "zhtw",
-                "arguments": { "text": text, "profile": "strict", "output": "summary" }
-            }
-        })
-    )
-    .unwrap();
-    stdin.flush().unwrap();
+    start_sampling_call(&mut stdin, &mut stdout);
 
     // Wait for the first question, then cancel rather than answering it.
     loop {
