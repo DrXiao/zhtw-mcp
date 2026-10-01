@@ -1203,6 +1203,8 @@ def detect_conflicts(
             "adjacent:",
             "not_before:",
             "not_after:",
+            "not_before_clause:",
+            "not_after_clause:",
         )
         pc = rule.get("positional_clues")
         if pc is not None and not isinstance(pc, list):

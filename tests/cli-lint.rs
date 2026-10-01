@@ -2414,17 +2414,26 @@ fn cli_detects_the_wider_invisible_character_set() {
 // strict-profile rules, which is why a base-profile corpus cannot cover them.
 #[test]
 fn cli_lint_moe_variant_forms_fire_under_strict() {
-    let text = "這條綫路的裏面有一碗麪。";
+    // Read the fixture rather than keeping a second copy of its sentences: the
+    // ruleset points at this path as the rules' provenance, so the file and the
+    // assertion have to stay in step. Comment lines carry the expected forms,
+    // which would lint as already-correct noise, so they are dropped.
+    let fixture = include_str!("fixtures/variant/moe_variant_forms.txt");
+    let text: String = fixture
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#') && !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // Reading from stdin keeps stdout for the document, so findings are on
     // stderr.
-    let output = run_lint_stdin(&["--profile", "strict"], text);
+    let output = run_lint_stdin(&["--profile", "strict"], &text);
     let report = String::from_utf8_lossy(&output.stderr);
-    for want in ["綫", "裏", "麪"] {
+    for want in ["綫", "裏", "麪", "身份"] {
         assert!(report.contains(want), "missing {want} in {report}");
     }
     // Off by default, so ordinary linting does not rewrite an author's glyphs.
-    let output = run_lint_stdin(&[], text);
+    let output = run_lint_stdin(&[], &text);
     assert!(String::from_utf8_lossy(&output.stderr).contains("No issues"));
 }
 

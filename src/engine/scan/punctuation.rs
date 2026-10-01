@@ -489,7 +489,7 @@ const LATIN_RUN_SEARCH_BYTES: usize = 512;
 /// after the period and consults an abbreviation list. Here the question is
 /// only whether the period is inside a word, and Dr. Smith, wants the run to
 /// close so that the comma trails a name rather than a clause.
-fn is_dotted_term_period(bytes: &[u8], index: usize) -> bool {
+pub(super) fn is_dotted_term_period(bytes: &[u8], index: usize) -> bool {
     index > 0
         && bytes[index - 1].is_ascii_alphanumeric()
         && bytes.get(index + 1).is_some_and(u8::is_ascii_alphanumeric)
@@ -530,7 +530,7 @@ fn at_line_start(bytes: &[u8], index: usize) -> bool {
 
 /// Whether the mark at "index" separates two digits, which makes it notation
 /// rather than punctuation: 1,000 and 12:30, not a comma or a colon in prose.
-fn digits_both_sides(bytes: &[u8], index: usize) -> bool {
+pub(super) fn digits_both_sides(bytes: &[u8], index: usize) -> bool {
     index > 0
         && bytes[index - 1].is_ascii_digit()
         && bytes.get(index + 1).is_some_and(u8::is_ascii_digit)

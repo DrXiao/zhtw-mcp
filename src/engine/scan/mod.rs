@@ -289,30 +289,28 @@ pub(crate) enum PositionalClue {
     /// TERM must NOT appear within POSITIONAL_WINDOW_CHARS chars BEFORE the
     /// match.
     NotAfter(String),
+    /// Like NotBefore, but only within the same clause.
+    NotBeforeClause(String),
+    /// Like NotAfter, but only within the same clause.
+    NotAfterClause(String),
 }
 
 impl PositionalClue {
     /// Parse a positional clue string (e.g. "before:函式", "not_after:的").
     /// Returns None if the syntax is unrecognized.
     fn parse(s: &str) -> Option<Self> {
-        // Order matters: longer prefixes (not_before, not_after) must be
-        // checked before their shorter counterparts (before, after).
-        if let Some(t) = s.strip_prefix("not_before:").filter(|t| !t.is_empty()) {
-            return Some(PositionalClue::NotBefore(t.to_string()));
-        }
-        if let Some(t) = s.strip_prefix("not_after:").filter(|t| !t.is_empty()) {
-            return Some(PositionalClue::NotAfter(t.to_string()));
-        }
-        if let Some(t) = s.strip_prefix("before:").filter(|t| !t.is_empty()) {
-            return Some(PositionalClue::Before(t.to_string()));
-        }
-        if let Some(t) = s.strip_prefix("after:").filter(|t| !t.is_empty()) {
-            return Some(PositionalClue::After(t.to_string()));
-        }
-        if let Some(t) = s.strip_prefix("adjacent:").filter(|t| !t.is_empty()) {
-            return Some(PositionalClue::Adjacent(t.to_string()));
-        }
-        None
+        let (kind, term) = s.split_once(':').filter(|(_, t)| !t.is_empty())?;
+        let term = term.to_string();
+        Some(match kind {
+            "before" => PositionalClue::Before(term),
+            "after" => PositionalClue::After(term),
+            "adjacent" => PositionalClue::Adjacent(term),
+            "not_before" => PositionalClue::NotBefore(term),
+            "not_after" => PositionalClue::NotAfter(term),
+            "not_before_clause" => PositionalClue::NotBeforeClause(term),
+            "not_after_clause" => PositionalClue::NotAfterClause(term),
+            _ => return None,
+        })
     }
 }
 

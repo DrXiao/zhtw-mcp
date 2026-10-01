@@ -358,6 +358,32 @@
       "english": "union (set theory)"
     },
     {
+      "from": "中國台灣",
+      "to": ["臺灣"],
+      "type": "political_coloring",
+      "context": "將臺灣地方化的政治稱呼，非 tw 中性表述",
+      "english": "political name for Taiwan",
+      "source": "cn_political_taiwan",
+      "exceptions": ["中國台灣兩地", "中國台灣之間", "中國台灣香港", "中國台灣兩岸", "中國台灣三地", "中國台灣四地", "中國台灣日本", "中國台灣韓國", "中國台灣美國", "中國台灣澳門", "中國台灣新加坡", "中國台灣越南", "中國台灣泰國", "中國台灣馬來西亞", "中國台灣菲律賓", "中國台灣印尼", "中國台灣歐洲", "中國台灣東南亞"]
+    },
+    {
+      "from": "中國臺灣",
+      "to": ["臺灣"],
+      "type": "political_coloring",
+      "context": "將臺灣地方化的政治稱呼，非 tw 中性表述",
+      "english": "political name for Taiwan",
+      "source": "cn_political_taiwan",
+      "exceptions": ["中國臺灣兩地", "中國臺灣之間", "中國臺灣香港", "中國臺灣兩岸", "中國臺灣三地", "中國臺灣四地", "中國臺灣日本", "中國臺灣韓國", "中國臺灣美國", "中國臺灣澳門", "中國臺灣新加坡", "中國臺灣越南", "中國臺灣泰國", "中國臺灣馬來西亞", "中國臺灣菲律賓", "中國臺灣印尼", "中國臺灣歐洲", "中國臺灣東南亞"]
+    },
+    {
+      "from": "中國高校",
+      "to": ["中國大專院校"],
+      "type": "cross_strait",
+      "context": "@domain 教育",
+      "english": "higher-education institution",
+      "source": "cn_academic"
+    },
+    {
       "from": "中微子",
       "to": ["微中子"],
       "type": "cross_strait",
@@ -2391,6 +2417,15 @@
       "english": "labor insurance"
     },
     {
+      "from": "勞動合同",
+      "to": ["勞動契約"],
+      "type": "cross_strait",
+      "context": "@domain 商業。tw 勞動基準法用「勞動契約」(@seealso 合同)",
+      "english": "labor contract",
+      "source": "cn_finance_labor",
+      "exceptions": ["勞動合同法"]
+    },
+    {
       "from": "勞逸結合",
       "to": ["適時休息"],
       "type": "cross_strait",
@@ -2913,7 +2948,8 @@
       "type": "cross_strait",
       "context": "@domain 商業",
       "english": "contract",
-      "context_clues": ["簽訂", "條款", "甲方", "乙方", "履行"]
+      "context_clues": ["簽訂", "條款", "甲方", "乙方", "履行"],
+      "exceptions": ["勞動合同法"]
     },
     {
       "from": "合理性",
@@ -2978,6 +3014,15 @@
       "type": "cross_strait",
       "context": "@domain 通訊",
       "english": "call forwarding"
+    },
+    {
+      "from": "呼吸機",
+      "to": ["呼吸器"],
+      "type": "cross_strait",
+      "context": "@domain 醫學",
+      "english": "ventilator",
+      "source": "cn_medical",
+      "exceptions": ["呼吸機制", "呼吸機能", "呼吸機轉"]
     },
     {
       "from": "命令式編程",
@@ -3066,6 +3111,15 @@
       "type": "translationese",
       "context": "和 verb-pair calque",
       "tags": ["src:dewesternise"]
+    },
+    {
+      "from": "商品質量",
+      "to": ["商品品質"],
+      "type": "cross_strait",
+      "context": "@domain 商業。「品質」跨越詞界，攔住通用規則 (@seealso 質量)",
+      "english": "quality",
+      "source": "cn_quality_compounds",
+      "positional_clues": ["not_before_clause:公斤", "not_before_clause:kg", "not_before_clause:KG", "not_after_clause:公斤", "not_after_clause:kg", "not_after_clause:KG", "not_before_clause:公克", "not_before_clause:毫克", "not_before_clause:千克", "not_before_clause:噸", "not_after_clause:公克", "not_after_clause:毫克", "not_after_clause:千克", "not_after_clause:噸"]
     },
     {
       "from": "商業模型",
@@ -6014,6 +6068,14 @@
       "english": "pass by reference"
     },
     {
+      "from": "按揭",
+      "to": ["抵押", "房貸"],
+      "type": "cross_strait",
+      "context": "@domain 金融。cn/hk 用法",
+      "english": "mortgage",
+      "source": "cn_finance_labor"
+    },
+    {
       "from": "挖掘機",
       "to": ["挖土機"],
       "type": "cross_strait",
@@ -6105,7 +6167,7 @@
       "type": "cross_strait",
       "context": "@domain 程式設計。硬體 connector/port = 接頭/連接埠",
       "english": "interface",
-      "context_clues": ["API", "函數", "函式", "類別", "定義", "實現", "實作", "調用", "呼叫", "軟件", "軟體"]
+      "context_clues": ["API", "函數", "函式", "類別", "定義", "實現", "實作", "調用", "呼叫", "軟件", "軟體", "硬件", "硬體", "驅動"]
     },
     {
       "from": "接地氣",
@@ -8990,6 +9052,23 @@
       "english": "organic food"
     },
     {
+      "from": "產品質量",
+      "to": ["產品品質"],
+      "type": "cross_strait",
+      "context": "@domain 商業。「品質」跨越詞界，攔住通用規則 (@seealso 質量)",
+      "english": "quality",
+      "source": "cn_quality_compounds",
+      "positional_clues": ["not_before_clause:公斤", "not_before_clause:kg", "not_before_clause:KG", "not_after_clause:公斤", "not_after_clause:kg", "not_after_clause:KG", "not_before_clause:公克", "not_before_clause:毫克", "not_before_clause:千克", "not_before_clause:噸", "not_after_clause:公克", "not_after_clause:毫克", "not_after_clause:千克", "not_after_clause:噸"]
+    },
+    {
+      "from": "用人單位",
+      "to": ["雇主"],
+      "type": "cross_strait",
+      "context": "@domain 商業。cn 勞動合同法用語",
+      "english": "employer",
+      "source": "cn_finance_labor"
+    },
+    {
       "from": "用戶",
       "to": ["使用者"],
       "type": "cross_strait",
@@ -10163,6 +10242,16 @@
       "english": "paradigm shift"
     },
     {
+      "from": "篩查",
+      "to": ["篩檢"],
+      "type": "cross_strait",
+      "context": "@domain 醫學",
+      "english": "screening",
+      "source": "cn_medical",
+      "context_clues": ["疾病", "癌症", "新生兒", "愛滋", "艾滋", "視力", "聽力", "產前", "基因", "健康", "唐氏症", "病變"],
+      "positional_clues": ["not_after_clause:資料", "not_before_clause:資料", "not_after_clause:數據", "not_before_clause:數據"]
+    },
+    {
       "from": "簡歷",
       "to": ["履歷"],
       "type": "cross_strait",
@@ -10710,6 +10799,38 @@
       "context_clues": ["編譯", "原始碼", "程式碼", "直譯器", "代碼"]
     },
     {
+      "from": "老年痴呆",
+      "to": ["失智症"],
+      "type": "cross_strait",
+      "context": "@domain 醫學",
+      "english": "dementia",
+      "source": "cn_medical"
+    },
+    {
+      "from": "老年痴呆症",
+      "to": ["失智症"],
+      "type": "cross_strait",
+      "context": "@domain 醫學。「症」已在「失智症」裡，短規則會寫出「失智症症」(@seealso 老年痴呆)",
+      "english": "dementia",
+      "source": "cn_medical"
+    },
+    {
+      "from": "老年癡呆",
+      "to": ["失智症"],
+      "type": "cross_strait",
+      "context": "@domain 醫學。「癡」為 MoE 字形，同「老年痴呆」(@seealso 老年痴呆)",
+      "english": "dementia",
+      "source": "cn_medical"
+    },
+    {
+      "from": "老年癡呆症",
+      "to": ["失智症"],
+      "type": "cross_strait",
+      "context": "@domain 醫學。「症」已在「失智症」裡 (@seealso 老年痴呆症)",
+      "english": "dementia",
+      "source": "cn_medical"
+    },
+    {
       "from": "老撾",
       "to": ["寮國"],
       "type": "cross_strait",
@@ -10907,6 +11028,14 @@
       "english": "offline"
     },
     {
+      "from": "腦卒中",
+      "to": ["腦中風"],
+      "type": "cross_strait",
+      "context": "@domain 醫學",
+      "english": "stroke",
+      "source": "cn_medical"
+    },
+    {
       "from": "腦洞大開",
       "to": ["異想天開", "出其不意"],
       "type": "cross_strait",
@@ -11047,6 +11176,14 @@
       "type": "cross_strait",
       "context": "@domain 航太",
       "english": "space shuttle"
+    },
+    {
+      "from": "艾滋",
+      "to": ["愛滋"],
+      "type": "cross_strait",
+      "context": "@domain 醫學。AIDS 音譯",
+      "english": "AIDS",
+      "source": "cn_medical"
     },
     {
       "from": "芯片",
@@ -11317,6 +11454,14 @@
       "context": "區分通用的 machine 和特化的 engine (@seealso 發動機)",
       "english": "virtual machine (VM)",
       "exceptions": ["虛擬機器"]
+    },
+    {
+      "from": "虛擬現實",
+      "to": ["虛擬實境"],
+      "type": "cross_strait",
+      "context": "@domain IT。AR/VR 術語成套 (@seealso 增強現實)",
+      "english": "virtual reality",
+      "source": "cn_it_terms_2"
     },
     {
       "from": "蜘蛛紙牌",
@@ -11705,6 +11850,14 @@
       "english": "touch screen"
     },
     {
+      "from": "觸摸板",
+      "to": ["觸控板"],
+      "type": "cross_strait",
+      "context": "@domain 硬體",
+      "english": "touchpad",
+      "source": "cn_it_terms_2"
+    },
+    {
       "from": "訂製化",
       "to": ["客製化"],
       "type": "cross_strait",
@@ -12085,6 +12238,31 @@
       "english": "Do Not Track"
     },
     {
+      "from": "請求頭",
+      "to": ["請求標頭"],
+      "type": "cross_strait",
+      "context": "@domain 網路。HTTP 標頭 (@seealso 響應)",
+      "english": "request header",
+      "source": "cn_it_terms_2",
+      "exceptions": ["請求頭部"]
+    },
+    {
+      "from": "請求頭部",
+      "to": ["請求標頭"],
+      "type": "cross_strait",
+      "context": "@domain 網路。「頭部」整段對應「標頭」，短規則會寫出「請求標頭部」(@seealso 請求頭)",
+      "english": "request header",
+      "source": "cn_it_terms_2"
+    },
+    {
+      "from": "論文答辯",
+      "to": ["論文口試"],
+      "type": "cross_strait",
+      "context": "@domain 教育",
+      "english": "thesis defense",
+      "source": "cn_academic"
+    },
+    {
       "from": "謎語人",
       "to": ["拐彎抹角", "含糊不清"],
       "type": "cross_strait",
@@ -12285,7 +12463,8 @@
       "type": "cross_strait",
       "context": "@domain IT。「質量」在 tw 僅指 mass (物理量)，與 quality 語意不同",
       "english": "quality",
-      "context_clues": ["保證", "管理", "控制", "提升", "改善", "軟件", "軟體", "產品", "服務", "測試"]
+      "context_clues": ["保證", "管理", "控制", "提升", "改善", "軟件", "軟體", "產品", "服務", "測試"],
+      "positional_clues": ["not_before_clause:公斤", "not_before_clause:kg", "not_before_clause:KG", "not_after_clause:公斤", "not_after_clause:kg", "not_after_clause:KG", "not_before_clause:公克", "not_before_clause:毫克", "not_before_clause:千克", "not_before_clause:噸", "not_after_clause:公克", "not_after_clause:毫克", "not_after_clause:千克", "not_after_clause:噸"]
     },
     {
       "from": "質量管理",
@@ -12295,24 +12474,18 @@
       "english": "quality management"
     },
     {
-      "from": "賬單",
-      "to": ["帳單"],
+      "from": "賬",
+      "to": ["帳"],
       "type": "cross_strait",
-      "context": "@domain 商業",
-      "english": "bill"
-    },
-    {
-      "from": "賬戶",
-      "to": ["帳戶"],
-      "type": "cross_strait",
-      "context": "@domain 商業。cn 用「賬」，tw 用「帳」",
-      "english": "account"
+      "context": "@domain 商業。OpenCC 把 cn「账」轉為「賬」，非 tw 字形",
+      "english": "account (ledger)",
+      "source": "cn_account_char"
     },
     {
       "from": "賬號",
       "to": ["帳號"],
       "type": "cross_strait",
-      "context": "@domain 商業",
+      "context": "@domain 商業。不可刪：「賬號」是「社交」規則的語境線索，因此進了分詞詞典並跨越單字規則的詞界，把它擋掉 (@seealso 賬)",
       "english": "account"
     },
     {
@@ -12361,7 +12534,7 @@
       "type": "cross_strait",
       "context": "@domain IT",
       "english": "timeout",
-      "context_clues": ["連線", "請求", "伺服器", "回應", "秒"]
+      "context_clues": ["連線", "請求", "伺服器", "回應", "秒", "連接"]
     },
     {
       "from": "超清",
@@ -12452,10 +12625,20 @@
       "english": "ride the hype"
     },
     {
+      "from": "身份",
+      "to": ["身分"],
+      "type": "variant",
+      "severity": "info",
+      "context": "MoE 標準字形為「身分」(身分證、身分認同)；「身份」為通行但非標準的寫法",
+      "english": "identity",
+      "source": "tests/fixtures/variant/moe_variant_forms.txt"
+    },
+    {
       "from": "身份證",
       "to": ["身分證"],
-      "type": "cross_strait",
-      "context": "@domain 日常。MoE 標準用「身分」",
+      "type": "variant",
+      "severity": "info",
+      "context": "MoE 標準字形為「身分」(@seealso 身份)",
       "english": "identity card"
     },
     {
@@ -12596,7 +12779,7 @@
       "to": ["藉由", "經由"],
       "type": "translationese",
       "context": "透過 used with abstract means — prefer 藉由/經由",
-      "negative_context_clues": ["玻璃", "縫隙", "窗戶", "屏幕", "布料", "紗窗", "驗證", "系統", "連結", "介面", "API", "機制", "網路"],
+      "negative_context_clues": ["玻璃", "縫隙", "窗戶", "屏幕", "布料", "紗窗", "驗證", "系統", "連結", "介面", "API", "機制", "網路", "程式", "工具", "伺服器", "資料庫"],
       "tags": ["src:dewesternise"],
       "editorial_confidence": "low"
     },
@@ -12671,9 +12854,11 @@
       "from": "通過",
       "to": ["透過"],
       "type": "cross_strait",
-      "context": "@domain IT。tw「通過」= pass (通過考試)；僅 via/through 義改「透過」",
+      "context": "@domain IT。tw「通過」= pass (通過考試)；僅 via/through 義改「透過」。語境線索門檻使它只在 contextual 層自動修正，安全層只報告",
       "english": "through/via",
-      "negative_context_clues": ["考試", "審核", "法案", "檢驗", "投票", "測試"]
+      "context_clues": ["系統", "網路", "網絡", "介面", "接口", "API", "管道", "方式", "方法", "調試器", "連結", "鏈接", "優化", "最佳化", "演算法", "算法", "機制", "電子郵件", "郵件", "伺服器", "代理", "資料庫", "網站", "平台", "平臺", "工具", "程式", "協定", "通道", "雲端", "應用程式", "SDK"],
+      "positional_clues": ["not_before_clause:測試", "not_before_clause:檢驗", "not_before_clause:審核", "not_before_clause:審查", "not_before_clause:稽核", "not_before_clause:考試", "not_before_clause:認證", "not_before_clause:試驗", "not_before_clause:口試", "not_before_clause:面試", "not_before_clause:驗收", "not_before_clause:考核", "not_before_clause:檢測", "not_before_clause:評估", "not_before_clause:審批", "not_before_clause:審定", "not_before_clause:評鑑", "not_before_clause:安檢", "not_before_clause:考驗", "not_before_clause:編譯", "not_before_clause:門檻", "not_before_clause:CI", "not_before_clause:法案", "not_before_clause:議案", "not_before_clause:預算", "not_before_clause:決議", "not_before_clause:表決", "not_before_clause:期末考", "not_before_clause:期中考", "not_after_clause:立法院", "not_after_clause:議會", "not_after_clause:董事會", "not_after_clause:股東會", "not_after_clause:理事會"],
+      "exceptions": ["考試通過", "口試通過", "面試通過", "審核通過", "審查通過", "稽核通過", "檢驗通過", "法案通過", "議案通過", "決議通過", "預算通過", "投票通過", "表決通過", "測試通過", "驗證通過", "檢查通過", "檢測通過", "評估通過", "審批通過", "安檢通過", "編譯通過", "通過率", "通過驗證", "通過了驗證", "通過檢查", "通過了檢查"]
     },
     {
       "from": "通配符",
@@ -13756,6 +13941,14 @@
       "english": "procedural"
     },
     {
+      "from": "靶向治療",
+      "to": ["標靶治療"],
+      "type": "cross_strait",
+      "context": "@domain 醫學",
+      "english": "targeted therapy",
+      "source": "cn_medical"
+    },
+    {
       "from": "音箱",
       "to": ["喇叭", "揚聲器", "音響"],
       "type": "cross_strait",
@@ -14331,6 +14524,16 @@
       "english": "noodle / flour (char variant)"
     },
     {
+      "from": "黃油",
+      "to": ["奶油"],
+      "type": "cross_strait",
+      "context": "@domain 日常",
+      "english": "butter",
+      "source": "cn_units_daily",
+      "context_clues": ["麵包", "烘焙", "料理", "食譜", "吐司", "餅乾", "蛋糕"],
+      "positional_clues": ["not_after_clause:軸承", "not_before_clause:軸承", "not_after_clause:潤滑", "not_before_clause:潤滑", "not_after_clause:齒輪", "not_before_clause:齒輪"]
+    },
+    {
       "from": "黏貼",
       "to": ["貼上"],
       "type": "cross_strait",
@@ -14341,8 +14544,9 @@
       "from": "黑客",
       "to": ["駭客"],
       "type": "cross_strait",
-      "context": "@domain IT。指電腦技術高人一等者，並非蓄意破壞 (cracker)",
-      "english": "hacker"
+      "context": "@domain IT。指電腦技術高人一等者，並非蓄意破壞 (cracker)；「黑客松」(hackathon) 在 tw 通行，保留",
+      "english": "hacker",
+      "exceptions": ["黑客松"]
     },
     {
       "from": "黑帽",
@@ -14419,14 +14623,36 @@
   ],
   "case_rules": [
     {
+      "term": "AGENTS.md",
+      "alternatives": ["agents.md"]
+    },
+    {
       "term": "API",
       "alternatives": ["Api", "api", "APIs"]
+    },
+    {
+      "term": "CLAUDE.md"
+    },
+    {
+      "term": "ChatGPT"
+    },
+    {
+      "term": "Claude Code"
     },
     {
       "term": "Facebook"
     },
     {
+      "term": "GEMINI.md"
+    },
+    {
+      "term": "Gemini CLI"
+    },
+    {
       "term": "GitHub"
+    },
+    {
+      "term": "GitHub Copilot"
     },
     {
       "term": "Google"
@@ -14449,6 +14675,12 @@
     },
     {
       "term": "Linux"
+    },
+    {
+      "term": "Model Context Protocol"
+    },
+    {
+      "term": "OpenAI"
     },
     {
       "term": "Python"

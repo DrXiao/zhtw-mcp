@@ -3,14 +3,17 @@
 // rather than full-document pre-scan.
 
 use super::emit::Emitter;
+use super::punctuation::digits_both_sides;
 use crate::engine::excluded::{is_excluded, ByteRange};
 use crate::engine::segment::BoundaryBitmap;
+use crate::engine::sentence::is_sentence_terminator;
 use crate::engine::zhtype::ChineseType;
 use crate::rules::ruleset::{Issue, IssueType, ProfileConfig};
 
 use super::rule_ir::{self, MatchContext};
 use super::{
-    clamp_at_excluded, PositionalClue, Scanner, CONTEXT_WINDOW_CHARS, POSITIONAL_WINDOW_CHARS,
+    clamp_at_excluded, is_cjk_ideograph, PositionalClue, Scanner, CONTEXT_WINDOW_CHARS,
+    POSITIONAL_WINDOW_CHARS,
 };
 
 // Per-rule bitflags gating optional filter stages in process_spelling_match.
@@ -203,7 +206,7 @@ impl Scanner {
 }
 
 /// Compute the byte-offset window for context-clue proximity checks,
-/// clamped at paragraph breaks and excluded-range boundaries.
+/// clamped at sentence ends, paragraph breaks and excluded-range boundaries.
 pub(crate) fn context_byte_window(
     text: &str,
     match_start: usize,
@@ -212,16 +215,16 @@ pub(crate) fn context_byte_window(
 ) -> (usize, usize) {
     let bytes = text.as_bytes();
     let max_search = CONTEXT_WINDOW_CHARS * 4;
-    let para_start = {
-        let search_start = match_start.saturating_sub(max_search);
-        let search = &bytes[search_start..match_start];
-        find_last_paragraph_break(search).map_or(0, |pos| search_start + pos + 1)
-    };
-    let para_end = {
-        let search_end = (match_end + max_search).min(text.len());
-        let search = &bytes[match_end..search_end];
-        find_first_paragraph_break(search).map_or(text.len(), |pos| match_end + pos)
-    };
+    let search_start = text.ceil_char_boundary(match_start.saturating_sub(max_search));
+    let search_end = text.floor_char_boundary((match_end + max_search).min(text.len()));
+    let para_start = find_last_paragraph_break(&bytes[search_start..match_start])
+        .map_or(0, |pos| search_start + pos + 1);
+    let para_end = find_first_paragraph_break(&bytes[match_end..search_end])
+        .map_or(text.len(), |pos| match_end + pos);
+    let para_start = last_mark_end(text, search_start, match_start, is_window_sentence_end)
+        .map_or(para_start, |p| para_start.max(p));
+    let para_end = first_mark(text, match_end, search_end, is_window_sentence_end)
+        .map_or(para_end, |p| para_end.min(p));
 
     let mut byte_start = match_start;
     for _ in 0..CONTEXT_WINDOW_CHARS {
@@ -289,6 +292,24 @@ fn find_first_paragraph_break(bytes: &[u8]) -> Option<usize> {
     None
 }
 
+/// Whether a positional clue term occurs in text[ws..we].
+///
+/// An ASCII term matches only as a whole word: an ASCII letter directly beside
+/// it means it is part of a longer word, so CI is not found in ASCII or PCIe
+/// and kg is not found in pkg. A digit beside it still counts, because 5kg is
+/// the unit written against its number. Other terms match as substrings.
+fn clue_in(text: &str, ws: usize, we: usize, term: &str) -> bool {
+    if !term.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return text[ws..we].contains(term);
+    }
+    let bytes = text.as_bytes();
+    text[ws..we].match_indices(term).any(|(i, _)| {
+        let (s, e) = (ws + i, ws + i + term.len());
+        !(s > 0 && bytes[s - 1].is_ascii_alphabetic())
+            && !bytes.get(e).is_some_and(u8::is_ascii_alphabetic)
+    })
+}
+
 /// Check all positional clues for a match at [start, end).
 /// Positive clues use AND semantics; any negative clue vetoes.
 pub(crate) fn check_positional_clues(
@@ -306,14 +327,14 @@ pub(crate) fn check_positional_clues(
             PositionalClue::Before(term) => {
                 let (ws, we) =
                     *after_win.get_or_insert_with(|| positional_bounds_after(text, end, excluded));
-                if !text[ws..we].contains(term.as_str()) {
+                if !clue_in(text, ws, we, term) {
                     return false;
                 }
             }
             PositionalClue::After(term) => {
                 let (ws, we) = *before_win
                     .get_or_insert_with(|| positional_bounds_before(text, start, excluded));
-                if !text[ws..we].contains(term.as_str()) {
+                if !clue_in(text, ws, we, term) {
                     return false;
                 }
             }
@@ -332,20 +353,86 @@ pub(crate) fn check_positional_clues(
             PositionalClue::NotBefore(term) => {
                 let (ws, we) =
                     *after_win.get_or_insert_with(|| positional_bounds_after(text, end, excluded));
-                if text[ws..we].contains(term.as_str()) {
+                if clue_in(text, ws, we, term) {
                     return false;
                 }
             }
             PositionalClue::NotAfter(term) => {
                 let (ws, we) = *before_win
                     .get_or_insert_with(|| positional_bounds_before(text, start, excluded));
-                if text[ws..we].contains(term.as_str()) {
+                if clue_in(text, ws, we, term) {
+                    return false;
+                }
+            }
+            PositionalClue::NotBeforeClause(term) => {
+                let (ws, we) =
+                    *after_win.get_or_insert_with(|| positional_bounds_after(text, end, excluded));
+
+                // A colon right after the match introduces its own value, as in
+                // the spec-sheet label 產品質量：兩公斤, so it does not close
+                // the clause; a colon further along does.
+                let from = ws
+                    + text[ws..we]
+                        .chars()
+                        .next()
+                        .filter(|c| matches!(c, '：' | ':'))
+                        .map_or(0, char::len_utf8);
+                let we = first_mark(text, from, we, is_clause_mark).unwrap_or(we);
+                if clue_in(text, ws, we, term) {
+                    return false;
+                }
+            }
+            PositionalClue::NotAfterClause(term) => {
+                let (ws, we) = *before_win
+                    .get_or_insert_with(|| positional_bounds_before(text, start, excluded));
+                let ws = last_mark_end(text, ws, we, is_clause_mark).unwrap_or(ws);
+                if clue_in(text, ws, we, term) {
                     return false;
                 }
             }
         }
     }
     true
+}
+
+/// A sentence end for the clue windows: the shared splitter's answer, plus a
+/// half-width period written straight against a Chinese character. The
+/// splitter wants whitespace after a Latin period, which suits English, but
+/// 他順利通過.系統稍後更新 is two sentences all the same. Kept local so the
+/// detectors' sentence splits do not move.
+fn is_window_sentence_end(text: &str, offset: usize, c: char) -> bool {
+    is_sentence_terminator(text, offset, c)
+        || c == '.'
+            && text[offset + 1..]
+                .chars()
+                .next()
+                .is_some_and(is_cjk_ideograph)
+}
+
+/// A positional clue names a neighbour in the same clause, which ends at a
+/// sentence mark or clause punctuation. An ASCII comma or colon between digits
+/// (1,000 and 12:30) is notation, not punctuation.
+fn is_clause_mark(text: &str, offset: usize, c: char) -> bool {
+    match c {
+        '，' | '；' | ';' | '：' => true,
+        ',' | ':' => !digits_both_sides(text.as_bytes(), offset),
+        _ => is_window_sentence_end(text, offset, c),
+    }
+}
+
+type MarkFn = fn(&str, usize, char) -> bool;
+
+fn first_mark(text: &str, start: usize, end: usize, is_mark: MarkFn) -> Option<usize> {
+    text[start..end]
+        .char_indices()
+        .find_map(|(i, c)| is_mark(text, start + i, c).then_some(start + i))
+}
+
+fn last_mark_end(text: &str, start: usize, end: usize, is_mark: MarkFn) -> Option<usize> {
+    text[start..end]
+        .char_indices()
+        .rev()
+        .find_map(|(i, c)| is_mark(text, start + i, c).then_some(start + i + c.len_utf8()))
 }
 
 /// Positional window AFTER the match, clamped at paragraph/excluded boundaries.
