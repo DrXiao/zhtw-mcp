@@ -1366,9 +1366,9 @@
     {
       "id": "native_math_regression_broad_clue",
       "repeat": 1,
-      "input": "邏輯上，球隊應回歸基本面，讓多元文化回歸。",
+      "input": "線性規劃之外，球隊應回歸基本面，讓多元文化回歸。",
       "must_be_clean": true,
-      "expected_fixed": "邏輯上，球隊應回歸基本面，讓多元文化回歸。",
+      "expected_fixed": "線性規劃之外，球隊應回歸基本面，讓多元文化回歸。",
       "expected_issues": []
     },
     {
@@ -1465,6 +1465,22 @@
       "input": "讓討論的邏輯回歸常識。",
       "must_be_clean": true,
       "expected_fixed": "讓討論的邏輯回歸常識。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_hypothesis_result_is_positive",
+      "repeat": 1,
+      "input": "統計顯示，假設檢驗結果是陽性就要隔離。",
+      "must_be_clean": true,
+      "expected_fixed": "統計顯示，假設檢驗結果是陽性就要隔離。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_expected_value_object",
+      "repeat": 1,
+      "input": "統計課上，他對數學期望過高。",
+      "must_be_clean": true,
+      "expected_fixed": "統計課上，他對數學期望過高。",
       "expected_issues": []
     }
   ]
