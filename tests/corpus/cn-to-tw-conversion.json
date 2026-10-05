@@ -817,6 +817,344 @@
           "rule_type": "cross_strait"
         }
       ]
+    },
+    {
+      "id": "cn_math_covariance",
+      "repeat": 1,
+      "input": "两个随机变数的协方差为零。",
+      "scan_text": "兩個隨機變數的協方差為零。",
+      "expected_fixed": "兩個隨機變數的共變異數為零。",
+      "expected_issues": [
+        {
+          "found": "協方差",
+          "replace": "共變異數",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_random_variable",
+      "repeat": 1,
+      "input": "随机变量的取值为零或一。",
+      "scan_text": "隨機變量的取值為零或一。",
+      "expected_fixed": "隨機變數的取值為零或一。",
+      "expected_issues": [
+        {
+          "found": "變量",
+          "replace": "變數",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_expected_value",
+      "repeat": 1,
+      "input": "统计学中，数学期望是加权平均值。",
+      "scan_text": "統計學中，數學期望是加權平均值。",
+      "expected_fixed": "統計學中，數學期望是加權平均值。",
+      "expected_issues": [
+        {
+          "found": "數學期望",
+          "replace": "期望值",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_likelihood_function",
+      "repeat": 1,
+      "input": "似然函数用于统计推论。",
+      "scan_text": "似然函數用於統計推論。",
+      "expected_fixed": "概似函數用於統計推論。",
+      "expected_issues": [
+        {
+          "found": "似然函數",
+          "replace": "概似函數",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_maximum_likelihood_estimation",
+      "repeat": 1,
+      "input": "最大似然估计用于估计母数。",
+      "scan_text": "最大似然估計用於估計母數。",
+      "expected_fixed": "最大概似估計用於估計母數。",
+      "expected_issues": [
+        {
+          "found": "最大似然估計",
+          "replace": "最大概似估計",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_confidence_interval",
+      "repeat": 1,
+      "input": "置信区间反映估计的不确定性。",
+      "scan_text": "置信區間反映估計的不確定性。",
+      "expected_fixed": "信賴區間反映估計的不確定性。",
+      "expected_issues": [
+        {
+          "found": "置信區間",
+          "replace": "信賴區間",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_hypothesis_testing",
+      "repeat": 1,
+      "input": "假设检验用于统计推论。",
+      "scan_text": "假設檢驗用於統計推論。",
+      "expected_fixed": "假設檢驗用於統計推論。",
+      "expected_issues": [
+        {
+          "found": "假設檢驗",
+          "replace": "假設檢定",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_variance_probability",
+      "repeat": 1,
+      "input": "数学期望和方差是随机变量的两个特征。",
+      "scan_text": "數學期望和方差是隨機變量的兩個特徵。",
+      "expected_fixed": "數學期望和方差是隨機變數的兩個特徵。",
+      "expected_issues": [
+        {
+          "found": "數學期望",
+          "replace": "期望值",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "方差",
+          "replace": "變異數",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "變量",
+          "replace": "變數",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_normal_distribution",
+      "repeat": 1,
+      "input": "样本服从正态分布。",
+      "scan_text": "樣本服從正態分佈。",
+      "expected_fixed": "樣本服從常態分布。",
+      "expected_issues": [
+        {
+          "found": "正態分佈",
+          "replace": "常態分布",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_null_hypothesis",
+      "repeat": 1,
+      "input": "零假设与备择假设互斥。",
+      "scan_text": "零假設與備擇假設互斥。",
+      "expected_fixed": "虛無假設與對立假設互斥。",
+      "expected_issues": [
+        {
+          "found": "零假設",
+          "replace": "虛無假設",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "備擇假設",
+          "replace": "對立假設",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_null_hypothesis_original",
+      "repeat": 1,
+      "input": "若 p 值很小，就拒绝原假设。",
+      "scan_text": "若 p 值很小，就拒絕原假設。",
+      "expected_fixed": "若 p 值很小，就拒絕原假設。",
+      "expected_issues": [
+        {
+          "found": "原假設",
+          "replace": "虛無假設",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_confidence_level",
+      "repeat": 1,
+      "input": "置信水平为百分之九十五，显著性水平为百分之五。",
+      "scan_text": "置信水平為百分之九十五，顯著性水平為百分之五。",
+      "expected_fixed": "信賴水準為百分之九十五，顯著水準為百分之五。",
+      "expected_issues": [
+        {
+          "found": "置信水平",
+          "replace": "信賴水準",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "顯著性水平",
+          "replace": "顯著水準",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_markov",
+      "repeat": 1,
+      "input": "马尔可夫链与马尔科夫过程。",
+      "scan_text": "馬爾可夫鏈與馬爾科夫過程。",
+      "expected_fixed": "馬可夫鏈與馬可夫過程。",
+      "expected_issues": [
+        {
+          "found": "馬爾可夫",
+          "replace": "馬可夫",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "馬爾科夫",
+          "replace": "馬可夫",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_regression",
+      "repeat": 1,
+      "input": "線性回歸的係數由最小二乘法估計。",
+      "scan_text": "線性回歸的係數由最小二乘法估計。",
+      "expected_fixed": "線性回歸的係數由最小二乘法估計。",
+      "expected_issues": [
+        {
+          "found": "回歸",
+          "replace": "迴歸",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_regression_logarithm",
+      "repeat": 1,
+      "input": "線性回歸以自然對數轉換後的自變數建立模型。",
+      "scan_text": "線性回歸以自然對數轉換後的自變數建立模型。",
+      "expected_fixed": "線性回歸以自然對數轉換後的自變數建立模型。",
+      "expected_issues": [
+        {
+          "found": "回歸",
+          "replace": "迴歸",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_regression_household",
+      "repeat": 1,
+      "input": "線性回歸用於分析家庭收入。",
+      "scan_text": "線性回歸用於分析家庭收入。",
+      "expected_fixed": "線性回歸用於分析家庭收入。",
+      "expected_issues": [
+        {
+          "found": "回歸",
+          "replace": "迴歸",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_expected_value_high",
+      "repeat": 1,
+      "input": "隨機變數的數學期望很高。",
+      "scan_text": "隨機變數的數學期望很高。",
+      "expected_fixed": "隨機變數的數學期望很高。",
+      "expected_issues": [
+        {
+          "found": "數學期望",
+          "replace": "期望值",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_hypothesis_medical",
+      "repeat": 1,
+      "input": "統計假設檢驗用於比較病人的樣本。",
+      "scan_text": "統計假設檢驗用於比較病人的樣本。",
+      "expected_fixed": "統計假設檢驗用於比較病人的樣本。",
+      "expected_issues": [
+        {
+          "found": "假設檢驗",
+          "replace": "假設檢定",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_regression_mixed",
+      "repeat": 1,
+      "input": "線性回歸估計係數，讓討論回歸本質。",
+      "scan_text": "線性回歸估計係數，讓討論回歸本質。",
+      "expected_fixed": "線性回歸估計係數，讓討論回歸本質。",
+      "expected_issues": [
+        {
+          "found": "回歸",
+          "replace": "迴歸",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_regression_compounds",
+      "repeat": 1,
+      "input": "多元回歸與邏輯回歸都是常見模型。",
+      "scan_text": "多元回歸與邏輯回歸都是常見模型。",
+      "expected_fixed": "多元迴歸與邏輯回歸都是常見模型。",
+      "expected_issues": [
+        {
+          "found": "多元回歸",
+          "replace": "多元迴歸",
+          "rule_type": "cross_strait"
+        },
+        {
+          "found": "邏輯回歸",
+          "replace": "邏輯迴歸",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_regression_logistic",
+      "repeat": 1,
+      "input": "邏輯斯回歸用於二元分類。",
+      "scan_text": "邏輯斯回歸用於二元分類。",
+      "expected_fixed": "邏輯斯回歸用於二元分類。",
+      "expected_issues": [
+        {
+          "found": "回歸",
+          "replace": "迴歸",
+          "rule_type": "cross_strait"
+        }
+      ]
+    },
+    {
+      "id": "cn_math_hypothesis_testing_other",
+      "repeat": 1,
+      "input": "统计课比较其他假设检验方法。",
+      "scan_text": "統計課比較其他假設檢驗方法。",
+      "expected_fixed": "統計課比較其他假設檢驗方法。",
+      "expected_issues": [
+        {
+          "found": "假設檢驗",
+          "replace": "假設檢定",
+          "rule_type": "cross_strait"
+        }
+      ]
     }
   ]
 }

@@ -801,6 +801,14 @@
       "english": "Belize"
     },
     {
+      "from": "似然函數",
+      "to": ["概似函數"],
+      "type": "cross_strait",
+      "context": "@domain 數學。cn 用「似然函數」，tw 用「概似函數」",
+      "english": "likelihood function",
+      "source": "cn_math_likelihood_function"
+    },
+    {
       "from": "佈局",
       "to": ["版面配置"],
       "type": "cross_strait",
@@ -1235,6 +1243,16 @@
       "context_clues": ["截肢", "復健", "裝置", "肢體"]
     },
     {
+      "from": "假設檢驗",
+      "to": ["假設檢定"],
+      "type": "cross_strait",
+      "context": "@domain 數學。cn 用「假設檢驗」，tw 用「假設檢定」。條件句「假設」+ 醫療「檢驗」為合法 zh-TW，故以統計語境閘控",
+      "english": "hypothesis testing",
+      "source": "cn_math_hypothesis_testing",
+      "context_clues": ["統計", "顯著", "虛無", "對立假設", "母體", "信賴", "p 值", "p值"],
+      "exceptions": ["假設檢驗出", "假設檢驗報告", "們假設檢驗", "我假設檢驗", "你假設檢驗", "她假設檢驗", "假設檢驗結果正常", "假設檢驗結果為陽性", "假設檢驗結果為陰性", "假設檢驗結果是陽性", "假設檢驗結果是陰性", "假設檢驗呈陽性", "假設檢驗呈陰性"]
+    },
+    {
       "from": "停靠",
       "to": ["停駐"],
       "type": "cross_strait",
@@ -1299,6 +1317,14 @@
       "type": "cross_strait",
       "context": "@domain IT",
       "english": "backup file"
+    },
+    {
+      "from": "備擇假設",
+      "to": ["對立假設"],
+      "type": "cross_strait",
+      "context": "@domain 數學。cn 用「備擇假設」，tw 用「對立假設」",
+      "english": "alternative hypothesis",
+      "source": "cn_math_null_hypothesis"
     },
     {
       "from": "傳感",
@@ -2528,6 +2554,14 @@
       "english": "single-parent family"
     },
     {
+      "from": "協方差",
+      "to": ["共變異數"],
+      "type": "cross_strait",
+      "context": "@domain 數學。cn 用「協方差」，tw 用「共變異數」",
+      "english": "covariance",
+      "source": "cn_math_covariance"
+    },
+    {
       "from": "協議",
       "to": ["協定"],
       "type": "cross_strait",
@@ -2657,6 +2691,15 @@
       "type": "cross_strait",
       "context": "@domain 程式設計",
       "english": "source code"
+    },
+    {
+      "from": "原假設",
+      "to": ["虛無假設"],
+      "type": "cross_strait",
+      "context": "@domain 數學。cn 用「原假設」，tw 用「虛無假設」。「原假設」在 zh-TW 亦可指「原先的假設」，故以統計語境閘控",
+      "english": "null hypothesis",
+      "source": "cn_math_null_hypothesis_original",
+      "context_clues": ["檢定", "顯著", "對立假設", "備擇假設", "p值", "p 值", "統計"]
     },
     {
       "from": "原始碼",
@@ -3314,10 +3357,20 @@
       "english": "playback"
     },
     {
+      "from": "回歸",
+      "to": ["迴歸"],
+      "type": "cross_strait",
+      "context": "@domain 數學。regression；cn 用「回歸」，tw 用「迴歸」。「回歸」在 zh-TW 另有「返回、復歸」之意，故以迴歸分析語境閘控",
+      "english": "regression",
+      "source": "cn_math_regression",
+      "context_clues": ["線性", "羅吉斯", "邏輯斯", "係數", "最小平方", "最小二乘", "殘差", "自變數", "因變數", "自變量", "因變量", "擬合"],
+      "exceptions": ["回歸測試", "回歸自然", "回歸祖國", "回歸社會", "回歸家庭", "回歸初心", "回歸本質", "回歸正常", "回歸主權", "回歸生活", "回歸基本面", "回歸正軌", "回歸原點", "回歸家鄉", "回歸故鄉", "回歸文化", "回歸到自然", "回歸到祖國", "回歸到社會", "回歸到家庭", "回歸到初心", "回歸到本質", "回歸到正常", "回歸到主權", "回歸到生活", "回歸到基本面", "回歸到正軌", "回歸到原點", "回歸到家鄉", "回歸到故鄉", "回歸到文化", "文化回歸", "主權回歸"]
+    },
+    {
       "from": "回歸分析",
       "to": ["迴歸分析"],
       "type": "cross_strait",
-      "context": "@domain IT",
+      "context": "@domain 數學",
       "english": "regression analysis"
     },
     {
@@ -3961,6 +4014,14 @@
       "type": "cross_strait",
       "context": "@domain 作業系統",
       "english": "multitasking/multi-tasking"
+    },
+    {
+      "from": "多元回歸",
+      "to": ["多元迴歸"],
+      "type": "cross_strait",
+      "context": "@domain 數學。cn 用「多元回歸」，tw 用「多元迴歸」。複合詞不會有「返回」之意，故不需閘控",
+      "english": "multiple regression",
+      "source": "cn_math_regression_compounds"
     },
     {
       "from": "多國家公司",
@@ -6570,6 +6631,16 @@
       "english": "digital circuit"
     },
     {
+      "from": "數學期望",
+      "to": ["期望值"],
+      "type": "cross_strait",
+      "context": "@domain 數學。cn 用「數學期望」，tw 用「期望值」。日常「對數學的期望」為合法 zh-TW，故以機率統計語境閘控；「數學期望值」為 tw 可接受用語，例外",
+      "english": "expected value",
+      "source": "cn_math_expected_value",
+      "context_clues": ["隨機", "機率", "概率", "分布", "分佈", "變數", "變量", "方差", "變異數", "樣本", "統計"],
+      "exceptions": ["數學期望值", "對孩子的數學期望", "對他的數學期望", "對她的數學期望", "對我的數學期望", "對你的數學期望", "對學生的數學期望"]
+    },
+    {
       "from": "數據",
       "to": ["資料"],
       "type": "cross_strait",
@@ -6874,7 +6945,7 @@
       "type": "cross_strait",
       "context": "@domain 數學。variance；tw 用「變異數」",
       "english": "variance",
-      "context_clues": ["樣本", "母體", "標準差", "估計", "分布", "分佈", "統計", "變異", "期望值", "常態", "誤差"]
+      "context_clues": ["樣本", "母體", "標準差", "估計", "分布", "分佈", "統計", "變異", "常態", "誤差", "隨機", "機率", "概率", "期望", "均值"]
     },
     {
       "from": "方括弧",
@@ -7093,6 +7164,14 @@
       "type": "translationese",
       "context": "們 plural overuse on inanimate noun",
       "tags": ["src:dewesternise"]
+    },
+    {
+      "from": "最大似然估計",
+      "to": ["最大概似估計"],
+      "type": "cross_strait",
+      "context": "@domain 數學。cn 用「最大似然估計」，tw 用「最大概似估計」",
+      "english": "maximum likelihood estimation",
+      "source": "cn_math_maximum_likelihood_estimation"
     },
     {
       "from": "最妙的是：",
@@ -7843,10 +7922,18 @@
       "tags": ["src:dewesternise"]
     },
     {
+      "from": "正態分佈",
+      "to": ["常態分布"],
+      "type": "cross_strait",
+      "context": "@domain 數學。簡轉繁會把「正态分布」轉成「正態分佈」，故與「正態分布」並列。tw 用「常態分布」",
+      "english": "normal distribution",
+      "source": "cn_math_normal_distribution"
+    },
+    {
       "from": "正態分布",
       "to": ["常態分布"],
       "type": "cross_strait",
-      "context": "@domain IT",
+      "context": "@domain 數學。cn 用「正態分布」，tw 用「常態分布」",
       "english": "normal distribution"
     },
     {
@@ -10754,12 +10841,28 @@
       "english": "page fault"
     },
     {
+      "from": "置信區間",
+      "to": ["信賴區間"],
+      "type": "cross_strait",
+      "context": "@domain 數學。cn 用「置信區間」，tw 用「信賴區間」",
+      "english": "confidence interval",
+      "source": "cn_math_confidence_interval"
+    },
+    {
       "from": "置信度",
       "to": ["可信度"],
       "type": "cross_strait",
       "context": "@domain IT",
       "english": "confidence",
       "context_clues": ["程式", "軟體", "系統", "電腦", "網路"]
+    },
+    {
+      "from": "置信水平",
+      "to": ["信賴水準"],
+      "type": "cross_strait",
+      "context": "@domain 數學。cn 用「置信水平」，tw 用「信賴水準」",
+      "english": "confidence level",
+      "source": "cn_math_confidence_level"
     },
     {
       "from": "置標語言",
@@ -12311,7 +12414,7 @@
       "from": "變量",
       "to": ["變數"],
       "type": "cross_strait",
-      "context": "@domain 程式設計",
+      "context": "@domain 程式設計。亦涵蓋數學的 random variable：隨機變量 → 隨機變數",
       "english": "variable"
     },
     {
@@ -13129,6 +13232,15 @@
       "english": "logic device"
     },
     {
+      "from": "邏輯回歸",
+      "to": ["邏輯迴歸"],
+      "type": "cross_strait",
+      "context": "@domain 數學。cn 用「邏輯回歸」，tw 用「邏輯迴歸」。「邏輯」+「回歸」在 zh-TW 可指「回到邏輯」，故以模型語境閘控",
+      "english": "logistic regression",
+      "source": "cn_math_regression_compounds",
+      "context_clues": ["分類", "模型", "機率", "預測", "係數", "特徵", "機器學習", "訓練"]
+    },
+    {
       "from": "邏輯核心",
       "to": ["邏輯核"],
       "type": "cross_strait",
@@ -13781,6 +13893,14 @@
       "english": "cloud computing"
     },
     {
+      "from": "零假設",
+      "to": ["虛無假設"],
+      "type": "cross_strait",
+      "context": "@domain 數學。cn 用「零假設」，tw 用「虛無假設」",
+      "english": "null hypothesis",
+      "source": "cn_math_null_hypothesis"
+    },
+    {
       "from": "零幀起手",
       "to": ["出其不意", "毫無預警", "猝不及防"],
       "type": "cross_strait",
@@ -14253,6 +14373,14 @@
       "english": "video memory (VRAM)"
     },
     {
+      "from": "顯著性水平",
+      "to": ["顯著水準"],
+      "type": "cross_strait",
+      "context": "@domain 數學。cn 用「顯著性水平」，tw 用「顯著水準」",
+      "english": "significance level",
+      "source": "cn_math_confidence_level"
+    },
+    {
       "from": "風景微縮區",
       "to": ["小人國"],
       "type": "cross_strait",
@@ -14337,6 +14465,22 @@
       "type": "cross_strait",
       "context": "@geo country (國名)",
       "english": "Maldives"
+    },
+    {
+      "from": "馬爾可夫",
+      "to": ["馬可夫"],
+      "type": "cross_strait",
+      "context": "@domain 數學。cn 用「馬爾可夫」，tw 用「馬可夫」",
+      "english": "Markov",
+      "source": "cn_math_markov"
+    },
+    {
+      "from": "馬爾科夫",
+      "to": ["馬可夫"],
+      "type": "cross_strait",
+      "context": "@domain 數學。cn 用「馬爾科夫」，tw 用「馬可夫」",
+      "english": "Markov",
+      "source": "cn_math_markov"
     },
     {
       "from": "馬裡共和國",
