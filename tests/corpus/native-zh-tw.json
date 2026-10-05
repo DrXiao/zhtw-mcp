@@ -1186,6 +1186,286 @@
       "must_be_clean": true,
       "expected_fixed": "這顆行星的質量是地球的兩倍。產品測試由另一組負責。他順利通過。系統稍後更新。癌症資料另存。系統正在整理紀錄。",
       "expected_issues": []
+    },
+    {
+      "id": "native_math_covariance",
+      "repeat": 1,
+      "input": "兩個隨機變數的共變異數為零。",
+      "must_be_clean": true,
+      "expected_fixed": "兩個隨機變數的共變異數為零。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_random_variable",
+      "repeat": 1,
+      "input": "隨機變數的取值為零或一。",
+      "must_be_clean": true,
+      "expected_fixed": "隨機變數的取值為零或一。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_expected_value",
+      "repeat": 1,
+      "input": "期望值是加權平均值。",
+      "must_be_clean": true,
+      "expected_fixed": "期望值是加權平均值。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_likelihood_function",
+      "repeat": 1,
+      "input": "概似函數用於統計推論。",
+      "must_be_clean": true,
+      "expected_fixed": "概似函數用於統計推論。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_maximum_likelihood_estimation",
+      "repeat": 1,
+      "input": "最大概似估計用於估計母數。",
+      "must_be_clean": true,
+      "expected_fixed": "最大概似估計用於估計母數。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_confidence_interval",
+      "repeat": 1,
+      "input": "信賴區間反映估計的不確定性。",
+      "must_be_clean": true,
+      "expected_fixed": "信賴區間反映估計的不確定性。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_hypothesis_testing",
+      "repeat": 1,
+      "input": "假設檢定用於統計推論。",
+      "must_be_clean": true,
+      "expected_fixed": "假設檢定用於統計推論。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_expected_value_daily",
+      "repeat": 1,
+      "input": "家長對孩子的數學期望很高。",
+      "must_be_clean": true,
+      "expected_fixed": "家長對孩子的數學期望很高。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_expected_value_suffix",
+      "repeat": 1,
+      "input": "樣本的數學期望值等於母體平均。",
+      "must_be_clean": true,
+      "expected_fixed": "樣本的數學期望值等於母體平均。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_hypothesis_conditional",
+      "repeat": 1,
+      "input": "假設檢驗結果正常，就可以出院。",
+      "must_be_clean": true,
+      "expected_fixed": "假設檢驗結果正常，就可以出院。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_hypothesis_positive",
+      "repeat": 1,
+      "input": "假設檢驗出陽性，應立即隔離。",
+      "must_be_clean": true,
+      "expected_fixed": "假設檢驗出陽性，應立即隔離。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_hypothesis_lab",
+      "repeat": 1,
+      "input": "實驗室統計樣本後，假設檢驗出異常就重做。",
+      "must_be_clean": true,
+      "expected_fixed": "實驗室統計樣本後，假設檢驗出異常就重做。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_hypothesis_assume",
+      "repeat": 1,
+      "input": "我們假設檢驗過程無誤，統計顯著。",
+      "must_be_clean": true,
+      "expected_fixed": "我們假設檢驗過程無誤，統計顯著。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_expected_value_class",
+      "repeat": 1,
+      "input": "機率課上，老師對他的數學期望很高。",
+      "must_be_clean": true,
+      "expected_fixed": "機率課上，老師對他的數學期望很高。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_normal_distribution",
+      "repeat": 1,
+      "input": "樣本服從常態分布，也可寫作常態分佈。",
+      "must_be_clean": true,
+      "expected_fixed": "樣本服從常態分布，也可寫作常態分佈。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_null_hypothesis",
+      "repeat": 1,
+      "input": "虛無假設與對立假設互斥。",
+      "must_be_clean": true,
+      "expected_fixed": "虛無假設與對立假設互斥。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_original_assumption",
+      "repeat": 1,
+      "input": "這和我們的原假設不同，計畫要重新規劃。",
+      "must_be_clean": true,
+      "expected_fixed": "這和我們的原假設不同，計畫要重新規劃。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_confidence_level",
+      "repeat": 1,
+      "input": "信賴水準為百分之九十五，顯著水準為百分之五。",
+      "must_be_clean": true,
+      "expected_fixed": "信賴水準為百分之九十五，顯著水準為百分之五。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_markov",
+      "repeat": 1,
+      "input": "馬可夫鏈與馬可夫過程。",
+      "must_be_clean": true,
+      "expected_fixed": "馬可夫鏈與馬可夫過程。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_regression",
+      "repeat": 1,
+      "input": "線性迴歸的係數由最小平方法估計。",
+      "must_be_clean": true,
+      "expected_fixed": "線性迴歸的係數由最小平方法估計。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_regression_return",
+      "repeat": 1,
+      "input": "退休後他回歸家庭生活，也重視回歸測試。",
+      "must_be_clean": true,
+      "expected_fixed": "退休後他回歸家庭生活，也重視回歸測試。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_regression_nature",
+      "repeat": 1,
+      "input": "這個模型讓設計回歸本質。",
+      "must_be_clean": true,
+      "expected_fixed": "這個模型讓設計回歸本質。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_regression_broad_clue",
+      "repeat": 1,
+      "input": "邏輯上，球隊應回歸基本面，讓多元文化回歸。",
+      "must_be_clean": true,
+      "expected_fixed": "邏輯上，球隊應回歸基本面，讓多元文化回歸。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_bayes_poisson",
+      "repeat": 1,
+      "input": "貝葉斯定理與泊松分布都是常用工具。",
+      "must_be_clean": true,
+      "expected_fixed": "貝葉斯定理與泊松分布都是常用工具。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_regression_return_with_clue",
+      "repeat": 1,
+      "input": "線性規劃讓設計回歸自然。",
+      "must_be_clean": true,
+      "expected_fixed": "線性規劃讓設計回歸自然。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_regression_test_with_clue",
+      "repeat": 1,
+      "input": "線性模型的回歸測試已完成。",
+      "must_be_clean": true,
+      "expected_fixed": "線性模型的回歸測試已完成。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_hypothesis_medical_with_clue",
+      "repeat": 1,
+      "input": "統計樣本後，假設檢驗結果正常就可以出院。",
+      "must_be_clean": true,
+      "expected_fixed": "統計樣本後，假設檢驗結果正常就可以出院。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_regression_return_to",
+      "repeat": 1,
+      "input": "線性規劃讓生活回歸到正常。",
+      "must_be_clean": true,
+      "expected_fixed": "線性規劃讓生活回歸到正常。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_regression_culture_subject",
+      "repeat": 1,
+      "input": "線性設計讓多元文化回歸。",
+      "must_be_clean": true,
+      "expected_fixed": "線性設計讓多元文化回歸。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_regression_compounds",
+      "repeat": 1,
+      "input": "多元迴歸與邏輯迴歸都是常見模型。",
+      "must_be_clean": true,
+      "expected_fixed": "多元迴歸與邏輯迴歸都是常見模型。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_original_assumption_test",
+      "repeat": 1,
+      "input": "檢驗結果與原假設不同，需要重新設計實驗。",
+      "must_be_clean": true,
+      "expected_fixed": "檢驗結果與原假設不同，需要重新設計實驗。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_hypothesis_lab_report",
+      "repeat": 1,
+      "input": "假設檢驗報告顯示樣本受到汙染，就重新取樣。",
+      "must_be_clean": true,
+      "expected_fixed": "假設檢驗報告顯示樣本受到汙染，就重新取樣。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_original_assumption_reject",
+      "repeat": 1,
+      "input": "工程師拒絕原假設，改採另一套設計。",
+      "must_be_clean": true,
+      "expected_fixed": "工程師拒絕原假設，改採另一套設計。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_hypothesis_lab_report_with_clue",
+      "repeat": 1,
+      "input": "統計樣本後，假設檢驗報告顯示異常就重新取樣。",
+      "must_be_clean": true,
+      "expected_fixed": "統計樣本後，假設檢驗報告顯示異常就重新取樣。",
+      "expected_issues": []
+    },
+    {
+      "id": "native_math_logic_return",
+      "repeat": 1,
+      "input": "讓討論的邏輯回歸常識。",
+      "must_be_clean": true,
+      "expected_fixed": "讓討論的邏輯回歸常識。",
+      "expected_issues": []
     }
   ]
 }
